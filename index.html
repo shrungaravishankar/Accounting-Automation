@@ -30,7 +30,8 @@
 {
   "imports": {
     "aws-amplify": "./amplify-bundle.js",
-    "aws-amplify/auth": "./amplify-bundle.js"
+    "aws-amplify/auth": "./amplify-bundle.js",
+    "aws-amplify/data": "./amplify-bundle.js"
   }
 }
 </script>
@@ -63,6 +64,17 @@
 .auth-dd-role { display:inline-block; margin-top:6px; font-size:10px; color:#a5b4fc; background:#1e1b4b; padding:2px 7px; border-radius:10px; text-transform:uppercase; letter-spacing:.5px; }
 .auth-dd-item { display:flex; align-items:center; gap:8px; padding:9px 12px; font-size:13px; color:#e5e7eb; cursor:pointer; border-radius:5px; background:transparent; border:none; width:100%; text-align:left; font-family:inherit; }
 .auth-dd-item:hover { background:#1f2937; color:#fca5a5; }
+.auth-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:99998; padding:20px; }
+.auth-modal { background:#12131f; border:1px solid #3a3560; border-radius:12px; padding:28px; width:100%; max-width:440px; font-family:'IBM Plex Sans',sans-serif; }
+.auth-modal h3 { color:#3b82f6; font-size:18px; margin:0 0 4px; }
+.auth-modal p.sub { color:#9ca3af; font-size:13px; margin:0 0 18px; }
+.auth-modal .auth-field { margin-bottom:12px; }
+.auth-modal select { width:100%; padding:10px 13px; border:1px solid #3a3560; border-radius:6px; background:#0a0b14; color:#e5e7eb; font-size:14px; outline:none; font-family:inherit; }
+.auth-modal .auth-row { display:flex; gap:10px; margin-top:18px; }
+.auth-modal .auth-btn-secondary { flex:1; padding:11px 18px; background:transparent; color:#9ca3af; border:1px solid #374151; border-radius:6px; font-size:14px; cursor:pointer; font-family:inherit; }
+.auth-modal .auth-btn-secondary:hover { background:#1f2937; color:#e5e7eb; }
+.auth-modal .auth-btn { flex:1; }
+.auth-success { background:#1a3d2a; color:#86efac; border:1px solid #2a5a3a; padding:11px 15px; border-radius:6px; font-size:13px; margin-bottom:12px; }
 .auth-hidden { display:none !important; }
 </style>
 
@@ -94,21 +106,52 @@
 </div>
 
 <div id="auth-user-menu" class="auth-user-menu auth-hidden">
-  <button id="auth-avatar" class="auth-avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Open user menu">U</button>
+  <button id="auth-avatar" class="auth-avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Open user menu">??</button>
   <div id="auth-dropdown" class="auth-dropdown" role="menu">
     <div class="auth-dd-user">
       <div id="auth-dd-name" class="auth-dd-name">User</div>
       <div id="auth-dd-email" class="auth-dd-email">&nbsp;</div>
       <span id="auth-dd-role" class="auth-dd-role">role</span>
     </div>
+    <button id="auth-manage-users-btn" class="auth-dd-item auth-hidden" type="button" role="menuitem">Manage Users</button>
     <button id="auth-signout-btn" class="auth-dd-item" type="button" role="menuitem">Sign out</button>
+  </div>
+</div>
+
+<div id="invite-modal" class="auth-modal-overlay auth-hidden">
+  <div class="auth-modal">
+    <h3>Invite a User</h3>
+    <p class="sub">They will receive a temporary password by email.</p>
+    <div class="auth-field">
+      <label class="auth-label">Email</label>
+      <input type="email" id="invite-email" class="auth-input" placeholder="user@bcl.ae" autocomplete="off"/>
+    </div>
+    <div class="auth-field">
+      <label class="auth-label">Full name</label>
+      <input type="text" id="invite-name" class="auth-input" placeholder="Jane Doe" autocomplete="off"/>
+    </div>
+    <div class="auth-field">
+      <label class="auth-label">Role</label>
+      <select id="invite-role">
+        <option value="staff">Staff</option>
+        <option value="admin">Admin</option>
+      </select>
+    </div>
+    <div id="invite-error" class="auth-error auth-hidden"></div>
+    <div id="invite-success" class="auth-success auth-hidden"></div>
+    <div class="auth-row">
+      <button class="auth-btn-secondary" id="invite-cancel">Cancel</button>
+      <button class="auth-btn" id="invite-submit">Send invite →</button>
+    </div>
   </div>
 </div>
 
 <script type="module">
 import { Amplify } from 'aws-amplify';
 import { signIn, signOut, confirmSignIn, getCurrentUser, fetchAuthSession, fetchUserAttributes } from 'aws-amplify/auth';
+import { generateClient } from 'aws-amplify/data';
 
+const dataClient = generateClient();
 const $ = id => document.getElementById(id);
 const show = id => $(id).classList.remove('auth-hidden');
 const hide = id => $(id).classList.add('auth-hidden');
@@ -127,6 +170,11 @@ function populateUserMenu() {
   $('auth-dd-name').textContent = name;
   $('auth-dd-email').textContent = u.email || '';
   $('auth-dd-role').textContent = u.role || 'user';
+  if (u.role === 'admin') {
+    $('auth-manage-users-btn').classList.remove('auth-hidden');
+  } else {
+    $('auth-manage-users-btn').classList.add('auth-hidden');
+  }
 }
 
 try {
@@ -236,6 +284,50 @@ $('auth-signout-btn').addEventListener('click', async () => {
   if (!confirm('Sign out?')) return;
   try { await signOut(); } catch (_) {}
   window.location.reload();
+});
+
+// ===== Manage Users (admin only) =====
+function openInviteModal() {
+  $('auth-dropdown').classList.remove('auth-open');
+  $('invite-email').value = '';
+  $('invite-name').value = '';
+  $('invite-role').value = 'staff';
+  hideError('invite-error');
+  $('invite-success').classList.add('auth-hidden');
+  show('invite-modal');
+}
+function closeInviteModal() { hide('invite-modal'); }
+
+$('auth-manage-users-btn').addEventListener('click', openInviteModal);
+$('invite-cancel').addEventListener('click', closeInviteModal);
+$('invite-modal').addEventListener('click', (e) => { if (e.target === $('invite-modal')) closeInviteModal(); });
+
+$('invite-submit').addEventListener('click', async () => {
+  const email = $('invite-email').value.trim().toLowerCase();
+  const fullName = $('invite-name').value.trim();
+  const role = $('invite-role').value;
+  hideError('invite-error');
+  $('invite-success').classList.add('auth-hidden');
+  if (!email || !fullName) { showError('invite-error', 'Email and full name are required.'); return; }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showError('invite-error', 'Enter a valid email.'); return; }
+  const btn = $('invite-submit');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const res = await dataClient.mutations.inviteUser({ email, fullName, role });
+    const result = res.data;
+    if (result && result.success) {
+      const succ = $('invite-success');
+      succ.textContent = result.message;
+      succ.classList.remove('auth-hidden');
+      $('invite-email').value = ''; $('invite-name').value = '';
+    } else {
+      showError('invite-error', (result && result.message) || 'Failed to invite user.');
+    }
+  } catch (e) {
+    showError('invite-error', (e && e.message) || String(e));
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send invite →';
+  }
 });
 </script>
 <!-- ====== END AUTH WRAPPER ====== -->
