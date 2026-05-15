@@ -95,6 +95,63 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 .user-self-tag { font-size:9px; padding:3px 8px; border-radius:4px; background:#f0ecfb; color:#6958C2; font-weight:600; text-transform:uppercase; letter-spacing:.3px; }
 .reveal-pwd-box { background:#f7f5fc; border:2px dashed #6958C2; border-radius:8px; padding:16px; font-family:'IBM Plex Mono',monospace; font-size:18px; text-align:center; color:#001441; letter-spacing:2px; word-break:break-all; margin:8px 0 16px; font-weight:700; }
 .user-status { font-size:9px; padding:3px 8px; border-radius:4px; font-weight:600; text-transform:uppercase; letter-spacing:.3px; }
+/* ===== SCENIC LOGIN BACKGROUND ===== */
+.auth-overlay-scenic { background: linear-gradient(135deg, #f7f5fc 0%, #efe8fa 50%, #f5eff8 100%) !important; overflow: hidden; }
+.auth-overlay-scenic .auth-card { position: relative; z-index: 10; }
+.auth-bg-scene { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
+.auth-bg-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(105,88,194,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(105,88,194,.07) 1px, transparent 1px);
+  background-size: 48px 48px;
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 18%, rgba(0,0,0,.7) 75%);
+  mask-image: radial-gradient(ellipse at center, transparent 18%, rgba(0,0,0,.7) 75%);
+}
+.auth-bg-orb { position: absolute; border-radius: 50%; filter: blur(22px); animation: orb-float 14s ease-in-out infinite; }
+.auth-bg-orb-1 { top: 8%; left: 6%; width: 180px; height: 180px; background: radial-gradient(circle at 30% 30%, #8576C8, #4D3FA0); opacity: 0.30; animation-delay: 0s; }
+.auth-bg-orb-2 { top: 64%; left: 10%; width: 130px; height: 130px; background: radial-gradient(circle at 30% 30%, #6958C2, #2A246C); opacity: 0.24; animation-delay: 3s; }
+.auth-bg-orb-3 { top: 10%; right: 8%; width: 220px; height: 220px; background: radial-gradient(circle at 30% 30%, #4D3FA0, #1E1865); opacity: 0.22; animation-delay: 6s; }
+.auth-bg-orb-4 { bottom: 10%; right: 12%; width: 170px; height: 170px; background: radial-gradient(circle at 30% 30%, #6958C2, #4D3FA0); opacity: 0.26; animation-delay: 2s; }
+.auth-bg-orb-5 { bottom: 38%; left: 30%; width: 110px; height: 110px; background: radial-gradient(circle at 30% 30%, #8576C8, #6958C2); opacity: 0.20; animation-delay: 5s; }
+.auth-bg-orb-6 { top: 45%; right: 35%; width: 90px; height: 90px; background: radial-gradient(circle at 30% 30%, #6958C2, #8576C8); opacity: 0.18; animation-delay: 8s; }
+@keyframes orb-float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(40px, -50px) scale(1.08); }
+  66% { transform: translate(-30px, 40px) scale(0.94); }
+}
+.auth-bg-lines { position: absolute; inset: 0; width: 100%; height: 100%; }
+.auth-bg-line { fill: none; stroke: rgba(105, 88, 194, 0.30); stroke-width: 1.5; stroke-dasharray: 6 12; animation: line-flow 25s linear infinite; }
+.auth-bg-line-d2 { animation-delay: -8s; stroke: rgba(133, 118, 200, 0.25); }
+.auth-bg-line-d3 { animation-delay: -15s; stroke: rgba(77, 63, 160, 0.30); }
+@keyframes line-flow { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -300; } }
+.auth-bg-symbol { position: absolute; font-family: 'IBM Plex Mono', monospace; font-weight: 700; color: rgba(77, 63, 160, 0.32); user-select: none; animation: symbol-drift 16s ease-in-out infinite; pointer-events: none; }
+.auth-bg-symbol-1 { top: 18%; left: 18%; font-size: 44px; animation-delay: 0s; }
+.auth-bg-symbol-2 { top: 56%; left: 18%; font-size: 30px; animation-delay: 3s; }
+.auth-bg-symbol-3 { top: 28%; right: 22%; font-size: 36px; animation-delay: 6s; }
+.auth-bg-symbol-4 { bottom: 22%; left: 26%; font-size: 38px; animation-delay: 2s; }
+.auth-bg-symbol-5 { bottom: 42%; right: 18%; font-size: 42px; animation-delay: 5s; }
+.auth-bg-symbol-6 { top: 78%; left: 48%; font-size: 28px; animation-delay: 8s; }
+.auth-bg-symbol-7 { top: 12%; right: 38%; font-size: 32px; animation-delay: 11s; }
+.auth-bg-symbol-8 { bottom: 14%; right: 30%; font-size: 26px; animation-delay: 14s; }
+.auth-bg-symbol-9 { top: 38%; left: 8%; font-size: 24px; animation-delay: 9s; }
+.auth-bg-symbol-10 { top: 68%; right: 8%; font-size: 30px; animation-delay: 12s; }
+@keyframes symbol-drift {
+  0% { transform: translate(0, 0) rotate(0deg); opacity: 0; }
+  15%, 85% { opacity: 1; }
+  50% { transform: translate(-18px, -28px) rotate(4deg); }
+  100% { transform: translate(-36px, -56px) rotate(-2deg); opacity: 0; }
+}
+.auth-bg-number { position: absolute; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: rgba(105, 88, 194, 0.22); user-select: none; letter-spacing: 1px; animation: number-fade 10s ease-in-out infinite; }
+.auth-bg-num-1 { top: 24%; left: 38%; animation-delay: 0s; }
+.auth-bg-num-2 { top: 72%; left: 60%; animation-delay: 2.5s; }
+.auth-bg-num-3 { top: 16%; left: 62%; animation-delay: 5s; }
+.auth-bg-num-4 { bottom: 28%; left: 12%; animation-delay: 7.5s; }
+.auth-bg-num-5 { top: 50%; right: 28%; animation-delay: 4s; }
+@keyframes number-fade {
+  0%, 100% { opacity: 0; }
+  20%, 80% { opacity: 1; }
+}
 .user-status-active { background:#dcfce7; color:#15803d; border:1px solid #bbf7d0; }
 .user-status-pending { background:#fef3c7; color:#d97706; border:1px solid #fde68a; }
 .user-status-reset { background:#fee2e2; color:#dc2626; border:1px solid #fecaca; }
@@ -107,7 +164,37 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
   <div id="boot-msg" style="font-size:13px;color:#555555;">Loading…</div>
 </div>
 
-<div id="login-wrap" class="auth-overlay auth-hidden">
+<div id="login-wrap" class="auth-overlay auth-overlay-scenic auth-hidden">
+  <div class="auth-bg-scene">
+    <div class="auth-bg-grid"></div>
+    <div class="auth-bg-orb auth-bg-orb-1"></div>
+    <div class="auth-bg-orb auth-bg-orb-2"></div>
+    <div class="auth-bg-orb auth-bg-orb-3"></div>
+    <div class="auth-bg-orb auth-bg-orb-4"></div>
+    <div class="auth-bg-orb auth-bg-orb-5"></div>
+    <div class="auth-bg-orb auth-bg-orb-6"></div>
+    <svg class="auth-bg-lines" viewBox="0 0 1000 800" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+      <path class="auth-bg-line" d="M0,180 Q250,80 500,280 T1000,230"/>
+      <path class="auth-bg-line auth-bg-line-d2" d="M0,500 Q300,400 600,560 T1000,500"/>
+      <path class="auth-bg-line auth-bg-line-d3" d="M0,700 Q400,600 700,760 T1000,710"/>
+      <path class="auth-bg-line auth-bg-line-d2" d="M0,340 Q200,420 500,360 T1000,400"/>
+    </svg>
+    <span class="auth-bg-symbol auth-bg-symbol-1">$</span>
+    <span class="auth-bg-symbol auth-bg-symbol-2">&#8377;</span>
+    <span class="auth-bg-symbol auth-bg-symbol-3">%</span>
+    <span class="auth-bg-symbol auth-bg-symbol-4">&#8364;</span>
+    <span class="auth-bg-symbol auth-bg-symbol-5">&#163;</span>
+    <span class="auth-bg-symbol auth-bg-symbol-6">&#8721;</span>
+    <span class="auth-bg-symbol auth-bg-symbol-7">+</span>
+    <span class="auth-bg-symbol auth-bg-symbol-8">=</span>
+    <span class="auth-bg-symbol auth-bg-symbol-9">&#247;</span>
+    <span class="auth-bg-symbol auth-bg-symbol-10">&#215;</span>
+    <span class="auth-bg-number auth-bg-num-1">1,250.00</span>
+    <span class="auth-bg-number auth-bg-num-2">45,800.50</span>
+    <span class="auth-bg-number auth-bg-num-3">99,999</span>
+    <span class="auth-bg-number auth-bg-num-4">3,400.25</span>
+    <span class="auth-bg-number auth-bg-num-5">12,475.80</span>
+  </div>
   <div class="auth-card">
     <div class="auth-title">BCL AutoLedger</div>
     <div class="auth-sub">Sign in to access the tool</div>
@@ -118,7 +205,17 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
   </div>
 </div>
 
-<div id="newpw-wrap" class="auth-overlay auth-hidden">
+<div id="newpw-wrap" class="auth-overlay auth-overlay-scenic auth-hidden">
+  <div class="auth-bg-scene">
+    <div class="auth-bg-grid"></div>
+    <div class="auth-bg-orb auth-bg-orb-1"></div>
+    <div class="auth-bg-orb auth-bg-orb-3"></div>
+    <div class="auth-bg-orb auth-bg-orb-4"></div>
+    <svg class="auth-bg-lines" viewBox="0 0 1000 800" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+      <path class="auth-bg-line" d="M0,180 Q250,80 500,280 T1000,230"/>
+      <path class="auth-bg-line auth-bg-line-d2" d="M0,500 Q300,400 600,560 T1000,500"/>
+    </svg>
+  </div>
   <div class="auth-card">
     <div class="auth-title" style="font-size:18px;">Choose a new password</div>
     <div class="auth-sub">First time signing in. Set a permanent password.</div>
