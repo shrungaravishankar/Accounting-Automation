@@ -1,0 +1,22 @@
+{
+  "name": "bcl-autoledger",
+  "version": "1.0.0",
+  "description": "BCL AutoLedger - accounting automation tool with Cognito auth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo Static site"
+  },
+  "dependencies": {
+    "aws-amplify": "^6.6.0"
+  },
+  "devDependencies": {
+    "@aws-amplify/backend": "^1.4.0",
+    "@aws-amplify/backend-cli": "^1.3.0",
+    "aws-cdk-lib": "^2.158.0",
+    "constructs": "^10.3.0",
+    "esbuild": "^0.23.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.0"
+  }
+}

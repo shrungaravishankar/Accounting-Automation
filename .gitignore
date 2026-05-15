@@ -1,0 +1,7 @@
+node_modules/
+.amplify/
+amplify_outputs.json
+amplify-bundle.js
+.npm/
+.DS_Store
+*.log

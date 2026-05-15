@@ -1,0 +1,24 @@
+version: 1
+backend:
+  phases:
+    build:
+      commands:
+        - npm install --cache .npm --prefer-offline
+        - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
+frontend:
+  phases:
+    build:
+      commands:
+        - npx esbuild amplify-entry.js --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=amplify-bundle.js
+  artifacts:
+    baseDirectory: .
+    files:
+      - 'index.html'
+      - 'amplify-bundle.js'
+      - 'amplify_outputs.json'
+      - '404.html'
+      - 'robots.txt'
+  cache:
+    paths:
+      - .npm/**/*
+      - node_modules/**/*
