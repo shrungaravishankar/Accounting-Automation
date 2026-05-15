@@ -44,6 +44,35 @@
 .auth-spinner { width:40px; height:40px; border:3px solid rgba(0,0,0,.1); border-top-color:#001441; border-radius:50%; animation:auth-spin 1s linear infinite; }
 .auth-card { background:#ffffff; border:1px solid #d8d2e8; border-radius:14px; padding:36px 32px; width:100%; max-width:380px; box-shadow:0 10px 40px rgba(105,88,194,0.10); }
 .auth-title { text-align:center; font-size:22px; font-weight:600; color:#001441; margin-bottom:4px; }
+/* ===== Animated logo + brand stack in login card ===== */
+.auth-logo-row { display:flex; align-items:center; justify-content:center; gap:14px; margin-bottom:6px; min-height:64px; }
+.auth-logo-dots { width:60px; height:60px; flex-shrink:0; animation: logo-enter 1.1s cubic-bezier(0.34, 1.56, 0.64, 1) both, logo-pulse 5s ease-in-out 1.6s infinite; transform-origin:center; }
+.auth-logo-dots circle { opacity:0; animation: dot-fade 0.55s ease-out both; transform-origin:center; }
+.auth-logo-dots circle:nth-child(1) { animation-delay:0.10s; }
+.auth-logo-dots circle:nth-child(2) { animation-delay:0.16s; }
+.auth-logo-dots circle:nth-child(3) { animation-delay:0.22s; }
+.auth-logo-dots circle:nth-child(4) { animation-delay:0.18s; }
+.auth-logo-dots circle:nth-child(5) { animation-delay:0.24s; }
+.auth-logo-dots circle:nth-child(6) { animation-delay:0.30s; }
+.auth-logo-dots circle:nth-child(7) { animation-delay:0.36s; }
+.auth-logo-dots circle:nth-child(8) { animation-delay:0.28s; }
+.auth-logo-dots circle:nth-child(9) { animation-delay:0.34s; }
+.auth-logo-dots circle:nth-child(10) { animation-delay:0.40s; }
+.auth-logo-dots circle:nth-child(11) { animation-delay:0.46s; }
+.auth-logo-dots circle:nth-child(12) { animation-delay:0.42s; }
+.auth-logo-dots circle:nth-child(13) { animation-delay:0.48s; }
+.auth-logo-dots circle:nth-child(14) { animation-delay:0.54s; }
+.auth-logo-dots circle:nth-child(15) { animation-delay:0.50s; }
+.auth-logo-dots circle:nth-child(16) { animation-delay:0.56s; }
+.auth-logo-dots circle:nth-child(17) { animation-delay:0.60s; }
+.auth-logo-dots circle:nth-child(18) { animation-delay:0.62s; }
+@keyframes dot-fade { from { opacity:0; transform:scale(0.3); } to { opacity:1; transform:scale(1); } }
+@keyframes logo-enter { 0% { transform:scale(0.2) rotate(-90deg); opacity:0; } 70% { transform:scale(1.1) rotate(8deg); opacity:1; } 100% { transform:scale(1) rotate(0deg); opacity:1; } }
+@keyframes logo-pulse { 0%, 100% { transform:scale(1) rotate(0deg); } 50% { transform:scale(1.05) rotate(3deg); } }
+.auth-logo-text { animation: text-slide 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.6s both; text-align:left; }
+@keyframes text-slide { from { opacity:0; transform:translateX(-14px); } to { opacity:1; transform:translateX(0); } }
+.auth-title-main { font-size:22px; font-weight:800; color:#001441; letter-spacing:-0.5px; line-height:1.05; }
+.auth-title-sub { font-size:14px; font-weight:600; color:#6958C2; letter-spacing:1.2px; margin-top:3px; text-transform:uppercase; }
 .auth-sub { text-align:center; font-size:13px; color:#555555; margin-bottom:24px; }
 .auth-field { margin-bottom:14px; }
 .auth-label { font-size:13px; color:#555555; display:block; margin-bottom:5px; }
@@ -196,8 +225,33 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
     <span class="auth-bg-number auth-bg-num-5">12,475.80</span>
   </div>
   <div class="auth-card">
-    <div class="auth-title">BCL AutoLedger</div>
-    <div class="auth-sub">Sign in to access the tool</div>
+    <div class="auth-logo-row">
+      <svg class="auth-logo-dots" viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="14" cy="10" r="3" fill="#1E1865"/>
+        <circle cx="28" cy="6" r="6" fill="#4D3FA0"/>
+        <circle cx="46" cy="9" r="7" fill="#4D3FA0"/>
+        <circle cx="8" cy="22" r="2.5" fill="#2A246C"/>
+        <circle cx="22" cy="24" r="5" fill="#6958C2"/>
+        <circle cx="38" cy="22" r="7" fill="#1E1865"/>
+        <circle cx="58" cy="26" r="6" fill="#8576C8"/>
+        <circle cx="5" cy="40" r="3" fill="#1E1865"/>
+        <circle cx="18" cy="42" r="5" fill="#4D3FA0"/>
+        <circle cx="34" cy="44" r="8" fill="#6958C2"/>
+        <circle cx="56" cy="42" r="5" fill="#8576C8"/>
+        <circle cx="68" cy="40" r="3" fill="#8576C8"/>
+        <circle cx="14" cy="58" r="2" fill="#1E1865"/>
+        <circle cx="28" cy="58" r="4" fill="#1E1865"/>
+        <circle cx="46" cy="60" r="3" fill="#1E1865"/>
+        <circle cx="60" cy="58" r="2" fill="#1E1865"/>
+        <circle cx="22" cy="72" r="2.5" fill="#2A246C"/>
+        <circle cx="42" cy="72" r="3" fill="#4D3FA0"/>
+      </svg>
+      <div class="auth-logo-text">
+        <div class="auth-title-main">BCL Globiz</div>
+        <div class="auth-title-sub">AutoLedger</div>
+      </div>
+    </div>
+    <div class="auth-sub" style="margin-top:14px;">Sign in to access the tool</div>
     <div class="auth-field"><label class="auth-label">Email</label><input type="email" id="login-email" class="auth-input" placeholder="you@bcl.ae" autocomplete="username"/></div>
     <div class="auth-field"><label class="auth-label">Password</label><input type="password" id="login-pwd" class="auth-input" placeholder="••••••" autocomplete="current-password"/></div>
     <div id="login-error" class="auth-error auth-hidden"></div>
