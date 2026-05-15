@@ -85,6 +85,15 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 .user-row-name { font-size:13px; color:#1a1a2e; font-weight:500; line-height:1.3; }
 .user-row-email { font-size:11px; color:#555555; margin-top:2px; word-break:break-all; }
 .user-row-meta { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.user-row-actions { display:flex; gap:5px; margin-left:6px; flex:0 0 auto; }
+.user-action-btn { padding:5px 10px; border-radius:5px; font-size:10px; font-weight:600; cursor:pointer; background:#ffffff; transition:all .15s; font-family:inherit; }
+.user-action-btn:disabled { opacity:.5; cursor:wait; }
+.user-action-reset { border:1px solid #d97706; color:#d97706; }
+.user-action-reset:hover:not(:disabled) { background:#fef3c7; }
+.user-action-delete { border:1px solid #dc2626; color:#dc2626; }
+.user-action-delete:hover:not(:disabled) { background:#fee2e2; }
+.user-self-tag { font-size:9px; padding:3px 8px; border-radius:4px; background:#f0ecfb; color:#6958C2; font-weight:600; text-transform:uppercase; letter-spacing:.3px; }
+.reveal-pwd-box { background:#f7f5fc; border:2px dashed #6958C2; border-radius:8px; padding:16px; font-family:'IBM Plex Mono',monospace; font-size:18px; text-align:center; color:#001441; letter-spacing:2px; word-break:break-all; margin:8px 0 16px; font-weight:700; }
 .user-status { font-size:9px; padding:3px 8px; border-radius:4px; font-weight:600; text-transform:uppercase; letter-spacing:.3px; }
 .user-status-active { background:#dcfce7; color:#15803d; border:1px solid #bbf7d0; }
 .user-status-pending { background:#fef3c7; color:#d97706; border:1px solid #fde68a; }
@@ -174,6 +183,19 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
         <button class="auth-btn-secondary" id="users-close-btn" style="flex:0 0 auto; min-width:120px;">Close</button>
         <button class="auth-btn" id="users-refresh-btn" style="flex:0 0 auto; min-width:120px;">Refresh</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="reveal-modal" class="auth-modal-overlay auth-hidden">
+  <div class="auth-modal" style="max-width:460px;">
+    <h3>New Temporary Password</h3>
+    <p class="sub">Share this securely with <strong id="reveal-email-label">the user</strong>. They will be required to change it on their next sign in.</p>
+    <div class="reveal-pwd-box" id="reveal-pwd-text"></div>
+    <div id="reveal-copied" class="auth-success auth-hidden">Copied to clipboard</div>
+    <div class="auth-row">
+      <button class="auth-btn-secondary" id="reveal-close-btn">Close</button>
+      <button class="auth-btn" id="reveal-copy-btn">Copy Password</button>
     </div>
   </div>
 </div>
@@ -365,9 +387,17 @@ async function loadUsersList() {
       container.innerHTML = '<div style="color:#555555;font-size:12px;padding:30px;text-align:center;">No users yet. Invite someone using the other tab.</div>';
       return;
     }
+    const myEmail = ((window.AUTH_USER && window.AUTH_USER.email) || '').toLowerCase();
     container.innerHTML = users.map(function(u) {
       const s = getStatusInfo(u.status);
       const displayName = u.name || (u.email || '').split('@')[0] || 'User';
+      const isSelf = u.email && u.email.toLowerCase() === myEmail;
+      const actions = isSelf
+        ? '<div class="user-row-actions"><span class="user-self-tag">You</span></div>'
+        : '<div class="user-row-actions">'
+          + '<button class="user-action-btn user-action-reset" data-action="reset" data-email="' + escapeHtml(u.email) + '" title="Generate new temporary password">Reset</button>'
+          + '<button class="user-action-btn user-action-delete" data-action="delete" data-email="' + escapeHtml(u.email) + '" data-name="' + escapeHtml(displayName) + '" title="Permanently delete this user">Delete</button>'
+          + '</div>';
       return '<div class="user-row">'
         + '<div style="flex:1;min-width:0;">'
         +   '<div class="user-row-name">' + escapeHtml(displayName) + '</div>'
@@ -377,6 +407,7 @@ async function loadUsersList() {
         +   '<span class="user-role">' + escapeHtml(u.role || 'none') + '</span>'
         +   '<span class="user-status user-status-' + s.cls + '">' + s.label + '</span>'
         + '</div>'
+        + actions
         + '</div>';
     }).join('');
   } catch (e) {
@@ -403,6 +434,86 @@ $('users-refresh-btn').addEventListener('click', loadUsersList);
 $('tab-invite-btn').addEventListener('click', function() { switchModalTab('invite'); });
 $('tab-list-btn').addEventListener('click', function() { switchModalTab('list'); });
 $('invite-modal').addEventListener('click', (e) => { if (e.target === $('invite-modal')) closeInviteModal(); });
+
+// ===== User action buttons (Reset / Delete) =====
+$('users-list-container').addEventListener('click', async function(e) {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.action;
+  const email = btn.dataset.email;
+  if (!action || !email) return;
+
+  if (action === 'reset') {
+    if (!confirm('Generate a new temporary password for ' + email + '?\n\nTheir current password will be invalidated. They must set a new one on next login.')) return;
+    await performUserAction('reset-password', email, btn);
+  } else if (action === 'delete') {
+    const name = btn.dataset.name || email;
+    if (!confirm('Delete user "' + name + '" (' + email + ') permanently?\n\nThis cannot be undone. All their access will be removed immediately.')) return;
+    if (!confirm('Are you absolutely sure? Type-style final confirmation:\n\nDeleting ' + email + ' is permanent.')) return;
+    await performUserAction('delete', email, btn);
+  }
+});
+
+async function performUserAction(action, email, btn) {
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '...';
+  try {
+    const res = await dataClient.mutations.manageUser({ email: email, action: action });
+    const result = res.data;
+    if (result && result.success) {
+      if (action === 'reset-password' && result.tempPassword) {
+        showRevealModal(email, result.tempPassword);
+      } else {
+        // For delete, just refresh — the row disappearing is the confirmation
+      }
+      loadUsersList();
+    } else {
+      alert((result && result.message) || 'Action failed.');
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  } catch (err) {
+    alert('Error: ' + (err && err.message ? err.message : String(err)));
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+function showRevealModal(email, password) {
+  $('reveal-email-label').textContent = email;
+  $('reveal-pwd-text').textContent = password;
+  $('reveal-copied').classList.add('auth-hidden');
+  show('reveal-modal');
+}
+
+$('reveal-close-btn').addEventListener('click', function() { hide('reveal-modal'); });
+$('reveal-modal').addEventListener('click', function(e) { if (e.target === $('reveal-modal')) hide('reveal-modal'); });
+
+$('reveal-copy-btn').addEventListener('click', async function() {
+  const pwd = $('reveal-pwd-text').textContent;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(pwd);
+    copied = true;
+  } catch (_) {
+    // Fallback to textarea selection
+    const tx = document.createElement('textarea');
+    tx.value = pwd;
+    tx.style.position = 'fixed';
+    tx.style.opacity = '0';
+    document.body.appendChild(tx);
+    tx.select();
+    try { document.execCommand('copy'); copied = true; } catch (_) {}
+    document.body.removeChild(tx);
+  }
+  if (copied) {
+    $('reveal-copied').classList.remove('auth-hidden');
+    setTimeout(function() { $('reveal-copied').classList.add('auth-hidden'); }, 3000);
+  } else {
+    alert('Could not copy automatically. Please select and copy the password manually.');
+  }
+});
 
 $('invite-submit').addEventListener('click', async () => {
   const email = $('invite-email').value.trim().toLowerCase();
