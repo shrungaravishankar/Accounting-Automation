@@ -1,6 +1,7 @@
 import { type ClientSchema, a, defineData } from '@aws-amplify/backend';
 import { inviteUser } from '../functions/invite-user/resource';
 import { listAppUsers } from '../functions/list-app-users/resource';
+import { manageUser } from '../functions/manage-user/resource';
 
 /**
  * AppSync GraphQL schema for BCL AutoLedger.
@@ -18,6 +19,12 @@ const schema = a.schema({
     message: a.string().required()
   }),
 
+  ManageResult: a.customType({
+    success: a.boolean().required(),
+    message: a.string().required(),
+    tempPassword: a.string()
+  }),
+
   inviteUser: a
     .mutation()
     .arguments({
@@ -33,7 +40,17 @@ const schema = a.schema({
     .query()
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(listAppUsers))
+    .handler(a.handler.function(listAppUsers)),
+
+  manageUser: a
+    .mutation()
+    .arguments({
+      email: a.string().required(),
+      action: a.string().required()
+    })
+    .returns(a.ref('ManageResult'))
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(manageUser))
 });
 
 export type Schema = ClientSchema<typeof schema>;
