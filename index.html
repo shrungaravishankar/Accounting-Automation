@@ -42,12 +42,12 @@
 @keyframes auth-spin { to { transform: rotate(360deg); } }
 .auth-overlay { position:fixed; inset:0; background:#ffffff; display:flex; align-items:center; justify-content:center; padding:24px; z-index:99999; font-family:'IBM Plex Sans',-apple-system,sans-serif; }
 .auth-spinner { width:40px; height:40px; border:3px solid rgba(0,0,0,.1); border-top-color:#001441; border-radius:50%; animation:auth-spin 1s linear infinite; }
-.auth-card { background:#ffffff; border:1px solid #cccccc; border-radius:14px; padding:36px 32px; width:100%; max-width:380px; }
+.auth-card { background:#ffffff; border:1px solid #d8d2e8; border-radius:14px; padding:36px 32px; width:100%; max-width:380px; box-shadow:0 10px 40px rgba(105,88,194,0.10); }
 .auth-title { text-align:center; font-size:22px; font-weight:600; color:#001441; margin-bottom:4px; }
-.auth-sub { text-align:center; font-size:13px; color:#9ca3af; margin-bottom:24px; }
+.auth-sub { text-align:center; font-size:13px; color:#555555; margin-bottom:24px; }
 .auth-field { margin-bottom:14px; }
-.auth-label { font-size:13px; color:#9ca3af; display:block; margin-bottom:5px; }
-.auth-input { width:100%; padding:10px 13px; border:1px solid #cccccc; border-radius:6px; background:#ffffff; color:#e5e7eb; font-size:14px; outline:none; font-family:inherit; }
+.auth-label { font-size:13px; color:#555555; display:block; margin-bottom:5px; }
+.auth-input { width:100%; padding:10px 13px; border:1px solid #cccccc; border-radius:6px; background:#ffffff; color:#1a1a2e; font-size:14px; outline:none; font-family:inherit; }
 .auth-input:focus { border-color:#001441; }
 .auth-error { background:#fee2e2; color:#dc2626; border:1px solid #fecaca; padding:11px 15px; border-radius:6px; font-size:13px; margin-bottom:12px; }
 .auth-btn { width:100%; padding:11px 18px; background:#001441; color:white; border:none; border-radius:6px; font-size:14px; font-weight:500; cursor:pointer; }
@@ -61,29 +61,29 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 .auth-dropdown { position:absolute; top:42px; right:0; min-width:220px; background:#ffffff; border:1px solid #cccccc; border-radius:8px; box-shadow:0 8px 24px rgba(105,88,194,0.18); padding:6px; opacity:0; visibility:hidden; transform:translateY(-4px); transition:opacity .15s ease, transform .15s ease, visibility .15s; }
 .auth-dropdown.auth-open { opacity:1; visibility:visible; transform:translateY(0); }
 .auth-dd-user { padding:10px 12px 8px; border-bottom:1px solid #2a2b3a; margin-bottom:4px; }
-.auth-dd-name { font-size:13px; color:#e5e7eb; font-weight:500; line-height:1.3; word-break:break-word; }
-.auth-dd-email { font-size:11px; color:#9ca3af; margin-top:2px; word-break:break-all; }
+.auth-dd-name { font-size:13px; color:#1a1a2e; font-weight:500; line-height:1.3; word-break:break-word; }
+.auth-dd-email { font-size:11px; color:#555555; margin-top:2px; word-break:break-all; }
 .auth-dd-role { display:inline-block; margin-top:6px; font-size:10px; color:#6958C2; background:#f0ecfb; padding:2px 7px; border-radius:10px; text-transform:uppercase; letter-spacing:.5px; }
-.auth-dd-item { display:flex; align-items:center; gap:8px; padding:9px 12px; font-size:13px; color:#e5e7eb; cursor:pointer; border-radius:5px; background:transparent; border:none; width:100%; text-align:left; font-family:inherit; }
+.auth-dd-item { display:flex; align-items:center; gap:8px; padding:9px 12px; font-size:13px; color:#1a1a2e; cursor:pointer; border-radius:5px; background:transparent; border:none; width:100%; text-align:left; font-family:inherit; }
 .auth-dd-item:hover { background:#f0f0f5; color:#dc2626; }
 .auth-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center; z-index:99998; padding:20px; }
-.auth-modal { background:#ffffff; border:1px solid #cccccc; border-radius:12px; padding:28px; width:100%; max-width:440px; font-family:'IBM Plex Sans',sans-serif; }
+.auth-modal { background:#ffffff; border:1px solid #d8d2e8; border-radius:12px; padding:28px; width:100%; max-width:440px; font-family:'IBM Plex Sans',sans-serif; box-shadow:0 12px 48px rgba(105,88,194,0.15); }
 .auth-modal h3 { color:#001441; font-size:18px; margin:0 0 4px; }
-.auth-modal p.sub { color:#9ca3af; font-size:13px; margin:0 0 18px; }
+.auth-modal p.sub { color:#555555; font-size:13px; margin:0 0 18px; }
 .auth-modal .auth-field { margin-bottom:12px; }
-.auth-modal select { width:100%; padding:10px 13px; border:1px solid #cccccc; border-radius:6px; background:#ffffff; color:#e5e7eb; font-size:14px; outline:none; font-family:inherit; }
+.auth-modal select { width:100%; padding:10px 13px; border:1px solid #cccccc; border-radius:6px; background:#ffffff; color:#1a1a2e; font-size:14px; outline:none; font-family:inherit; }
 .auth-modal .auth-row { display:flex; gap:10px; margin-top:18px; }
-.auth-modal .auth-btn-secondary { flex:1; padding:11px 18px; background:transparent; color:#9ca3af; border:1px solid #d0d0d8; border-radius:6px; font-size:14px; cursor:pointer; font-family:inherit; }
-.auth-modal .auth-btn-secondary:hover { background:#f0f0f5; color:#e5e7eb; }
+.auth-modal .auth-btn-secondary { flex:1; padding:11px 18px; background:transparent; color:#555555; border:1px solid #d0d0d8; border-radius:6px; font-size:14px; cursor:pointer; font-family:inherit; }
+.auth-modal .auth-btn-secondary:hover { background:#f0f0f5; color:#1a1a2e; }
 .auth-modal .auth-btn { flex:1; }
 .auth-success { background:#dcfce7; color:#15803d; border:1px solid #bbf7d0; padding:11px 15px; border-radius:6px; font-size:13px; margin-bottom:12px; }
 .modal-tabs { display:flex; gap:0; border-bottom:1px solid #cccccc; margin-bottom:18px; margin-top:-10px; }
-.modal-tab { flex:1; padding:10px 14px; background:transparent; border:none; border-bottom:2px solid transparent; color:#9ca3af; font-size:13px; font-weight:500; cursor:pointer; font-family:inherit; transition:color .15s, border-color .15s; }
+.modal-tab { flex:1; padding:10px 14px; background:transparent; border:none; border-bottom:2px solid transparent; color:#555555; font-size:13px; font-weight:500; cursor:pointer; font-family:inherit; transition:color .15s, border-color .15s; }
 .modal-tab:hover { color:#001441; }
 .modal-tab.active { color:#001441; border-bottom-color:#001441; }
 .user-row { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border:1px solid #cccccc; border-radius:6px; margin-bottom:6px; background:#ffffff; }
-.user-row-name { font-size:13px; color:#e5e7eb; font-weight:500; line-height:1.3; }
-.user-row-email { font-size:11px; color:#9ca3af; margin-top:2px; word-break:break-all; }
+.user-row-name { font-size:13px; color:#1a1a2e; font-weight:500; line-height:1.3; }
+.user-row-email { font-size:11px; color:#555555; margin-top:2px; word-break:break-all; }
 .user-row-meta { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
 .user-status { font-size:9px; padding:3px 8px; border-radius:4px; font-weight:600; text-transform:uppercase; letter-spacing:.3px; }
 .user-status-active { background:#dcfce7; color:#15803d; border:1px solid #bbf7d0; }
@@ -95,7 +95,7 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 
 <div id="boot-spinner" class="auth-overlay" style="flex-direction:column;gap:14px;">
   <div class="auth-spinner"></div>
-  <div id="boot-msg" style="font-size:13px;color:#9ca3af;">Loading…</div>
+  <div id="boot-msg" style="font-size:13px;color:#555555;">Loading…</div>
 </div>
 
 <div id="login-wrap" class="auth-overlay auth-hidden">
@@ -350,7 +350,7 @@ function getStatusInfo(status) {
 
 async function loadUsersList() {
   const container = $('users-list-container');
-  container.innerHTML = '<div style="text-align:center;color:#9ca3af;font-size:12px;padding:30px;">Loading users…</div>';
+  container.innerHTML = '<div style="text-align:center;color:#555555;font-size:12px;padding:30px;">Loading users…</div>';
   try {
     const res = await dataClient.queries.listAppUsers();
     let data = res.data;
@@ -362,7 +362,7 @@ async function loadUsersList() {
     const users = data.users || [];
     $('tab-list-btn').textContent = 'Current Users (' + users.length + ')';
     if (users.length === 0) {
-      container.innerHTML = '<div style="color:#9ca3af;font-size:12px;padding:30px;text-align:center;">No users yet. Invite someone using the other tab.</div>';
+      container.innerHTML = '<div style="color:#555555;font-size:12px;padding:30px;text-align:center;">No users yet. Invite someone using the other tab.</div>';
       return;
     }
     container.innerHTML = users.map(function(u) {
@@ -1767,7 +1767,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           {/* Step nav (only in bank mode) */}
           {appMode==="bank"&&<>
           <button onClick={()=>{if(step>1)setStep(step-1);}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"6px 10px",color:step>1?"#6958C2":"#e2e2ea",fontSize:14,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
-          {STEPS.map(s=><div key={s.id} onClick={()=>{if(s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0)))setStep(s.id);}} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:6,fontSize:12,fontWeight:500,background:step===s.id?"rgba(77,63,160,0.25)":"transparent",color:step===s.id?"#6958C2":step>s.id?"#16a34a":"#aaaaaa",border:step===s.id?"1px solid rgba(77,63,160,0.5)":"1px solid transparent",cursor:s.id<=step?"pointer":"default",transition:"all 0.2s",whiteSpace:"nowrap"}}><span>{s.icon}</span> {s.label}</div>)}
+          {STEPS.map(s=><div key={s.id} onClick={()=>{if(s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0)))setStep(s.id);}} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:6,fontSize:12,fontWeight:500,background:step===s.id?"rgba(77,63,160,0.25)":"transparent",color:step===s.id?"#6958C2":step>s.id?"#16a34a":"#777777",border:step===s.id?"1px solid rgba(77,63,160,0.5)":"1px solid transparent",cursor:s.id<=step?"pointer":"default",transition:"all 0.2s",whiteSpace:"nowrap"}}><span>{s.icon}</span> {s.label}</div>)}
           <button onClick={()=>{if(step<6){
             if(step===1&&transactions.length>0)setStep(2);
             else if(step===2)setStep(4);
@@ -1801,7 +1801,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <span style={{fontSize:8,padding:"1px 6px",borderRadius:4,fontWeight:700,background:(c.version||getClientData(c.id,"version","free"))==="paid"?"rgba(22,163,74,0.1)":"rgba(105,88,194,0.1)",color:(c.version||getClientData(c.id,"version","free"))==="paid"?"#16a34a":"#888888",border:"1px solid "+((c.version||getClientData(c.id,"version","free"))==="paid"?"rgba(22,163,74,0.2)":"rgba(105,88,194,0.2)")}}>{(c.version||getClientData(c.id,"version","free"))==="paid"?"PAID":"FREE"}</span>
                     </div>
                     <div style={{fontSize:10,color:"#888888",marginTop:2}}>Bank: {getClientData(c.id,"bank","Not set")}</div>
-                    <div style={{fontSize:10,color:"#aaaaaa"}}>References: {Object.keys(getClientData(c.id,"refdb",{})).length} mappings</div>
+                    <div style={{fontSize:10,color:"#777777"}}>References: {Object.keys(getClientData(c.id,"refdb",{})).length} mappings</div>
                     {(projectLog[c.id]||[]).length>0&&<div style={{fontSize:10,color:"#0891b2",marginTop:2}}>📁 {(projectLog[c.id]||[]).length} project(s)</div>}
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea"}}>
                       <span style={{fontSize:10,color:"#cccccc"}}>Created {new Date(c.created).toLocaleDateString()}</span>
@@ -1856,11 +1856,11 @@ td,th{padding:8px 12px;vertical-align:middle}
                     }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 14px",color:"#0891b2",fontSize:10,fontWeight:600,cursor:"pointer"}}>⬇ Download Sample Template</button>
                   </div>
                 </div>
-                <div style={{fontSize:10,color:"#aaaaaa",lineHeight:1.7,padding:"10px 12px",background:"#ffffff",borderRadius:6,border:"1px solid #f5f5fa"}}>
+                <div style={{fontSize:10,color:"#777777",lineHeight:1.7,padding:"10px 12px",background:"#ffffff",borderRadius:6,border:"1px solid #f5f5fa"}}>
                   <strong style={{color:"#666666"}}>Accepted formats:</strong> Any CSV/Excel with these columns (auto-detected):<br/>
                   <span style={{color:"#888888"}}>• <strong style={{color:"#1a1a2e"}}>Description</strong> (or Narration / Payee / Particulars)</span><br/>
                   <span style={{color:"#888888"}}>• <strong style={{color:"#1a1a2e"}}>Ledger</strong> (or Account Name / Category / Categorized To)</span><br/>
-                  <span style={{color:"#aaaaaa"}}>Works with: Zoho Bank Transaction exports, Zoho Journal Reports, Tally exports, or any custom CSV.</span>
+                  <span style={{color:"#777777"}}>Works with: Zoho Bank Transaction exports, Zoho Journal Reports, Tally exports, or any custom CSV.</span>
                 </div>
               </div>
 
@@ -1877,12 +1877,12 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <button onClick={clearGlobalRefDB} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"5px 12px",color:"#dc2626",fontSize:10,cursor:"pointer"}}>Clear All</button>
                     </div>
                   </div>
-                  <div style={{fontSize:10,color:"#aaaaaa"}}>These patterns are used across all clients. Upload more files to improve accuracy. Each upload merges with existing data — duplicates are counted, not duplicated.</div>
+                  <div style={{fontSize:10,color:"#777777"}}>These patterns are used across all clients. Upload more files to improve accuracy. Each upload merges with existing data — duplicates are counted, not duplicated.</div>
                 </div>
               )}
 
               {globalRefCount === 0 && (
-                <div style={{fontSize:11,color:"#aaaaaa",marginTop:4,padding:"10px 14px",background:"rgba(105,88,194,0.05)",borderRadius:8,border:"1px solid rgba(105,88,194,0.1)"}}>
+                <div style={{fontSize:11,color:"#777777",marginTop:4,padding:"10px 14px",background:"rgba(105,88,194,0.05)",borderRadius:8,border:"1px solid rgba(105,88,194,0.1)"}}>
                   <strong style={{color:"#666666"}}>How it works:</strong> Upload your past accounted bank transactions (from Zoho or any accounting software). AutoLedger learns which descriptions map to which ledgers and uses this knowledge to auto-classify new transactions for every client. The more data you feed, the smarter it gets.
                 </div>
               )}
@@ -1933,7 +1933,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <div style={{fontSize:36,marginBottom:12}}>📄</div>
                   <div style={{fontSize:15,fontWeight:600,marginBottom:6}}>Bank Statement</div>
                   <div style={{fontSize:12,color:"#888888"}}>CSV, XLSX — click to upload</div>
-                  <div style={{fontSize:10,color:"#aaaaaa",marginTop:4}}>All formats parsed locally in your browser</div>
+                  <div style={{fontSize:10,color:"#777777",marginTop:4}}>All formats parsed locally in your browser</div>
                 </div>
               )}
               {parseError&&<div style={{marginTop:12,fontSize:12,color:"#dc2626",background:"rgba(220,38,38,0.1)",padding:"8px 14px",borderRadius:6,display:"inline-block",maxWidth:400}}>✗ {parseError}</div>}
@@ -2023,9 +2023,9 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <div style={{flex:1,minWidth:200}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <span style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{p.name}</span>
-                      <button onClick={(e)=>{e.stopPropagation();const n=prompt("Rename project:",p.name);if(n&&n.trim())renameProject(activeClientId,p.id,n.trim());}} style={{background:"none",border:"none",color:"#aaaaaa",fontSize:10,cursor:"pointer",padding:"0 4px"}}>✏️</button>
+                      <button onClick={(e)=>{e.stopPropagation();const n=prompt("Rename project:",p.name);if(n&&n.trim())renameProject(activeClientId,p.id,n.trim());}} style={{background:"none",border:"none",color:"#777777",fontSize:10,cursor:"pointer",padding:"0 4px"}}>✏️</button>
                     </div>
-                    <div style={{fontSize:10,color:"#aaaaaa",marginTop:2}}>Exported: {new Date(p.date).toLocaleString()} • <span style={{color:"#0891b2"}}>Click to view & re-download</span></div>
+                    <div style={{fontSize:10,color:"#777777",marginTop:2}}>Exported: {new Date(p.date).toLocaleString()} • <span style={{color:"#0891b2"}}>Click to view & re-download</span></div>
                   </div>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                     {p.expenseCount>0&&<span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)",color:"#dc2626"}}>P&L: {p.expenseCount}</span>}
@@ -2046,7 +2046,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:"#0891b2"}}>{viewingProject.name}</div>
-                <div style={{fontSize:11,color:"#aaaaaa",marginTop:2}}>Exported: {new Date(viewingProject.date).toLocaleString()} • {viewingProject.txnCount} transactions</div>
+                <div style={{fontSize:11,color:"#777777",marginTop:2}}>Exported: {new Date(viewingProject.date).toLocaleString()} • {viewingProject.txnCount} transactions</div>
               </div>
               <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
             </div>
@@ -2103,11 +2103,11 @@ td,th{padding:8px 12px;vertical-align:middle}
           {transactions.length > 0 ? (
             <div style={{textAlign:"center",padding:16}}>
               <button onClick={()=>setStep(2)} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 40px",fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:"0.02em"}}>Continue to Parse →</button>
-              <div style={{fontSize:11,color:"#aaaaaa",marginTop:8}}>{transactions.length} transactions ready for classification</div>
+              <div style={{fontSize:11,color:"#777777",marginTop:8}}>{transactions.length} transactions ready for classification</div>
             </div>
           ) : (
             <div style={{textAlign:"center",padding:16}}>
-              <div style={{fontSize:12,color:"#aaaaaa",marginBottom:12}}>— or try with sample data —</div>
+              <div style={{fontSize:12,color:"#777777",marginBottom:12}}>— or try with sample data —</div>
               <button onClick={loadSampleData} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 28px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Load Sample Bank Statement</button>
             </div>
           )}
@@ -2115,14 +2115,14 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{fontSize:13,fontWeight:600,marginBottom:10,color:"#666666"}}>Chart of Accounts ({chartOfAccounts.length} accounts loaded)</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
               {chartOfAccounts.slice(0,20).map((a,i)=><span key={i} style={{fontSize:11,padding:"3px 8px",borderRadius:4,background:"#ffffff",color:"#888888",border:"1px solid #e2e2ea"}}>{a.name}</span>)}
-              {chartOfAccounts.length>20&&<span style={{fontSize:11,color:"#aaaaaa",padding:"3px 8px"}}>+{chartOfAccounts.length-20} more</span>}
+              {chartOfAccounts.length>20&&<span style={{fontSize:11,color:"#777777",padding:"3px 8px"}}>+{chartOfAccounts.length-20} more</span>}
             </div>
           </div>}
 
           {/* Bank Ledger Name */}
           <div style={{background:"#f8f9fc",borderRadius:10,border:"1px solid #e2e2ea",padding:16}}>
-            <div style={{fontSize:13,fontWeight:600,marginBottom:6,color:"#666666"}}>🏦 Bank Ledger Name <span style={{fontWeight:400,color:"#aaaaaa"}}>(must match your Zoho Books account name exactly)</span></div>
-            <div style={{fontSize:11,color:"#aaaaaa",marginBottom:10}}>This is the bank account name used in double-entry journal entries. Example: "RAKBANK125901-AED", "Emirates NBD - Current AED", etc.</div>
+            <div style={{fontSize:13,fontWeight:600,marginBottom:6,color:"#666666"}}>🏦 Bank Ledger Name <span style={{fontWeight:400,color:"#777777"}}>(must match your Zoho Books account name exactly)</span></div>
+            <div style={{fontSize:11,color:"#777777",marginBottom:10}}>This is the bank account name used in double-entry journal entries. Example: "RAKBANK125901-AED", "Emirates NBD - Current AED", etc.</div>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
               <input type="text" value={bankAccount} onChange={e=>{setBankAccount(e.target.value);try{localStorage.setItem("autoledger_bank",e.target.value)}catch(x){}}} placeholder="Type your exact Zoho Books bank account name..." style={{flex:1,minWidth:250,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,outline:"none"}} />
               {bankAccount && bankAccount !== "Bank Account" && <span style={{fontSize:11,color:"#16a34a"}}>✓ Set</span>}
@@ -2136,7 +2136,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <span style={{fontSize:13,fontWeight:600,color:"#0891b2"}}>🧠 Transaction Reference Database</span>
-                <span style={{fontSize:11,color:"#aaaaaa"}}>({Object.keys(refDB).length} mappings)</span>
+                <span style={{fontSize:11,color:"#777777"}}>({Object.keys(refDB).length} mappings)</span>
               </div>
               <div style={{display:"flex",gap:6}}>
                 <input ref={refFileRef} type="file" accept=".json,.csv" onChange={importRefDB} style={{display:"none"}} />
@@ -2147,9 +2147,9 @@ td,th{padding:8px 12px;vertical-align:middle}
               </div>
             </div>
             {Object.keys(refDB).length===0 ? (
-              <div style={{fontSize:11,color:"#aaaaaa",padding:"8px 0"}}>No references yet. Confirm ledger mappings in the Review step to build your reference database, or import a CSV file with columns: Description, Ledger.</div>
+              <div style={{fontSize:11,color:"#777777",padding:"8px 0"}}>No references yet. Confirm ledger mappings in the Review step to build your reference database, or import a CSV file with columns: Description, Ledger.</div>
             ) : !showRefDB ? (
-              <div style={{fontSize:11,color:"#aaaaaa"}}>Past mappings will auto-classify future uploads with high confidence. Click "View" to manage stored references.</div>
+              <div style={{fontSize:11,color:"#777777"}}>Past mappings will auto-classify future uploads with high confidence. Click "View" to manage stored references.</div>
             ) : (
               <div style={{maxHeight:300,overflowY:"auto",borderRadius:6,border:"1px solid #e2e2ea"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
@@ -2214,7 +2214,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               <span style={{fontSize:18}}>📅</span>
               <span style={{fontSize:13,fontWeight:600,color:"#4D3FA0"}}>Statement Period:</span>
               <span style={{fontSize:13,fontFamily:"'IBM Plex Mono',monospace",color:"#1a1a2e"}}>{firstDate}</span>
-              <span style={{color:"#aaaaaa"}}>to</span>
+              <span style={{color:"#777777"}}>to</span>
               <span style={{fontSize:13,fontFamily:"'IBM Plex Mono',monospace",color:"#1a1a2e"}}>{lastDate}</span>
             </div>;
           })()}
@@ -2245,7 +2245,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             return <div style={{display:"flex",flexDirection:"column",gap:12}}>
               {/* Auto-calculated row */}
               <div style={{display:"flex",gap:16,padding:"12px 16px",background:"#f8f9fc",borderRadius:8,border:"1px solid #e2e2ea",flexWrap:"wrap",alignItems:"center"}}>
-                <span style={{fontSize:11,color:"#aaaaaa",fontWeight:600}}>Auto-Calculated:</span>
+                <span style={{fontSize:11,color:"#777777",fontWeight:600}}>Auto-Calculated:</span>
                 <span style={{fontSize:12,color:"#888888"}}>Txns: <strong style={{color:"#1a1a2e"}}>{transactions.length}</strong></span>
                 <span style={{fontSize:12,color:"#888888"}}>Opening: <strong style={{color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(openingBal)}</strong></span>
                 <span style={{fontSize:12,color:"#888888"}}>Total Dr: <strong style={{color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(totalDebit)}</strong></span>
@@ -2281,7 +2281,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{background:"#f8f9fc"}}>
               {["#","Date","Description","Debit (AED)","Credit (AED)","Balance"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:h.includes("Debit")||h.includes("Credit")||h.includes("Balance")?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap"}}>{h}</th>)}
             </tr></thead><tbody>{transactions.map((t,i)=><tr key={t.id} style={{borderBottom:"1px solid #ffffff",background:i%2===0?"transparent":"rgba(0,20,65,0.03)"}}>
-              <td style={{padding:"9px 14px",color:"#aaaaaa"}}>{i+1}</td>
+              <td style={{padding:"9px 14px",color:"#777777"}}>{i+1}</td>
               <td style={{padding:"9px 14px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,whiteSpace:"nowrap"}}>{t.date}</td>
               <td style={{padding:"9px 14px",maxWidth:350}}>{t.description}</td>
               <td style={{padding:"9px 14px",textAlign:"right",color:t.debit?"#dc2626":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{t.debit?fmt(t.debit):"—"}</td>
@@ -2314,8 +2314,8 @@ td,th{padding:8px 12px;vertical-align:middle}
 
           {/* Expenses / Revenue Tabs */}
           <div style={{display:"flex",gap:0,borderBottom:"1px solid #e2e2ea"}}>
-            <button onClick={()=>{setReviewTab("expenses");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="expenses"?"2px solid #dc2626":"2px solid transparent",background:"transparent",color:reviewTab==="expenses"?"#dc2626":"#aaaaaa"}}>💸 Debit ({expenseCount})</button>
-            <button onClick={()=>{setReviewTab("revenue");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="revenue"?"2px solid #16a34a":"2px solid transparent",background:"transparent",color:reviewTab==="revenue"?"#16a34a":"#aaaaaa"}}>💰 Credit ({revenueCount})</button>
+            <button onClick={()=>{setReviewTab("expenses");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="expenses"?"2px solid #dc2626":"2px solid transparent",background:"transparent",color:reviewTab==="expenses"?"#dc2626":"#777777"}}>💸 Debit ({expenseCount})</button>
+            <button onClick={()=>{setReviewTab("revenue");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="revenue"?"2px solid #16a34a":"2px solid transparent",background:"transparent",color:reviewTab==="revenue"?"#16a34a":"#777777"}}>💰 Credit ({revenueCount})</button>
           </div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -2342,8 +2342,8 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <div style={{position:"relative",display:"inline-block"}} ref={el=>dropdownRefs.current["_bank"]=el}>
                 <div style={{fontSize:10,color:"#888888",marginBottom:2}}>Bank Ledger (for journal entries)</div>
-                <div onClick={()=>setCoaDropdownOpen(p=>({...p,_bank:!p._bank}))} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:bankAccount?"#1a1a2e":"#aaaaaa",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minWidth:220,gap:6}}>
-                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{bankAccount||"Select bank ledger..."}</span><span style={{color:"#aaaaaa"}}>▾</span>
+                <div onClick={()=>setCoaDropdownOpen(p=>({...p,_bank:!p._bank}))} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:bankAccount?"#1a1a2e":"#777777",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minWidth:220,gap:6}}>
+                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{bankAccount||"Select bank ledger..."}</span><span style={{color:"#777777"}}>▾</span>
                 </div>
                 {coaDropdownOpen._bank&&<div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:100,background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:280,overflow:"hidden",display:"flex",flexDirection:"column",minWidth:280}}>
                   <input type="text" placeholder="Type bank name or search..." value={coaSearch._bank||""} onChange={e=>{setCoaSearch(p=>({...p,_bank:e.target.value}));setBankAccount(e.target.value);}} onClick={e=>e.stopPropagation()} autoFocus style={{background:"#ffffff",border:"none",borderBottom:"1px solid #e2e2ea",padding:"8px 10px",color:"#1a1a2e",fontSize:11,outline:"none"}}/>
@@ -2436,7 +2436,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 display:"flex",alignItems:"center",gap:6,transition:"all 0.15s"
               }}>
                 <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{g.description}</span>
-                <span style={{fontSize:9,color:descGroup===g.description?"#0891b2":"#aaaaaa",fontFamily:"'IBM Plex Mono',monospace",background:"rgba(105,88,194,0.1)",padding:"1px 5px",borderRadius:4}}>×{g.count}</span>
+                <span style={{fontSize:9,color:descGroup===g.description?"#0891b2":"#777777",fontFamily:"'IBM Plex Mono',monospace",background:"rgba(105,88,194,0.1)",padding:"1px 5px",borderRadius:4}}>×{g.count}</span>
                 {g.ledger&&<span style={{fontSize:8,color:"#cccccc"}}>→ {g.ledger.length>20?g.ledger.substring(0,20)+"…":g.ledger}</span>}
               </button>)}
             </div>
@@ -2459,13 +2459,13 @@ td,th{padding:8px 12px;vertical-align:middle}
               {/* Credit tab: Customer column FIRST (before ledger) */}
               {reviewTab==="revenue"&&<td style={{padding:"8px 6px",minWidth:160,position:"relative"}}>
                 <div>
-                  <div onClick={()=>setContactDropdownOpen(p=>({...p,[t.id]:!p[t.id]}))} style={{background:"#f8f9fc",border:"1px solid "+(t.contactName?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:6,padding:"6px 10px",color:t.contactName?"#16a34a":"#aaaaaa",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:30}}>
-                    <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactName||"Select customer..."}</span><span style={{color:"#aaaaaa",marginLeft:4}}>▾</span>
+                  <div onClick={()=>setContactDropdownOpen(p=>({...p,[t.id]:!p[t.id]}))} style={{background:"#f8f9fc",border:"1px solid "+(t.contactName?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:6,padding:"6px 10px",color:t.contactName?"#16a34a":"#777777",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:30}}>
+                    <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactName||"Select customer..."}</span><span style={{color:"#777777",marginLeft:4}}>▾</span>
                   </div>
                   {contactDropdownOpen[t.id]&&<div style={{position:"absolute",top:"100%",left:6,right:6,zIndex:100,background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:260,overflow:"hidden",display:"flex",flexDirection:"column",minWidth:200}}>
                     <input type="text" placeholder="Search customer..." value={contactSearch[t.id]||""} onChange={e=>setContactSearch(p=>({...p,[t.id]:e.target.value}))} onClick={e=>e.stopPropagation()} autoFocus style={{background:"#ffffff",border:"none",borderBottom:"1px solid #e2e2ea",padding:"8px 10px",color:"#1a1a2e",fontSize:11,outline:"none"}} onKeyDown={e=>{if(e.key==="Escape")setContactDropdownOpen(p=>({...p,[t.id]:false}));}}/>
                     <div style={{overflowY:"auto",maxHeight:180}}>
-                      <div onClick={()=>{handleContactChange(t.id,"");setContactDropdownOpen(p=>({...p,[t.id]:false}));setContactSearch(p=>({...p,[t.id]:""}));}} style={{padding:"6px 10px",fontSize:11,cursor:"pointer",color:"#aaaaaa",borderBottom:"1px solid #ffffff"}}>— None (use ledger) —</div>
+                      <div onClick={()=>{handleContactChange(t.id,"");setContactDropdownOpen(p=>({...p,[t.id]:false}));setContactSearch(p=>({...p,[t.id]:""}));}} style={{padding:"6px 10px",fontSize:11,cursor:"pointer",color:"#777777",borderBottom:"1px solid #ffffff"}}>— None (use ledger) —</div>
                       {customers.filter(c=>!contactSearch[t.id]||c.toLowerCase().includes((contactSearch[t.id]||"").toLowerCase())).map(c=><div key={c} onClick={()=>{handleContactChange(t.id,c);setContactDropdownOpen(p=>({...p,[t.id]:false}));setContactSearch(p=>({...p,[t.id]:""}));}} style={{padding:"6px 10px",fontSize:11,cursor:"pointer",color:c===t.contactName?"#16a34a":"#1a1a2e",background:c===t.contactName?"rgba(22,163,74,0.08)":"transparent",borderBottom:"1px solid #ffffff"}} onMouseEnter={e=>e.currentTarget.style.background="rgba(105,88,194,0.08)"} onMouseLeave={e=>e.currentTarget.style.background=c===t.contactName?"rgba(22,163,74,0.08)":"transparent"}>{c}</div>)}
                     </div>
                     <div onClick={()=>{setContactDropdownOpen(p=>({...p,[t.id]:false}));setShowAddCustomer(true);setNewCustomerName(contactSearch[t.id]||"");}} style={{padding:"8px 10px",fontSize:10,cursor:"pointer",background:"rgba(22,163,74,0.05)",color:"#16a34a",borderTop:"1px solid #e2e2ea",fontWeight:600,position:"sticky",bottom:0}}>➕ Add New Customer{contactSearch[t.id]?': "'+contactSearch[t.id]+'"':""}</div>
@@ -2480,7 +2480,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <span style={{fontSize:11}}>💰</span> Payment Received → {t.contactName}
                   </div>
                 ) : (
-                <><div onClick={()=>{setCoaDropdownOpen(p=>({...p,[t.id]:!p[t.id]}));setHighlightIdx(0);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:36}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.selectedLedger}</span><span style={{color:"#aaaaaa",marginLeft:6}}>▾</span></div>
+                <><div onClick={()=>{setCoaDropdownOpen(p=>({...p,[t.id]:!p[t.id]}));setHighlightIdx(0);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:36}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.selectedLedger}</span><span style={{color:"#777777",marginLeft:6}}>▾</span></div>
                 {coaDropdownOpen[t.id]&&(()=>{
                   const filtered=chartOfAccounts.filter(a=>!coaSearch[t.id]||a.name.toLowerCase().includes((coaSearch[t.id]||"").toLowerCase()));
                   return <div style={{position:"absolute",top:"100%",left:8,right:8,zIndex:100,background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:340,overflow:"hidden",display:"flex",flexDirection:"column",minWidth:300}}>
@@ -2507,13 +2507,13 @@ td,th{padding:8px 12px;vertical-align:middle}
               {/* Vendor (Debit tab only) */}
               {reviewTab==="expenses"&&<td style={{padding:"8px 6px",minWidth:160,position:"relative"}}>
                 <div>
-                  <div onClick={()=>setContactDropdownOpen(p=>({...p,[t.id]:!p[t.id]}))} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:t.contactName?(t.entryMode==="billpay"?"#0891b2":"#16a34a"):"#aaaaaa",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:30}}>
-                    <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactName||"Vendor..."}</span><span style={{color:"#aaaaaa",marginLeft:4}}>▾</span>
+                  <div onClick={()=>setContactDropdownOpen(p=>({...p,[t.id]:!p[t.id]}))} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:t.contactName?(t.entryMode==="billpay"?"#0891b2":"#16a34a"):"#777777",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:30}}>
+                    <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactName||"Vendor..."}</span><span style={{color:"#777777",marginLeft:4}}>▾</span>
                   </div>
                   {contactDropdownOpen[t.id]&&<div style={{position:"absolute",top:"100%",left:6,right:6,zIndex:100,background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:260,overflow:"hidden",display:"flex",flexDirection:"column",minWidth:200}}>
                     <input type="text" placeholder="Search vendor..." value={contactSearch[t.id]||""} onChange={e=>setContactSearch(p=>({...p,[t.id]:e.target.value}))} onClick={e=>e.stopPropagation()} autoFocus style={{background:"#ffffff",border:"none",borderBottom:"1px solid #e2e2ea",padding:"8px 10px",color:"#1a1a2e",fontSize:11,outline:"none"}} onKeyDown={e=>{if(e.key==="Escape")setContactDropdownOpen(p=>({...p,[t.id]:false}));}}/>
                     <div style={{overflowY:"auto",maxHeight:180}}>
-                      <div onClick={()=>{handleContactChange(t.id,"");setContactDropdownOpen(p=>({...p,[t.id]:false}));setContactSearch(p=>({...p,[t.id]:""}));}} style={{padding:"6px 10px",fontSize:11,cursor:"pointer",color:"#aaaaaa",borderBottom:"1px solid #ffffff"}}>— None —</div>
+                      <div onClick={()=>{handleContactChange(t.id,"");setContactDropdownOpen(p=>({...p,[t.id]:false}));setContactSearch(p=>({...p,[t.id]:""}));}} style={{padding:"6px 10px",fontSize:11,cursor:"pointer",color:"#777777",borderBottom:"1px solid #ffffff"}}>— None —</div>
                       {vendors.filter(v=>!contactSearch[t.id]||v.toLowerCase().includes((contactSearch[t.id]||"").toLowerCase())).map(v=><div key={v} onClick={()=>{handleContactChange(t.id,v);setContactDropdownOpen(p=>({...p,[t.id]:false}));setContactSearch(p=>({...p,[t.id]:""}));}} style={{padding:"6px 10px",fontSize:11,cursor:"pointer",color:v===t.contactName?"#0891b2":"#1a1a2e",background:v===t.contactName?"rgba(8,145,178,0.08)":"transparent",borderBottom:"1px solid #ffffff"}} onMouseEnter={e=>e.currentTarget.style.background="rgba(105,88,194,0.08)"} onMouseLeave={e=>e.currentTarget.style.background=v===t.contactName?"rgba(8,145,178,0.08)":"transparent"}>{v}</div>)}
                     </div>
                     <div onClick={()=>{setContactDropdownOpen(p=>({...p,[t.id]:false}));setShowAddVendor(true);setNewVendorName(contactSearch[t.id]||"");}} style={{padding:"8px 10px",fontSize:10,cursor:"pointer",background:"rgba(22,163,74,0.05)",color:"#16a34a",borderTop:"1px solid #e2e2ea",fontWeight:600,position:"sticky",bottom:0}}>➕ Add New Vendor{contactSearch[t.id]?': "'+contactSearch[t.id]+'"':""}</div>
@@ -2540,12 +2540,12 @@ td,th{padding:8px 12px;vertical-align:middle}
             const pr=(journalEntries&&journalEntries.revenue)||[];
             const bs=(journalEntries&&journalEntries.bsItems)||[];
             const sus=(journalEntries&&journalEntries.suspense)||[];
-            const renderJT=(entries,lbl)=>entries.length===0?<div style={{padding:16,color:"#aaaaaa",fontSize:12}}>No {lbl} entries.</div>:(
+            const renderJT=(entries,lbl)=>entries.length===0?<div style={{padding:16,color:"#777777",fontSize:12}}>No {lbl} entries.</div>:(
               <div style={{borderRadius:10,border:"1px solid #e2e2ea",overflow:"hidden"}}><div style={{overflowX:"auto"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{background:"#f8f9fc"}}>
                   {["#","Date","Account","Debit","Credit","Contact","Description"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
                 </tr></thead><tbody>{entries.map((e,i)=>{const isF=i%2===0,isB=e.account===bankAccount;return <tr key={i} style={{borderBottom:isF?"none":"1px solid #e2e2ea",background:Math.floor(i/2)%2===0?"transparent":"rgba(245,245,250,1)"}}>
-                  <td style={{padding:"6px 10px",color:"#aaaaaa",fontSize:10}}>{isF?Math.floor(i/2)+1:""}</td>
+                  <td style={{padding:"6px 10px",color:"#777777",fontSize:10}}>{isF?Math.floor(i/2)+1:""}</td>
                   <td style={{padding:"6px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{e.date}</td>
                   <td style={{padding:"6px 10px",color:isB?"#6958C2":"#1a1a2e",paddingLeft:isF?10:22,fontSize:11}}>{e.account}</td>
                   <td style={{padding:"6px 10px",textAlign:"right",color:e.debit?"#dc2626":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{e.debit?fmt(e.debit):""}</td>
@@ -2598,7 +2598,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{background:"#f8f9fc"}}>
                   {["#","Date","Expense Account","Amount","Paid Through","Vendor","Description"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:h==="Amount"?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
                 </tr></thead><tbody>{exp.map((e,i)=><tr key={i} style={{borderBottom:"1px solid #e2e2ea",background:i%2===0?"transparent":"rgba(245,245,250,1)"}}>
-                  <td style={{padding:"6px 10px",color:"#aaaaaa",fontSize:10}}>{i+1}</td>
+                  <td style={{padding:"6px 10px",color:"#777777",fontSize:10}}>{i+1}</td>
                   <td style={{padding:"6px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{e.date}</td>
                   <td style={{padding:"6px 10px",color:"#1a1a2e",fontSize:11}}>{e.account}</td>
                   <td style={{padding:"6px 10px",textAlign:"right",color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{fmt(e.amount)}</td>
@@ -2636,7 +2636,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{background:"#f8f9fc"}}>
                   {["#","Date","Customer","Amount","Payment Mode","Description","Deposit To"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:h==="Amount"?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
                 </tr></thead><tbody>{pr.map((r,i)=><tr key={i} style={{borderBottom:"1px solid #e2e2ea",background:i%2===0?"transparent":"rgba(245,245,250,1)"}}>
-                  <td style={{padding:"6px 10px",color:"#aaaaaa",fontSize:10}}>{i+1}</td>
+                  <td style={{padding:"6px 10px",color:"#777777",fontSize:10}}>{i+1}</td>
                   <td style={{padding:"6px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{r.date}</td>
                   <td style={{padding:"6px 10px",color:"#16a34a",fontSize:11,fontWeight:600}}>{r.customerName}</td>
                   <td style={{padding:"6px 10px",textAlign:"right",color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{fmt(r.amount)}</td>
@@ -2665,12 +2665,12 @@ td,th{padding:8px 12px;vertical-align:middle}
                     </tr></thead>
                     <tbody>
                       {sus.map((s,i)=><tr key={i} style={{borderBottom:"1px solid rgba(217,119,6,0.08)",background:i%2===0?"transparent":"rgba(217,119,6,0.02)"}}>
-                        <td style={{padding:"6px 12px",color:"#aaaaaa",fontSize:10}}>{i+1}</td>
+                        <td style={{padding:"6px 12px",color:"#777777",fontSize:10}}>{i+1}</td>
                         <td style={{padding:"6px 12px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{s.date}</td>
                         <td style={{padding:"6px 12px",color:"#1a1a2e",fontSize:11}}>{s.description}</td>
                         <td style={{padding:"6px 12px",textAlign:"right",color:s.debit?"#dc2626":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{s.debit?fmt(s.debit):""}</td>
                         <td style={{padding:"6px 12px",textAlign:"right",color:s.credit?"#16a34a":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{s.credit?fmt(s.credit):""}</td>
-                        <td style={{padding:"6px 12px",color:"#aaaaaa",fontSize:10,minWidth:150}}></td>
+                        <td style={{padding:"6px 12px",color:"#777777",fontSize:10,minWidth:150}}></td>
                       </tr>)}
                       <tr style={{borderTop:"2px solid rgba(217,119,6,0.2)",fontWeight:600}}>
                         <td></td><td></td>
@@ -2733,7 +2733,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{fontSize:40,marginBottom:10}}>📄</div>
             <div style={{fontSize:15,fontWeight:600,color:"#4D3FA0"}}>Upload Bills / Invoices</div>
             <div style={{fontSize:12,color:"#888888",marginTop:4}}>PDF, PNG, JPG — drag & drop or click to browse</div>
-            <div style={{fontSize:10,color:"#aaaaaa",marginTop:4}}>AI will extract Invoice Number, Vendor, Amount, VAT, and Total</div>
+            <div style={{fontSize:10,color:"#777777",marginTop:4}}>AI will extract Invoice Number, Vendor, Amount, VAT, and Total</div>
           </div>
 
           {/* Processing status */}
@@ -2747,7 +2747,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             {bills.some(b=>b.status==="pending")&&<button onClick={processAllBills} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:12,fontWeight:600,cursor:"pointer"}}>🤖 Process All ({bills.filter(b=>b.status==="pending").length} pending)</button>}
             {bills.some(b=>b.confirmed)&&<button onClick={exportBillsCSV} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📥 Export Zoho Bills CSV ({bills.filter(b=>b.confirmed).length})</button>}
             <button onClick={()=>setBills([])} style={{background:"#f8f9fc",border:"1px solid rgba(220,38,38,0.3)",borderRadius:8,padding:"10px 14px",fontSize:11,color:"#dc2626",cursor:"pointer"}}>Clear All</button>
-            <span style={{fontSize:11,color:"#aaaaaa"}}>{bills.length} bills — {bills.filter(b=>b.confirmed).length} confirmed</span>
+            <span style={{fontSize:11,color:"#777777"}}>{bills.length} bills — {bills.filter(b=>b.confirmed).length} confirmed</span>
           </div>}
 
           {/* Bill cards */}
@@ -2810,7 +2810,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           ))}
 
           {/* Empty state */}
-          {bills.length===0&&<div style={{textAlign:"center",padding:"40px 20px",color:"#aaaaaa"}}>
+          {bills.length===0&&<div style={{textAlign:"center",padding:"40px 20px",color:"#777777"}}>
             <div style={{fontSize:14,marginBottom:8}}>No bills uploaded yet</div>
             <div style={{fontSize:11}}>Upload a PDF or image of an invoice/bill to get started</div>
           </div>}
@@ -2821,13 +2821,13 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{fontSize:13,fontWeight:600,color:"#4D3FA0"}}>Manual Bill Entry</div>
               <button onClick={()=>{setBills(prev=>[...prev,{id:crypto.randomUUID(),file:null,fileName:"Manual Entry",status:"extracted",invoiceNumber:"",vendorName:"",subtotal:0,vat:0,totalAmount:0,date:"",description:"",ocrText:"",confirmed:false}]);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",fontSize:11,color:"#6958C2",cursor:"pointer",fontWeight:600}}>+ Add Manual Bill</button>
             </div>
-            <div style={{fontSize:10,color:"#aaaaaa"}}>Enter bill details manually without uploading a document. Click "Add Manual Bill" to add a blank entry.</div>
+            <div style={{fontSize:10,color:"#777777"}}>Enter bill details manually without uploading a document. Click "Add Manual Bill" to add a blank entry.</div>
           </div>
 
           {/* Export info */}
           <div style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:10,padding:14}}>
             <div style={{fontSize:11,fontWeight:600,color:"#888888",marginBottom:4}}>📋 Zoho Bills Import Format</div>
-            <div style={{fontSize:10,color:"#aaaaaa"}}>Exported CSV follows Zoho Books bill import format: Bill Number, Vendor Name, Bill Date, Due Date, Item Name, Item Description, Account, Quantity, Rate, Tax, Item Total, Currency Code. Import via Zoho Books → Bills → Import Bills.</div>
+            <div style={{fontSize:10,color:"#777777"}}>Exported CSV follows Zoho Books bill import format: Bill Number, Vendor Name, Bill Date, Due Date, Item Name, Item Description, Account, Quantity, Rate, Tax, Item Total, Currency Code. Import via Zoho Books → Bills → Import Bills.</div>
           </div>
         </div>)}
 
