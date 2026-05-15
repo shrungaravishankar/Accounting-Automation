@@ -52,8 +52,17 @@
 .auth-btn { width:100%; padding:11px 18px; background:#3b82f6; color:white; border:none; border-radius:6px; font-size:14px; font-weight:500; cursor:pointer; }
 .auth-btn:hover { background:#2563eb; }
 .auth-btn:disabled { opacity:.55; cursor:not-allowed; }
-.auth-signout-btn { position:fixed; top:12px; right:12px; background:#1f2937; color:#e5e7eb; border:1px solid #374151; padding:6px 12px; border-radius:6px; font-size:12px; cursor:pointer; z-index:90000; font-family:'IBM Plex Sans',sans-serif; }
-.auth-signout-btn:hover { background:#374151; }
+.auth-user-menu { position:fixed; top:10px; right:14px; z-index:90000; font-family:'IBM Plex Sans',sans-serif; }
+.auth-avatar { width:34px; height:34px; border-radius:50%; background:linear-gradient(135deg,#3b82f6,#6366f1); color:#fff; border:1px solid #374151; font-size:13px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; letter-spacing:.5px; transition:transform .15s ease, box-shadow .15s ease; }
+.auth-avatar:hover { transform:scale(1.05); box-shadow:0 0 0 3px rgba(59,130,246,.25); }
+.auth-dropdown { position:absolute; top:42px; right:0; min-width:220px; background:#12131f; border:1px solid #3a3560; border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.45); padding:6px; opacity:0; visibility:hidden; transform:translateY(-4px); transition:opacity .15s ease, transform .15s ease, visibility .15s; }
+.auth-dropdown.auth-open { opacity:1; visibility:visible; transform:translateY(0); }
+.auth-dd-user { padding:10px 12px 8px; border-bottom:1px solid #2a2b3a; margin-bottom:4px; }
+.auth-dd-name { font-size:13px; color:#e5e7eb; font-weight:500; line-height:1.3; word-break:break-word; }
+.auth-dd-email { font-size:11px; color:#9ca3af; margin-top:2px; word-break:break-all; }
+.auth-dd-role { display:inline-block; margin-top:6px; font-size:10px; color:#a5b4fc; background:#1e1b4b; padding:2px 7px; border-radius:10px; text-transform:uppercase; letter-spacing:.5px; }
+.auth-dd-item { display:flex; align-items:center; gap:8px; padding:9px 12px; font-size:13px; color:#e5e7eb; cursor:pointer; border-radius:5px; background:transparent; border:none; width:100%; text-align:left; font-family:inherit; }
+.auth-dd-item:hover { background:#1f2937; color:#fca5a5; }
 .auth-hidden { display:none !important; }
 </style>
 
@@ -84,7 +93,17 @@
   </div>
 </div>
 
-<button id="auth-signout-btn" class="auth-signout-btn auth-hidden">Sign out</button>
+<div id="auth-user-menu" class="auth-user-menu auth-hidden">
+  <button id="auth-avatar" class="auth-avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Open user menu">U</button>
+  <div id="auth-dropdown" class="auth-dropdown" role="menu">
+    <div class="auth-dd-user">
+      <div id="auth-dd-name" class="auth-dd-name">User</div>
+      <div id="auth-dd-email" class="auth-dd-email">&nbsp;</div>
+      <span id="auth-dd-role" class="auth-dd-role">role</span>
+    </div>
+    <button id="auth-signout-btn" class="auth-dd-item" type="button" role="menuitem">Sign out</button>
+  </div>
+</div>
 
 <script type="module">
 import { Amplify } from 'aws-amplify';
@@ -96,9 +115,19 @@ const hide = id => $(id).classList.add('auth-hidden');
 const showError = (id, msg) => { const e = $(id); e.textContent = msg; e.classList.remove('auth-hidden'); };
 const hideError = id => $(id).classList.add('auth-hidden');
 
-function showLogin() { hide('boot-spinner'); show('login-wrap'); hide('newpw-wrap'); hide('auth-signout-btn'); }
-function showNewPw() { hide('boot-spinner'); hide('login-wrap'); show('newpw-wrap'); hide('auth-signout-btn'); }
-function showApp() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); show('auth-signout-btn'); if (window.startAutoLedger) window.startAutoLedger(); }
+function showLogin() { hide('boot-spinner'); show('login-wrap'); hide('newpw-wrap'); hide('auth-user-menu'); }
+function showNewPw() { hide('boot-spinner'); hide('login-wrap'); show('newpw-wrap'); hide('auth-user-menu'); }
+function showApp() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); show('auth-user-menu'); populateUserMenu(); if (window.startAutoLedger) window.startAutoLedger(); }
+
+function populateUserMenu() {
+  const u = window.AUTH_USER || {};
+  const name = u.name || u.email || 'User';
+  const initials = name.trim().split(/\s+/).map(s => s[0]).filter(Boolean).slice(0,2).join('').toUpperCase() || 'U';
+  $('auth-avatar').textContent = initials;
+  $('auth-dd-name').textContent = name;
+  $('auth-dd-email').textContent = u.email || '';
+  $('auth-dd-role').textContent = u.role || 'user';
+}
 
 try {
   $('boot-msg').textContent = 'Loading config…';
@@ -177,6 +206,32 @@ $('newpw-btn').addEventListener('click', async () => {
   }
 });
 
+// Avatar click toggles the dropdown
+$('auth-avatar').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const dd = $('auth-dropdown');
+  const isOpen = dd.classList.toggle('auth-open');
+  $('auth-avatar').setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+});
+
+// Click outside closes the dropdown
+document.addEventListener('click', (e) => {
+  const menu = $('auth-user-menu');
+  if (!menu.contains(e.target)) {
+    $('auth-dropdown').classList.remove('auth-open');
+    $('auth-avatar').setAttribute('aria-expanded', 'false');
+  }
+});
+
+// Esc closes the dropdown
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    $('auth-dropdown').classList.remove('auth-open');
+    $('auth-avatar').setAttribute('aria-expanded', 'false');
+  }
+});
+
+// Sign out
 $('auth-signout-btn').addEventListener('click', async () => {
   if (!confirm('Sign out?')) return;
   try { await signOut(); } catch (_) {}
