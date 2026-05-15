@@ -1,0 +1,121 @@
+declare const process: { env: Record<string, string | undefined> };
+
+import { randomBytes } from 'crypto';
+import {
+  CognitoIdentityProviderClient,
+  AdminSetUserPasswordCommand,
+  AdminDeleteUserCommand,
+  UserNotFoundException
+} from '@aws-sdk/client-cognito-identity-provider';
+
+const client = new CognitoIdentityProviderClient();
+
+type ManageEvent = {
+  arguments: {
+    email: string;
+    action: 'reset-password' | 'delete';
+  };
+  identity?: {
+    groups?: string[];
+    username?: string;
+    claims?: { email?: string };
+  };
+};
+
+/**
+ * Generate a random temporary password that satisfies Cognito's default
+ * password policy: min 8 chars, at least one upper, lower, digit, and
+ * special character.
+ */
+function generateTempPassword(): string {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghjkmnpqrstuvwxyz';
+  const digit = '23456789';
+  const special = '!@#$%&';
+  const all = upper + lower + digit + special;
+
+  const bytes = randomBytes(64);
+  const pick = (set: string, idx: number) => set.charAt(bytes[idx] % set.length);
+
+  // Guarantee at least one of each required class
+  let pwd = pick(upper, 0) + pick(lower, 1) + pick(digit, 2) + pick(special, 3);
+  for (let i = 4; i < 12; i++) {
+    pwd += pick(all, i);
+  }
+
+  // Fisher-Yates shuffle using the byte stream so positions are not predictable
+  const arr = pwd.split('');
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = bytes[20 + i] % (i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr.join('');
+}
+
+export const handler = async (event: ManageEvent) => {
+  // ---- Authorization: only admins ----
+  const callerGroups = event.identity?.groups || [];
+  if (!callerGroups.includes('admin')) {
+    return {
+      success: false,
+      message: 'Unauthorized: only admins can manage users.',
+      tempPassword: ''
+    };
+  }
+
+  const { email, action } = event.arguments;
+  const userPoolId = process.env.USER_POOL_ID;
+
+  if (!userPoolId) {
+    return { success: false, message: 'Server misconfiguration: USER_POOL_ID missing.', tempPassword: '' };
+  }
+  if (!email || !action) {
+    return { success: false, message: 'Email and action are required.', tempPassword: '' };
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  // ---- Self-action protection ----
+  const callerEmail = (event.identity?.claims?.email || event.identity?.username || '').toLowerCase();
+  if (callerEmail && callerEmail === normalizedEmail) {
+    return {
+      success: false,
+      message: 'You cannot perform this action on your own account.',
+      tempPassword: ''
+    };
+  }
+
+  try {
+    if (action === 'reset-password') {
+      const tempPassword = generateTempPassword();
+      await client.send(new AdminSetUserPasswordCommand({
+        UserPoolId: userPoolId,
+        Username: normalizedEmail,
+        Password: tempPassword,
+        Permanent: false
+      }));
+      return {
+        success: true,
+        message: `Temporary password generated for ${normalizedEmail}. They will be required to change it on next login.`,
+        tempPassword
+      };
+    } else if (action === 'delete') {
+      await client.send(new AdminDeleteUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizedEmail
+      }));
+      return {
+        success: true,
+        message: `User ${normalizedEmail} has been permanently deleted.`,
+        tempPassword: ''
+      };
+    } else {
+      return { success: false, message: `Unknown action: ${action}`, tempPassword: '' };
+    }
+  } catch (err: any) {
+    if (err instanceof UserNotFoundException) {
+      return { success: false, message: 'User not found.', tempPassword: '' };
+    }
+    return { success: false, message: err?.message || 'Operation failed.', tempPassword: '' };
+  }
+};
