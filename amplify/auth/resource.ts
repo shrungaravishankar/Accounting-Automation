@@ -10,7 +10,6 @@ export const auth = defineAuth({
     email: true
   },
   userAttributes: {
-    email: { required: true, mutable: true },
     fullname: { required: true, mutable: true }
   },
   groups: ['admin', 'staff']
