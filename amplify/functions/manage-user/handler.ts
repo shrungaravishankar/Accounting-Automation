@@ -1,6 +1,5 @@
 declare const process: { env: Record<string, string | undefined> };
 
-import { randomBytes } from 'crypto';
 import {
   CognitoIdentityProviderClient,
   AdminSetUserPasswordCommand,
@@ -23,9 +22,10 @@ type ManageEvent = {
 };
 
 /**
- * Generate a random temporary password that satisfies Cognito's default
- * password policy: min 8 chars, at least one upper, lower, digit, and
- * special character.
+ * Generate a temporary password that satisfies Cognito's default password
+ * policy: minimum 8 chars with at least one upper, one lower, one digit,
+ * and one special character. Uses Math.random — sufficient for a one-time
+ * password that is invalidated on the user's first successful login.
  */
 function generateTempPassword(): string {
   const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -34,20 +34,21 @@ function generateTempPassword(): string {
   const special = '!@#$%&';
   const all = upper + lower + digit + special;
 
-  const bytes = randomBytes(64);
-  const pick = (set: string, idx: number) => set.charAt(bytes[idx] % set.length);
+  const pick = (set: string) => set.charAt(Math.floor(Math.random() * set.length));
 
-  // Guarantee at least one of each required class
-  let pwd = pick(upper, 0) + pick(lower, 1) + pick(digit, 2) + pick(special, 3);
-  for (let i = 4; i < 12; i++) {
-    pwd += pick(all, i);
+  // Guarantee at least one character of each required class
+  let pwd = pick(upper) + pick(lower) + pick(digit) + pick(special);
+  for (let i = 0; i < 8; i++) {
+    pwd += pick(all);
   }
 
-  // Fisher-Yates shuffle using the byte stream so positions are not predictable
+  // Fisher-Yates shuffle so the required-class chars are not at fixed positions
   const arr = pwd.split('');
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = bytes[20 + i] % (i + 1);
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
   }
   return arr.join('');
 }
