@@ -31,7 +31,8 @@
   "imports": {
     "aws-amplify": "./amplify-bundle.js",
     "aws-amplify/auth": "./amplify-bundle.js",
-    "aws-amplify/data": "./amplify-bundle.js"
+    "aws-amplify/data": "./amplify-bundle.js",
+    "aws-amplify/storage": "./amplify-bundle.js"
   }
 }
 </script>
@@ -355,8 +356,47 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 import { Amplify } from 'aws-amplify';
 import { signIn, signOut, confirmSignIn, getCurrentUser, fetchAuthSession, fetchUserAttributes } from 'aws-amplify/auth';
 import { generateClient } from 'aws-amplify/data';
+import { uploadData } from 'aws-amplify/storage';
 
 const dataClient = generateClient();
+
+// Exposed to the React app (separate <script>): upload an exported file to S3
+// and write an ExportLog row in DynamoDB. Owner-scoped by the Cognito session.
+window.storeAndLogExport = async (p) => {
+  const u = window.AUTH_USER || {};
+  const ts = Date.now();
+  const safe = String(p.filename || 'export.xlsx').replace(/[^\w.\-]+/g, '_');
+  let resolvedPath = '';
+  await uploadData({
+    path: ({ identityId }) => { resolvedPath = `exports/${identityId}/${ts}_${safe}`; return resolvedPath; },
+    data: p.blob,
+    options: { contentType: p.blob?.type || 'application/octet-stream' }
+  }).result;
+  const s = p.summary || {}, sf = p.sourceFiles || {};
+  await dataClient.models.ExportLog.create({
+    userName: u.name || null,
+    userEmail: u.email || null,
+    kind: p.kind || 'export',
+    filename: safe,
+    sizeBytes: p.blob?.size ?? null,
+    storagePath: resolvedPath,
+    client: s.client || null,
+    clientId: s.clientId || null,
+    transactionsCount: s.transactions ?? null,
+    expensesCount: s.expenses ?? null,
+    journalsCount: s.journals ?? null,
+    bsItemsCount: s.bsItems ?? null,
+    revenueCount: s.revenue ?? null,
+    suspenseCount: s.suspense ?? null,
+    dateFrom: s.dateFrom || null,
+    dateTo: s.dateTo || null,
+    sourceBank: sf.bankStatement || null,
+    sourceCoa: sf.chartOfAccounts || null,
+    sourceVendors: sf.vendors || null,
+    sourceCustomers: sf.customers || null,
+    generatedAt: new Date().toISOString()
+  });
+};
 const $ = id => document.getElementById(id);
 const show = id => $(id).classList.remove('auth-hidden');
 const hide = id => $(id).classList.add('auth-hidden');
@@ -1685,8 +1725,36 @@ function App(){
     return csv;
   };
 
+  // Upload an exported file to S3 + write a DynamoDB ExportLog row.
+  // Best-effort and non-blocking: never let logging break a download.
+  const cloudLog=(blob,name,kind)=>{
+    try{
+      if(!window.storeAndLogExport)return;
+      const je=journalEntries||{};
+      const dates=(transactions||[]).map(t=>t.date).filter(Boolean);
+      window.storeAndLogExport({
+        blob,filename:name,kind,
+        summary:{
+          client:activeClientName||null,clientId:activeClientId||null,
+          transactions:(transactions||[]).length,
+          expenses:(je.expenses||[]).length,journals:(je.journals||[]).length,
+          bsItems:(je.bsItems||[]).length,revenue:(je.revenue||[]).length,
+          suspense:(je.suspense||[]).length,
+          dateFrom:dates[0]||null,dateTo:dates[dates.length-1]||null
+        },
+        sourceFiles:{
+          bankStatement:bankFileName||null,chartOfAccounts:coaFileName||null,
+          vendors:vendorFileName||null,customers:customerFileName||null
+        }
+      }).catch(()=>{});
+    }catch(_){}
+  };
+
   const downloadFile=(csv,name)=>{
-    const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=name;a.click();
+    const blob=new Blob([csv],{type:"text/csv"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();
+    const kind=/expenses/i.test(name)?"expenses":/journals/i.test(name)?"journals":/BS_items/i.test(name)?"bsItems":/payment_received/i.test(name)?"revenue":/bills/i.test(name)?"bills":"export";
+    cloudLog(blob,name,kind);
   };
 
   const prefix=()=>(activeClientName||"client").replace(/[^a-zA-Z0-9]/g,"_");
@@ -1756,10 +1824,12 @@ td,th{padding:8px 12px;vertical-align:middle}
     if(sus.length===0)return;
     const html=buildSuspenseXLS(sus);
     const blob=new Blob([html],{type:"application/vnd.ms-excel"});
+    const fname=prefix()+"_suspense_clarification.xls";
     const a=document.createElement("a");
     a.href=URL.createObjectURL(blob);
-    a.download=prefix()+"_suspense_clarification.xls";
+    a.download=fname;
     a.click();
+    cloudLog(blob,fname,"suspense");
   },[journalEntries,activeClientName,bankAccount,transactions]);
 
 
@@ -1960,10 +2030,13 @@ td,th{padding:8px 12px;vertical-align:middle}
     confirmed.forEach(b=>{
       csv+=q(b.invoiceNumber)+','+q(b.vendorName)+','+q(b.date)+','+q(b.date)+','+q(b.description)+','+q(b.description)+',"",1,'+b.subtotal+',"",'+b.totalAmount+',"AED"\n';
     });
+    const blob=new Blob([csv],{type:"text/csv"});
+    const fname=(activeClientName||"client").replace(/[^a-zA-Z0-9]/g,"_")+"_bills_import.csv";
     const a=document.createElement("a");
-    a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-    a.download=(activeClientName||"client").replace(/[^a-zA-Z0-9]/g,"_")+"_bills_import.csv";
+    a.href=URL.createObjectURL(blob);
+    a.download=fname;
     a.click();
+    cloudLog(blob,fname,"bills");
   },[bills,activeClientName]);
 
   const filteredTxns=useMemo(()=>{

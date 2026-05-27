@@ -14,6 +14,40 @@ const schema = a.schema({
     })
     .authorization((allow) => [allow.authenticated()]),
 
+  /**
+   * One row per exported file. The owner (creator) can read their own history;
+   * the `admin` group can read everything. The actual file lives in S3 at
+   * `storagePath`; this is the searchable log/metadata.
+   */
+  ExportLog: a
+    .model({
+      userName: a.string(),
+      userEmail: a.string(),
+      kind: a.string(),                  // "journal" | "expenses" | "revenue" | "bsItems" | "suspense" | "bills" | "export"
+      filename: a.string().required(),
+      sizeBytes: a.integer(),
+      storagePath: a.string().required(), // S3 key including identity prefix
+      client: a.string(),
+      clientId: a.string(),
+      transactionsCount: a.integer(),
+      expensesCount: a.integer(),
+      journalsCount: a.integer(),
+      bsItemsCount: a.integer(),
+      revenueCount: a.integer(),
+      suspenseCount: a.integer(),
+      dateFrom: a.string(),
+      dateTo: a.string(),
+      sourceBank: a.string(),
+      sourceCoa: a.string(),
+      sourceVendors: a.string(),
+      sourceCustomers: a.string(),
+      generatedAt: a.datetime()
+    })
+    .authorization((allow) => [
+      allow.owner().to(['create', 'read']),
+      allow.group('admin').to(['read', 'delete'])
+    ]),
+
   InviteResult: a.customType({
     success: a.boolean().required(),
     message: a.string().required()
