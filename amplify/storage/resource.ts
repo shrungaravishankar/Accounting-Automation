@@ -12,17 +12,17 @@ export const storage = defineStorage({
   access: (allow) => ({
     'exports/{entity_id}/*': [
       allow.entity('identity').to(['read', 'write', 'delete']),
-      allow.groups(['admin']).to(['read', 'delete']),
+      allow.groups(['admin']).to(['read', 'write', 'delete']),
     ],
     // Saved-project payloads (transactions + journal entries) as JSON blobs.
     'projects/{entity_id}/*': [
       allow.entity('identity').to(['read', 'write', 'delete']),
-      allow.groups(['admin']).to(['read', 'delete']),
+      allow.groups(['admin']).to(['read', 'write', 'delete']),
     ],
     // Per-client working config + global reference DB (JSON blobs).
     'config/{entity_id}/*': [
       allow.entity('identity').to(['read', 'write', 'delete']),
-      allow.groups(['admin']).to(['read', 'delete']),
+      allow.groups(['admin']).to(['read', 'write', 'delete']),
     ],
   }),
 });
