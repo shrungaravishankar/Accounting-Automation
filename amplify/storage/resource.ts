@@ -14,5 +14,10 @@ export const storage = defineStorage({
       allow.entity('identity').to(['read', 'write', 'delete']),
       allow.groups(['admin']).to(['read', 'delete']),
     ],
+    // Saved-project payloads (transactions + journal entries) as JSON blobs.
+    'projects/{entity_id}/*': [
+      allow.entity('identity').to(['read', 'write', 'delete']),
+      allow.groups(['admin']).to(['read', 'delete']),
+    ],
   }),
 });

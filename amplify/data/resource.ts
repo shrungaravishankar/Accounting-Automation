@@ -48,6 +48,42 @@ const schema = a.schema({
       allow.group('admin').to(['read', 'delete'])
     ]),
 
+  /** A client/company the signed-in user works on. Owner-scoped. */
+  Client: a
+    .model({
+      name: a.string().required(),
+    })
+    .authorization((allow) => [
+      allow.owner().to(['create', 'read', 'update', 'delete']),
+      allow.group('admin').to(['read']),
+    ]),
+
+  /**
+   * A saved project (one processed bank statement) for re-download. Metadata
+   * lives here; the heavy payload (transactions + journal entries) is a JSON
+   * file in S3 at `dataPath`.
+   */
+  Project: a
+    .model({
+      clientId: a.string().required(),
+      clientName: a.string(),
+      name: a.string().required(),
+      exportedAt: a.datetime(),
+      bankName: a.string(),
+      period: a.string(),
+      txnCount: a.integer(),
+      expenseCount: a.integer(),
+      journalCount: a.integer(),
+      bsCount: a.integer(),
+      prCount: a.integer(),
+      suspenseCount: a.integer(),
+      dataPath: a.string().required(),
+    })
+    .authorization((allow) => [
+      allow.owner().to(['create', 'read', 'update', 'delete']),
+      allow.group('admin').to(['read', 'delete']),
+    ]),
+
   InviteResult: a.customType({
     success: a.boolean().required(),
     message: a.string().required()

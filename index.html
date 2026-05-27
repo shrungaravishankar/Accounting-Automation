@@ -356,7 +356,7 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 import { Amplify } from 'aws-amplify';
 import { signIn, signOut, confirmSignIn, getCurrentUser, fetchAuthSession, fetchUserAttributes } from 'aws-amplify/auth';
 import { generateClient } from 'aws-amplify/data';
-import { uploadData } from 'aws-amplify/storage';
+import { uploadData, downloadData, remove as removeFromStorage } from 'aws-amplify/storage';
 
 const dataClient = generateClient();
 
@@ -397,6 +397,84 @@ window.storeAndLogExport = async (p) => {
     generatedAt: new Date().toISOString()
   });
 };
+
+// ===== Cloud-backed clients + saved projects (DynamoDB + S3) =====
+// Exposed to the React app. All owner-scoped by the Cognito session.
+
+window.alClientList = async () => {
+  const res = await dataClient.models.Client.list({ limit: 200 });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return (res.data || []).map(c => ({ id: c.id, name: c.name }));
+};
+window.alClientCreate = async (name) => {
+  const res = await dataClient.models.Client.create({ name });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return { id: res.data.id, name: res.data.name };
+};
+window.alClientDelete = async (id) => {
+  const res = await dataClient.models.Client.delete({ id });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return true;
+};
+
+// Save a project: heavy data → S3 JSON, metadata → DynamoDB. Returns the row.
+window.projectSave = async (p) => {
+  const ts = Date.now();
+  let dataPath = '';
+  await uploadData({
+    path: ({ identityId }) => { dataPath = `projects/${identityId}/${ts}_${p.clientId}.json`; return dataPath; },
+    data: new Blob([JSON.stringify(p.data || {})], { type: 'application/json' }),
+    options: { contentType: 'application/json' }
+  }).result;
+  const res = await dataClient.models.Project.create({
+    clientId: p.clientId,
+    clientName: p.clientName || null,
+    name: p.name,
+    exportedAt: p.exportedAt || new Date().toISOString(),
+    bankName: p.bankName || null,
+    period: p.period || null,
+    txnCount: p.txnCount ?? null,
+    expenseCount: p.expenseCount ?? null,
+    journalCount: p.journalCount ?? null,
+    bsCount: p.bsCount ?? null,
+    prCount: p.prCount ?? null,
+    suspenseCount: p.suspenseCount ?? null,
+    dataPath,
+  });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return res.data;
+};
+
+// List a client's saved projects (metadata only), newest first.
+window.projectList = async (clientId) => {
+  const res = await dataClient.models.Project.list({
+    filter: { clientId: { eq: clientId } },
+    limit: 200,
+  });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return (res.data || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+};
+
+// Download + parse a project's heavy data JSON from S3.
+window.projectLoad = async (dataPath) => {
+  const { body } = await downloadData({ path: dataPath }).result;
+  const text = await body.text();
+  return JSON.parse(text);
+};
+
+window.projectRename = async (id, name) => {
+  const res = await dataClient.models.Project.update({ id, name });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return res.data;
+};
+
+window.projectDelete = async (id, dataPath) => {
+  if (dataPath) { try { await removeFromStorage({ path: dataPath }); } catch (_) {} }
+  const res = await dataClient.models.Project.delete({ id });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return true;
+};
+
 const $ = id => document.getElementById(id);
 const show = id => $(id).classList.remove('auth-hidden');
 const hide = id => $(id).classList.add('auth-hidden');
@@ -1101,15 +1179,21 @@ function App(){
   const[globalKeywordIndex,setGlobalKeywordIndex]=useState({});
   const globalRefInputRef=useRef(null);
 
-  // Client management
-  const[clients,setClients]=useState(getClientList);
+  // Client management (cloud-backed: DynamoDB via window.alClient* helpers)
+  const[clients,setClients]=useState([]);
   const[activeClientId,setActiveClientId]=useState(()=>{ try { return localStorage.getItem("autoledger_active_client")||""; } catch(e) { return ""; } });
-  const[activeClientName,setActiveClientName]=useState(()=>{
-    const id = (typeof localStorage !== "undefined" && localStorage.getItem("autoledger_active_client")) || "";
-    const list = getClientList();
-    const c = list.find(c=>c.id===id);
-    return c ? c.name : "";
-  });
+  const[activeClientName,setActiveClientName]=useState("");
+  // Load the client list from the cloud on mount; restore last-active client.
+  useEffect(()=>{ (async()=>{
+    try {
+      const list = await window.alClientList();
+      setClients(list);
+      let savedId = ""; try { savedId = localStorage.getItem("autoledger_active_client")||""; } catch(e){}
+      const c = list.find(x=>x.id===savedId);
+      if (c) { setActiveClientName(c.name); setClientVersion(getClientData(c.id,"version","free")); }
+      else if (savedId) { setActiveClientId(""); }
+    } catch(e) { console.warn("Could not load clients from cloud:", e); }
+  })(); },[]);
   const[showNewClient,setShowNewClient]=useState(false);
   const[newClientName,setNewClientName]=useState("");
   const[newClientVersion,setNewClientVersion]=useState("free");
@@ -1148,7 +1232,20 @@ function App(){
 
   // Bill Entry state (Paid version only)
   const[bills,setBills]=useState([]);
-  const[projectLog,setProjectLog]=useState(()=>{try{const s=localStorage.getItem("al_projects");return s?JSON.parse(s):{};}catch(e){return{};}});
+  const[projectLog,setProjectLog]=useState({});
+  // Load this client's saved projects from the cloud whenever it changes.
+  useEffect(()=>{
+    if(!activeClientId) return;
+    (async()=>{
+      try{
+        const list = await window.projectList(activeClientId);
+        // boot helper returns newest-first; store oldest-first so the UI's
+        // .reverse() shows newest first (matching the old behavior).
+        const mapped = [...list].reverse().map(r=>({ ...r, date: r.exportedAt }));
+        setProjectLog(prev=>({ ...prev, [activeClientId]: mapped }));
+      }catch(e){ console.warn("Could not load projects:", e); }
+    })();
+  },[activeClientId]);
   const[viewingProject,setViewingProject]=useState(null); // project object when viewing a past project
   const[billProcessing,setBillProcessing]=useState(false);
   const[billProgress,setBillProgress]=useState("");
@@ -1317,22 +1414,22 @@ function App(){
   },[]);
 
   // Client actions
-  const createClient = useCallback((name)=>{
+  const createClient = useCallback(async (name)=>{
     if (!name.trim()) return;
-    const id = makeClientId(name) + "_" + Date.now().toString(36);
-    const newClient = { id, name: name.trim(), created: Date.now(), version: newClientVersion };
-    const updated = [...clients, newClient];
-    setClients(updated);
-    saveClientList(updated);
-    setActiveClientId(id);
-    setActiveClientName(name.trim());
+    let created;
+    try { created = await window.alClientCreate(name.trim()); }
+    catch(e){ alert("Could not create client: "+(e.message||e)); return; }
+    const newClient = { id: created.id, name: created.name, version: newClientVersion };
+    setClients(prev=>[...prev, newClient]);
+    setActiveClientId(created.id);
+    setActiveClientName(created.name);
     setClientVersion(newClientVersion);
-    setClientData(id, "version", newClientVersion);
-    localStorage.setItem("autoledger_active_client", id);
+    setClientData(created.id, "version", newClientVersion);
+    try{localStorage.setItem("autoledger_active_client", created.id);}catch(e){}
     setShowNewClient(false);
     setNewClientName("");
     setNewClientVersion("free");
-  }, [clients, newClientVersion]);
+  }, [newClientVersion]);
 
   const switchClient = useCallback((id)=>{
     const c = clients.find(c=>c.id===id);
@@ -1368,15 +1465,19 @@ function App(){
     });
   },[activeClientId]);
 
-  const deleteClient = useCallback((id)=>{
+  const deleteClient = useCallback(async (id)=>{
     if (!confirm("Delete client '"+clients.find(c=>c.id===id)?.name+"' and all their data? This cannot be undone.")) return;
+    try {
+      const projs = await window.projectList(id).catch(()=>[]);
+      for (const p of projs) { try { await window.projectDelete(p.id, p.dataPath); } catch(_){} }
+      await window.alClientDelete(id);
+    } catch(e){ alert("Could not delete client: "+(e.message||e)); return; }
     deleteClientData(id);
     const updated = clients.filter(c=>c.id!==id);
     setClients(updated);
-    saveClientList(updated);
     if (activeClientId === id) {
       if (updated.length > 0) { switchClient(updated[0].id); }
-      else { setActiveClientId(""); setActiveClientName(""); localStorage.removeItem("autoledger_active_client"); }
+      else { setActiveClientId(""); setActiveClientName(""); try{localStorage.removeItem("autoledger_active_client");}catch(e){} }
     }
   }, [clients, activeClientId, switchClient]);
   useEffect(()=>{const h=(e)=>{Object.keys(coaDropdownOpen).filter(id=>coaDropdownOpen[id]).forEach(id=>{if(dropdownRefs.current[id]&&!dropdownRefs.current[id].contains(e.target))setCoaDropdownOpen(p=>({...p,[id]:false}));});Object.keys(contactDropdownOpen).filter(id=>contactDropdownOpen[id]).forEach(id=>{const el=document.querySelector('[data-contact-dd="'+id+'"]');if(el&&!el.contains(e.target))setContactDropdownOpen(p=>({...p,[id]:false}));});};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[coaDropdownOpen,contactDropdownOpen]);
@@ -1867,14 +1968,28 @@ td,th{padding:8px 12px;vertical-align:middle}
           suspense:journalEntries.suspense||[],
         }
       };
-      // Save project data separately to avoid localStorage size issues
-      try{localStorage.setItem("al_proj_"+project.id,JSON.stringify(project.data));}catch(e){console.warn("Project data too large for localStorage");}
-      const summary={...project};delete summary.data;
-      setProjectLog(prev=>{
-        const updated={...prev,[activeClientId]:[...(prev[activeClientId]||[]),summary]};
-        try{localStorage.setItem("al_projects",JSON.stringify(updated));}catch(e){}
-        return updated;
-      });
+      // Save to the cloud: heavy data → S3, metadata → DynamoDB.
+      (async()=>{
+        try{
+          const saved = await window.projectSave({
+            clientId: activeClientId,
+            clientName: activeClientName || null,
+            name: project.name,
+            exportedAt: project.date,
+            bankName: project.bankName,
+            period: project.period,
+            txnCount: project.txnCount,
+            expenseCount: project.expenseCount,
+            journalCount: project.journalCount,
+            bsCount: project.bsCount,
+            prCount: project.prCount,
+            suspenseCount: project.suspenseCount,
+            data: project.data,
+          });
+          const summary = { ...saved, date: saved.exportedAt };
+          setProjectLog(prev=>({ ...prev, [activeClientId]: [...(prev[activeClientId]||[]), summary] }));
+        }catch(e){ console.warn("Could not save project to cloud:", e); alert("Could not save project to the cloud: "+(e.message||e)); }
+      })();
     }
     setStep(6);
   },[exportExpenses,exportJournals,exportBSItems,exportPaymentReceived,exportSuspense,journalEntries,activeClientId,transactions,bankAccount]);
@@ -1882,19 +1997,17 @@ td,th{padding:8px 12px;vertical-align:middle}
   const renameProject=useCallback((clientId,projectId,newName)=>{
     setProjectLog(prev=>{
       const clientProjects=(prev[clientId]||[]).map(p=>p.id===projectId?{...p,name:newName}:p);
-      const updated={...prev,[clientId]:clientProjects};
-      try{localStorage.setItem("al_projects",JSON.stringify(updated));}catch(e){}
-      return updated;
+      return {...prev,[clientId]:clientProjects};
     });
+    window.projectRename(projectId,newName).catch(e=>{ console.warn("Rename failed:",e); alert("Could not rename: "+(e.message||e)); });
   },[]);
 
-  const deleteProject=useCallback((clientId,projectId)=>{
+  const deleteProject=useCallback((clientId,projectId,dataPath)=>{
     setProjectLog(prev=>{
       const clientProjects=(prev[clientId]||[]).filter(p=>p.id!==projectId);
-      const updated={...prev,[clientId]:clientProjects};
-      try{localStorage.setItem("al_projects",JSON.stringify(updated));}catch(e){}
-      return updated;
+      return {...prev,[clientId]:clientProjects};
     });
+    window.projectDelete(projectId,dataPath).catch(e=>{ console.warn("Delete failed:",e); });
   },[]);
   const loadSampleData=useCallback(()=>{
     setTransactions([
@@ -2354,7 +2467,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{fontSize:13,fontWeight:600,marginBottom:10,color:"#0891b2"}}>📁 Project History</div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {(projectLog[activeClientId]||[]).slice().reverse().map(p=>(
-                <div key={p.id} onClick={()=>{try{const d=JSON.parse(localStorage.getItem("al_proj_"+p.id));if(d)setViewingProject({...p,data:d});else alert("Project data not found in storage.");}catch(e){alert("Could not load project data.");}}} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:"#ffffff",borderRadius:8,border:"1px solid #e2e2ea",gap:12,flexWrap:"wrap",cursor:"pointer",transition:"all 0.15s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="rgba(8,145,178,0.4)"} onMouseLeave={e=>e.currentTarget.style.borderColor="#e2e2ea"}>
+                <div key={p.id} onClick={async()=>{try{const d=await window.projectLoad(p.dataPath);if(d)setViewingProject({...p,data:d});else alert("Project data not found.");}catch(e){alert("Could not load project data: "+(e.message||e));}}} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:"#ffffff",borderRadius:8,border:"1px solid #e2e2ea",gap:12,flexWrap:"wrap",cursor:"pointer",transition:"all 0.15s"}} onMouseEnter={e=>e.currentTarget.style.borderColor="rgba(8,145,178,0.4)"} onMouseLeave={e=>e.currentTarget.style.borderColor="#e2e2ea"}>
                   <div style={{flex:1,minWidth:200}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <span style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{p.name}</span>
@@ -2370,7 +2483,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     {p.suspenseCount>0&&<span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:"rgba(217,119,6,0.08)",color:"#d97706"}}>Sus: {p.suspenseCount}</span>}
                     <span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:"rgba(105,88,194,0.08)",color:"#666666"}}>{p.txnCount} txns</span>
                   </div>
-                  <button onClick={(e)=>{e.stopPropagation();if(confirm("Delete this project log entry?"))deleteProject(activeClientId,p.id);try{localStorage.removeItem("al_proj_"+p.id);}catch(x){}}} style={{background:"none",border:"none",color:"#cccccc",fontSize:10,cursor:"pointer",padding:"2px 6px"}}>✕</button>
+                  <button onClick={(e)=>{e.stopPropagation();if(confirm("Delete this project log entry?"))deleteProject(activeClientId,p.id,p.dataPath);}} style={{background:"none",border:"none",color:"#cccccc",fontSize:10,cursor:"pointer",padding:"2px 6px"}}>✕</button>
                 </div>
               ))}
             </div>

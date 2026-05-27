@@ -7,4 +7,4 @@ export {
   fetchUserAttributes, resetPassword, confirmResetPassword
 } from 'aws-amplify/auth';
 export { generateClient } from 'aws-amplify/data';
-export { uploadData, getUrl, remove } from 'aws-amplify/storage';
+export { uploadData, downloadData, getUrl, remove } from 'aws-amplify/storage';
