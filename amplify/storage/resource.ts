@@ -19,5 +19,10 @@ export const storage = defineStorage({
       allow.entity('identity').to(['read', 'write', 'delete']),
       allow.groups(['admin']).to(['read', 'delete']),
     ],
+    // Per-client working config + global reference DB (JSON blobs).
+    'config/{entity_id}/*': [
+      allow.entity('identity').to(['read', 'write', 'delete']),
+      allow.groups(['admin']).to(['read', 'delete']),
+    ],
   }),
 });

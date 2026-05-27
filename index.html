@@ -475,6 +475,61 @@ window.projectDelete = async (id, dataPath) => {
   return true;
 };
 
+// ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing'];
+
+// Download a client's config bundle from S3 into localStorage (the cache the app reads).
+window.alConfigLoad = async (clientId) => {
+  try {
+    const { body } = await downloadData({ path: ({ identityId }) => `config/${identityId}/${clientId}.json` }).result;
+    const obj = JSON.parse(await body.text());
+    for (const k of CONFIG_KEYS) {
+      if (obj[k] !== undefined) { try { localStorage.setItem('al_' + clientId + '_' + k, JSON.stringify(obj[k])); } catch (_) {} }
+    }
+    return true;
+  } catch (e) { return false; } // first time / not found
+};
+
+// Debounced upload of a client's config bundle (read from the localStorage cache).
+const _cfgTimers = {};
+window.alConfigSave = (clientId) => {
+  if (!clientId) return;
+  clearTimeout(_cfgTimers[clientId]);
+  _cfgTimers[clientId] = setTimeout(async () => {
+    const obj = {};
+    for (const k of CONFIG_KEYS) {
+      try { const s = localStorage.getItem('al_' + clientId + '_' + k); if (s != null) obj[k] = JSON.parse(s); } catch (_) {}
+    }
+    try {
+      await uploadData({
+        path: ({ identityId }) => `config/${identityId}/${clientId}.json`,
+        data: new Blob([JSON.stringify(obj)], { type: 'application/json' }),
+        options: { contentType: 'application/json' },
+      }).result;
+    } catch (e) { console.warn('Config sync failed:', e); }
+  }, 1200);
+};
+
+window.alGlobalLoad = async () => {
+  try {
+    const { body } = await downloadData({ path: ({ identityId }) => `config/${identityId}/_global.json` }).result;
+    return JSON.parse(await body.text());
+  } catch (e) { return null; }
+};
+let _globalTimer;
+window.alGlobalSave = (data) => {
+  clearTimeout(_globalTimer);
+  _globalTimer = setTimeout(async () => {
+    try {
+      await uploadData({
+        path: ({ identityId }) => `config/${identityId}/_global.json`,
+        data: new Blob([JSON.stringify(data || {})], { type: 'application/json' }),
+        options: { contentType: 'application/json' },
+      }).result;
+    } catch (e) { console.warn('Global sync failed:', e); }
+  }, 1200);
+};
+
 const $ = id => document.getElementById(id);
 const show = id => $(id).classList.remove('auth-hidden');
 const hide = id => $(id).classList.add('auth-hidden');
@@ -1155,6 +1210,7 @@ function getClientData(clientId, key, fallback) {
 }
 function setClientData(clientId, key, val) {
   try { localStorage.setItem("al_"+clientId+"_"+key, JSON.stringify(val)); } catch(e) {}
+  try { if (window.alConfigSave) window.alConfigSave(clientId); } catch(e) {}
 }
 function deleteClientData(clientId) {
   try {
@@ -1255,26 +1311,33 @@ function App(){
 
 
 
-  // Load client data when activeClientId changes
+  // Load client data when activeClientId changes.
+  // First pull the client's config bundle from the cloud into the localStorage
+  // cache, THEN read it (so the synchronous getClientData calls see fresh data).
   useEffect(()=>{
     if (!activeClientId) return;
-    setLearnedRules(getClientData(activeClientId, "rules", {}));
-    setRefDB(getClientData(activeClientId, "refdb", {}));
-    setBankAccount(getClientData(activeClientId, "bank", "Bank Account"));
-    const savedCoa = getClientData(activeClientId, "coa", null);
-    if (savedCoa && savedCoa.length > 0) setChartOfAccounts(savedCoa); else setChartOfAccounts(SAMPLE_COA);
-    setCoaFileName(getClientData(activeClientId, "coa_name", ""));
-    setVendors(getClientData(activeClientId, "vendors", []));
-    setCustomers(getClientData(activeClientId, "customers", []));
-    setVendorFileName(getClientData(activeClientId, "vendor_file", ""));
-    setCustomerFileName(getClientData(activeClientId, "customer_file", ""));
-    // Reset session state
+    // Reset session state immediately on switch.
     setStep(1); setTransactions([]); setClassifiedTxns([]); setJournalEntries({expenses:[],revenue:[]});
     setBankFileName(""); setParseError(""); setReviewTab("expenses"); setAppMode("bank");
     setUserOpeningBal(""); setUserClosingBal("");
-    // Load client version
-    const c = clients.find(c=>c.id===activeClientId);
-    setClientVersion(c?.version || getClientData(activeClientId, "version", "free"));
+    let cancelled = false;
+    (async()=>{
+      try { await window.alConfigLoad(activeClientId); } catch(_){}
+      if (cancelled) return;
+      setLearnedRules(getClientData(activeClientId, "rules", {}));
+      setRefDB(getClientData(activeClientId, "refdb", {}));
+      setBankAccount(getClientData(activeClientId, "bank", "Bank Account"));
+      const savedCoa = getClientData(activeClientId, "coa", null);
+      if (savedCoa && savedCoa.length > 0) setChartOfAccounts(savedCoa); else setChartOfAccounts(SAMPLE_COA);
+      setCoaFileName(getClientData(activeClientId, "coa_name", ""));
+      setVendors(getClientData(activeClientId, "vendors", []));
+      setCustomers(getClientData(activeClientId, "customers", []));
+      setVendorFileName(getClientData(activeClientId, "vendor_file", ""));
+      setCustomerFileName(getClientData(activeClientId, "customer_file", ""));
+      const c = clients.find(c=>c.id===activeClientId);
+      setClientVersion(c?.version || getClientData(activeClientId, "version", "free"));
+    })();
+    return ()=>{ cancelled = true; };
   }, [activeClientId]);
 
   // Save client data when it changes
@@ -1288,13 +1351,23 @@ function App(){
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"vendor_file",vendorFileName); },[vendorFileName,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"customer_file",customerFileName); },[customerFileName,activeClientId]);
 
-  // Persist global reference database and rebuild keyword index
+  // Load the global reference DB from the cloud on mount.
+  const globalReadyRef = useRef(false);
+  useEffect(()=>{ (async()=>{
+    try { const g = await window.alGlobalLoad(); if (g && g.global_refdb) setGlobalRefDB(g.global_refdb); } catch(_){}
+    globalReadyRef.current = true;
+  })(); },[]);
+
+  // Persist global reference database (localStorage cache + cloud) and rebuild keyword index.
   useEffect(()=>{
     try{
       localStorage.setItem("autoledger_global_refdb",JSON.stringify(globalRefDB));
       setGlobalRefCount(Object.keys(globalRefDB).length);
       setGlobalKeywordIndex(buildKeywordIndex(globalRefDB));
     }catch(e){}
+    // Only sync up once the initial cloud load has happened, so we never
+    // overwrite cloud data with the empty initial state.
+    if (globalReadyRef.current && window.alGlobalSave) window.alGlobalSave({ global_refdb: globalRefDB });
   },[globalRefDB]);
 
   // Handle global base data upload (CSV/XLSX with Description + Ledger columns)
