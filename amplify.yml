@@ -18,6 +18,7 @@ frontend:
       - 'amplify_outputs.json'
       - '404.html'
       - 'robots.txt'
+      - 'bcl-logo.png'
   cache:
     paths:
       - .npm/**/*
