@@ -4,6 +4,13 @@ import {
   CognitoIdentityProviderClient,
   AdminSetUserPasswordCommand,
   AdminDeleteUserCommand,
+  AdminAddUserToGroupCommand,
+  AdminRemoveUserFromGroupCommand,
+  AdminListGroupsForUserCommand,
+  AdminUpdateUserAttributesCommand,
+  AdminGetUserCommand,
+  CreateGroupCommand,
+  GroupExistsException,
   UserNotFoundException
 } from '@aws-sdk/client-cognito-identity-provider';
 
@@ -12,7 +19,8 @@ const client = new CognitoIdentityProviderClient();
 type ManageEvent = {
   arguments: {
     email: string;
-    action: 'reset-password' | 'delete';
+    action: 'reset-password' | 'delete' | 'set-role';
+    role?: string; // 'admin' | 'team-lead' | 'staff'  (only for set-role)
   };
   identity?: {
     groups?: string[];
@@ -108,6 +116,88 @@ export const handler = async (event: ManageEvent) => {
       return {
         success: true,
         message: `User ${normalizedEmail} has been permanently deleted.`,
+        tempPassword: ''
+      };
+    } else if (action === 'set-role') {
+      // Only Super Admins (Cognito 'admin' group) may change roles.
+      if (!callerGroups.includes('admin')) {
+        return { success: false, message: 'Only a Super Admin can change roles.', tempPassword: '' };
+      }
+      const newRole = (event.arguments.role || '').trim();
+      const ALLOWED = ['admin', 'team-lead', 'staff'];
+      if (!ALLOWED.includes(newRole)) {
+        return { success: false, message: 'Role must be admin (Super Admin), team-lead (Admin), or staff (User).', tempPassword: '' };
+      }
+
+      // Pull the user's sub (needed when promoting to Admin → create team-<sub>)
+      // and their current group memberships.
+      const userRes = await client.send(new AdminGetUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizedEmail
+      }));
+      const sub = userRes.UserAttributes?.find(a => a.Name === 'sub')?.Value || '';
+
+      const grpRes = await client.send(new AdminListGroupsForUserCommand({
+        UserPoolId: userPoolId,
+        Username: normalizedEmail
+      }));
+      const current = (grpRes.Groups || []).map(g => g.GroupName).filter((g): g is string => !!g);
+
+      // Helpers
+      const add = async (g: string) => {
+        if (!current.includes(g)) {
+          await client.send(new AdminAddUserToGroupCommand({
+            UserPoolId: userPoolId, Username: normalizedEmail, GroupName: g
+          }));
+        }
+      };
+      const remove = async (g: string) => {
+        if (current.includes(g)) {
+          await client.send(new AdminRemoveUserFromGroupCommand({
+            UserPoolId: userPoolId, Username: normalizedEmail, GroupName: g
+          }));
+        }
+      };
+
+      if (newRole === 'admin') {
+        // Promote to Super Admin: add to 'admin'; remove from staff + any team-* group; clear custom:team.
+        await add('admin');
+        await remove('staff');
+        for (const g of current.filter(g => g.startsWith('team-'))) await remove(g);
+        await client.send(new AdminUpdateUserAttributesCommand({
+          UserPoolId: userPoolId, Username: normalizedEmail,
+          UserAttributes: [{ Name: 'custom:team', Value: '' }]
+        }));
+      } else if (newRole === 'team-lead') {
+        // Make them an Admin with their own team: remove 'admin'; ensure team-<sub> + 'staff'; set custom:team.
+        if (!sub) return { success: false, message: 'Could not determine user sub; aborting.', tempPassword: '' };
+        const team = `team-${sub}`;
+        try {
+          await client.send(new CreateGroupCommand({
+            UserPoolId: userPoolId, GroupName: team,
+            Description: `Team led by ${normalizedEmail}`
+          }));
+        } catch (e: any) { if (!(e instanceof GroupExistsException)) throw e; }
+        await remove('admin');
+        await add('staff');
+        await add(team);
+        // Remove any OTHER team-* groups they were in.
+        for (const g of current.filter(g => g.startsWith('team-') && g !== team)) await remove(g);
+        await client.send(new AdminUpdateUserAttributesCommand({
+          UserPoolId: userPoolId, Username: normalizedEmail,
+          UserAttributes: [{ Name: 'custom:team', Value: team }]
+        }));
+      } else {
+        // Demote / set as User: ensure 'staff'; remove 'admin' and any team-* group.
+        // custom:team is left as-is (it should already point to their Admin's team if applicable).
+        await add('staff');
+        await remove('admin');
+        for (const g of current.filter(g => g.startsWith('team-'))) await remove(g);
+      }
+
+      return {
+        success: true,
+        message: `Role updated for ${normalizedEmail}.`,
         tempPassword: ''
       };
     } else {

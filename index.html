@@ -872,7 +872,20 @@ async function loadUsersList() {
           + '<button class="user-action-btn user-action-reset" data-action="reset" data-email="' + escapeHtml(u.email) + '" title="Generate new temporary password">Reset</button>'
           + '<button class="user-action-btn user-action-delete" data-action="delete" data-email="' + escapeHtml(u.email) + '" data-name="' + escapeHtml(displayName) + '" title="Permanently delete this user">Delete</button>'
           + '</div>';
-      const roleControl = '<span class="user-role">' + escapeHtml((window.ROLE_LABEL && window.ROLE_LABEL[u.role]) || u.role || 'none') + '</span>';
+      // Only the Super Admin (Cognito 'admin' group) sees an inline role dropdown.
+      // Everyone else (including Admins) sees the static badge — they manage their team
+      // through invites, not role flipping.
+      const viewerIsSuperAdmin = window.AUTH_USER && window.AUTH_USER.role === 'admin';
+      const roleControl = (!viewerIsSuperAdmin || isSelf)
+        ? '<span class="user-role">' + escapeHtml((window.ROLE_LABEL && window.ROLE_LABEL[u.role]) || u.role || 'none') + '</span>'
+        : '<select class="user-role-select" data-action="set-role" data-email="' + escapeHtml(u.email) + '" data-current="' + escapeHtml(u.role || '') + '" title="Change role">'
+          + (u.role === 'none' || !u.role ? '<option value="" disabled' + (!u.role || u.role === 'none' ? ' selected' : '') + '>— not assigned —</option>' : '')
+          + ['admin','team-lead','staff'].map(r =>
+              '<option value="' + r + '"' + (u.role === r ? ' selected' : '') + '>'
+              + ((window.ROLE_LABEL && window.ROLE_LABEL[r]) || r).toUpperCase()
+              + '</option>'
+            ).join('')
+          + '</select>';
       return '<div class="user-row">'
         + '<div style="flex:1;min-width:0;">'
         +   '<div class="user-row-name">' + escapeHtml(displayName) + '</div>'
@@ -914,6 +927,37 @@ $('users-refresh-btn').addEventListener('click', loadUsersList);
 $('tab-invite-btn').addEventListener('click', function() { switchModalTab('invite'); });
 $('tab-list-btn').addEventListener('click', function() { switchModalTab('list'); });
 $('invite-modal').addEventListener('click', (e) => { if (e.target === $('invite-modal')) closeInviteModal(); });
+
+// ===== Inline role change (Super Admin only) =====
+$('users-list-container').addEventListener('change', async function(e) {
+  const sel = e.target.closest('select[data-action="set-role"]');
+  if (!sel || sel.disabled) return;
+  const email = sel.dataset.email;
+  const previous = sel.dataset.current || '';
+  const newRole = sel.value;
+  if (!email || !newRole || newRole === previous) return;
+
+  const niceNew = (window.ROLE_LABEL && window.ROLE_LABEL[newRole]) || newRole;
+  if (!confirm('Change role for ' + email + ' to ' + niceNew + '?')) {
+    sel.value = previous;
+    return;
+  }
+
+  sel.disabled = true;
+  try {
+    const res = await dataClient.mutations.manageUser({ email, action: 'set-role', role: newRole });
+    let data = res.data;
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (_) {} }
+    if (!data || !data.success) throw new Error((data && data.message) || 'Failed to change role.');
+    sel.dataset.current = newRole;
+    loadUsersList();
+  } catch (err) {
+    alert('Could not change role: ' + (err && err.message ? err.message : String(err)));
+    sel.value = previous;
+  } finally {
+    sel.disabled = false;
+  }
+});
 
 // ===== User action buttons (Reset / Delete) =====
 $('users-list-container').addEventListener('click', async function(e) {
