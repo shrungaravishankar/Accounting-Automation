@@ -440,6 +440,18 @@ window.alClientDelete = async (id) => {
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return true;
 };
+window.alClientRename = async (id, name) => {
+  const res = await dataClient.models.Client.update({ id, name });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  // Best-effort: keep any saved projects' denormalised clientName in sync.
+  try {
+    const projRes = await dataClient.models.Project.list({ filter: { clientId: { eq: id } }, limit: 500 });
+    for (const p of (projRes.data || [])) {
+      await dataClient.models.Project.update({ id: p.id, clientName: name }).catch(() => {});
+    }
+  } catch (_) { /* non-critical */ }
+  return { id, name };
+};
 
 // Save a project: heavy data → S3 JSON, metadata → DynamoDB. Returns the row.
 window.projectSave = async (p) => {
@@ -1669,6 +1681,27 @@ function App(){
     });
   },[activeClientId]);
 
+  const renameClient = useCallback(async (id, suggested)=>{
+    const current = (clients.find(c=>c.id===id) || {}).name || suggested || "";
+    const next = prompt("Rename client:", current);
+    if (next == null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === current) return;
+    try {
+      await window.alClientRename(id, trimmed);
+      setClients(prev => prev.map(c => c.id === id ? { ...c, name: trimmed } : c));
+      if (activeClientId === id) setActiveClientName(trimmed);
+      // Update any in-memory project log entries that reference this client.
+      setProjectLog(prev => {
+        const list = prev[id];
+        if (!list) return prev;
+        return { ...prev, [id]: list.map(p => ({ ...p, clientName: trimmed })) };
+      });
+    } catch (e) {
+      alert("Could not rename: " + (e.message || e));
+    }
+  }, [clients, activeClientId]);
+
   const deleteClient = useCallback(async (id)=>{
     if (!confirm("Delete client '"+clients.find(c=>c.id===id)?.name+"' and all their data? This cannot be undone.")) return;
     try {
@@ -2450,6 +2483,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />
                       <div style={{fontSize:15,fontWeight:600}}>{c.name}</div>
+                      <button onClick={(e)=>{e.stopPropagation();renameClient(c.id);}} title="Rename client" style={{background:"none",border:"none",color:"#888888",fontSize:12,cursor:"pointer",padding:"0 4px"}}>✏️</button>
                       <span style={{fontSize:8,padding:"1px 6px",borderRadius:4,fontWeight:700,background:(c.version||getClientData(c.id,"version","free"))==="paid"?"rgba(22,163,74,0.1)":"rgba(105,88,194,0.1)",color:(c.version||getClientData(c.id,"version","free"))==="paid"?"#16a34a":"#888888",border:"1px solid "+((c.version||getClientData(c.id,"version","free"))==="paid"?"rgba(22,163,74,0.2)":"rgba(105,88,194,0.2)")}}>{(c.version||getClientData(c.id,"version","free"))==="paid"?"PAID":"FREE"}</span>
                     </div>
                     <div style={{fontSize:10,color:"#888888",marginTop:2}}>Bank: {getClientData(c.id,"bank","Not set")}</div>
@@ -2550,6 +2584,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />
             <span style={{fontSize:14,fontWeight:600,color:"#4D3FA0"}}>{activeClientName}</span>
+            {activeClientId && <button onClick={()=>renameClient(activeClientId)} title="Rename client" style={{background:"none",border:"none",color:"#888888",fontSize:12,cursor:"pointer",padding:"0 4px"}}>✏️</button>}
             {bankAccount && bankAccount !== "Bank Account" && <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.1)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>{bankAccount}</span>}
             <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(105,88,194,0.15)",color:"#6958C2",border:"1px solid rgba(105,88,194,0.3)"}}>{Object.keys(refDB).length} refs</span>
             {globalRefCount>0&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.15)"}}>{globalRefCount} global</span>}
