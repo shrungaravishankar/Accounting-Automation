@@ -2815,12 +2815,15 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                 {!viewingProject.locked && <button onClick={()=>reopenProject(viewingProject)} title="Re-open this project to re-classify transactions or apply client clarifications" style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 14px",color:"#ffffff",fontSize:11,fontWeight:600,cursor:"pointer"}}>↺ Re-classify & edit</button>}
                 {viewingProject.locked
-                  ? <button onClick={()=>{if(confirm("Unlock this project? It will become editable again."))setProjectLocked(viewingProject.id,false);}} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Unlock</button>
+                  // Only Admin and Level 1 Users can unlock — Sub-users must ask their Level 1.
+                  ? (["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role)
+                      ? <button onClick={()=>{if(confirm("Unlock this project? It will become editable again."))setProjectLocked(viewingProject.id,false);}} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Unlock</button>
+                      : null)
                   : <button onClick={()=>{if(confirm("Lock this project? It becomes read-only — you can still re-download files but cannot re-classify, rename or delete it until unlocked."))setProjectLocked(viewingProject.id,true);}} style={{background:"#ffffff",border:"1px solid #16a34a",borderRadius:6,padding:"6px 14px",color:"#16a34a",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔒 Lock</button>}
                 <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
               </div>
             </div>
-            {viewingProject.locked && <div style={{background:"rgba(161,98,7,0.08)",border:"1px solid rgba(161,98,7,0.25)",color:"#a16207",fontSize:11,padding:"8px 12px",borderRadius:6,marginBottom:12}}>🔒 This project is locked. Unlock it to re-classify or change anything.</div>}
+            {viewingProject.locked && <div style={{background:"rgba(161,98,7,0.08)",border:"1px solid rgba(161,98,7,0.25)",color:"#a16207",fontSize:11,padding:"8px 12px",borderRadius:6,marginBottom:12}}>🔒 This project is locked.{["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) ? " Click Unlock to make it editable again." : " Ask your Level 1 User (or an Admin) to unlock it before you can make any changes."}</div>}
 
             {/* Summary cards */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:16}}>
