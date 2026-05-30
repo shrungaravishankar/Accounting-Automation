@@ -84,6 +84,8 @@ const schema = a.schema({
       // Captured at creation so Managers/Team Leads can see who exported what.
       ownerEmail: a.string(),
       ownerName: a.string(),
+      // When true the project is read-only — reopen / rename / delete are blocked.
+      locked: a.boolean(),
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),

@@ -507,6 +507,41 @@ window.projectRename = async (id, name) => {
   return res.data;
 };
 
+// Re-save an existing project (when the user re-opened it for editing).
+// Uploads a fresh data blob to S3, then updates the Project row in DynamoDB.
+window.projectUpdate = async (id, p) => {
+  const ts = Date.now();
+  let dataPath = '';
+  await uploadData({
+    path: ({ identityId }) => { dataPath = `projects/${identityId}/${ts}_${p.clientId}.json`; return dataPath; },
+    data: new Blob([JSON.stringify(p.data || {})], { type: 'application/json' }),
+    options: { contentType: 'application/json' }
+  }).result;
+  const res = await dataClient.models.Project.update({
+    id,
+    clientName: p.clientName || null,
+    name: p.name,
+    exportedAt: p.exportedAt || new Date().toISOString(),
+    bankName: p.bankName || null,
+    period: p.period || null,
+    txnCount: p.txnCount ?? null,
+    expenseCount: p.expenseCount ?? null,
+    journalCount: p.journalCount ?? null,
+    bsCount: p.bsCount ?? null,
+    prCount: p.prCount ?? null,
+    suspenseCount: p.suspenseCount ?? null,
+    dataPath,
+  });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return res.data;
+};
+
+window.projectSetLocked = async (id, locked) => {
+  const res = await dataClient.models.Project.update({ id, locked: !!locked });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return res.data;
+};
+
 window.projectDelete = async (id, dataPath) => {
   if (dataPath) { try { await removeFromStorage({ path: dataPath }); } catch (_) {} }
   const res = await dataClient.models.Project.delete({ id });
@@ -1446,6 +1481,7 @@ function App(){
     })();
   },[activeClientId]);
   const[viewingProject,setViewingProject]=useState(null); // project object when viewing a past project
+  const[editingProjectId,setEditingProjectId]=useState(""); // set when re-opening a saved project for edits; next save UPDATEs this project instead of creating a new one
   const[billProcessing,setBillProcessing]=useState(false);
   const[billProgress,setBillProgress]=useState("");
   const billInputRef=useRef(null);
@@ -2206,9 +2242,13 @@ td,th{padding:8px 12px;vertical-align:middle}
         }
       };
       // Save to the cloud: heavy data → S3, metadata → DynamoDB.
+      // If we're editing a previously-saved project, UPDATE it in place
+      // (preserves the project id + its position in history). Otherwise create
+      // a new one.
+      const editingId = editingProjectId;
       (async()=>{
         try{
-          const saved = await window.projectSave({
+          const payload = {
             clientId: activeClientId,
             clientName: activeClientName || null,
             name: project.name,
@@ -2222,29 +2262,78 @@ td,th{padding:8px 12px;vertical-align:middle}
             prCount: project.prCount,
             suspenseCount: project.suspenseCount,
             data: project.data,
-          });
-          const summary = { ...saved, date: saved.exportedAt };
-          setProjectLog(prev=>({ ...prev, [activeClientId]: [...(prev[activeClientId]||[]), summary] }));
+          };
+          if (editingId) {
+            const updated = await window.projectUpdate(editingId, payload);
+            const summary = { ...updated, date: updated.exportedAt };
+            setProjectLog(prev => ({ ...prev, [activeClientId]: (prev[activeClientId]||[]).map(p => p.id === editingId ? summary : p) }));
+            setEditingProjectId("");
+          } else {
+            const saved = await window.projectSave(payload);
+            const summary = { ...saved, date: saved.exportedAt };
+            setProjectLog(prev=>({ ...prev, [activeClientId]: [...(prev[activeClientId]||[]), summary] }));
+          }
         }catch(e){ console.warn("Could not save project to cloud:", e); alert("Could not save project to the cloud: "+(e.message||e)); }
       })();
     }
     setStep(6);
-  },[exportExpenses,exportJournals,exportBSItems,exportPaymentReceived,exportSuspense,journalEntries,activeClientId,transactions,bankAccount]);
+  },[exportExpenses,exportJournals,exportBSItems,exportPaymentReceived,exportSuspense,journalEntries,activeClientId,activeClientName,transactions,bankAccount,editingProjectId]);
 
   const renameProject=useCallback((clientId,projectId,newName)=>{
     setProjectLog(prev=>{
+      const existing=(prev[clientId]||[]).find(p=>p.id===projectId);
+      if(existing&&existing.locked){alert("This project is locked. Unlock it first to rename.");return prev;}
       const clientProjects=(prev[clientId]||[]).map(p=>p.id===projectId?{...p,name:newName}:p);
       return {...prev,[clientId]:clientProjects};
     });
     window.projectRename(projectId,newName).catch(e=>{ console.warn("Rename failed:",e); alert("Could not rename: "+(e.message||e)); });
   },[]);
 
-  const deleteProject=useCallback((clientId,projectId,dataPath)=>{
+  const deleteProject=useCallback((clientId,projectId,dataPath,locked)=>{
+    if(locked){alert("This project is locked. Unlock it before deleting.");return;}
     setProjectLog(prev=>{
       const clientProjects=(prev[clientId]||[]).filter(p=>p.id!==projectId);
       return {...prev,[clientId]:clientProjects};
     });
     window.projectDelete(projectId,dataPath).catch(e=>{ console.warn("Delete failed:",e); });
+  },[]);
+
+  // Re-open a saved project so the user can re-classify transactions (e.g. after
+  // receiving client clarifications on the suspense list) and re-export. Lands
+  // on Step 4 — Review — where each transaction's ledger can be changed.
+  const reopenProject=useCallback((p)=>{
+    if(!p||!p.data){alert("Project data not loaded.");return;}
+    if(p.locked){alert("This project is locked. Unlock it first to make changes.");return;}
+    const d=p.data;
+    setClassifiedTxns(d.transactions||[]);
+    setTransactions(d.transactions||[]);
+    setJournalEntries({
+      expenses:d.expenses||[],
+      journals:d.journals||[],
+      bsItems:d.bsItems||[],
+      revenue:d.revenue||[],
+      suspense:d.suspense||[],
+    });
+    setEditingProjectId(p.id);
+    setViewingProject(null);
+    setReviewTab("expenses");
+    setStep(4);
+  },[]);
+
+  // Lock / unlock a project. Locked projects can't be re-opened, renamed or deleted.
+  const setProjectLocked=useCallback(async (projectId,locked)=>{
+    try{
+      await window.projectSetLocked(projectId,locked);
+      // Update in-memory state across viewingProject + projectLog.
+      setViewingProject(prev=>prev&&prev.id===projectId?{...prev,locked}:prev);
+      setProjectLog(prev=>{
+        const next={...prev};
+        for(const cid of Object.keys(next)){
+          next[cid]=(next[cid]||[]).map(p=>p.id===projectId?{...p,locked}:p);
+        }
+        return next;
+      });
+    }catch(e){ alert((locked?"Could not lock: ":"Could not unlock: ")+(e.message||e)); }
   },[]);
   const loadSampleData=useCallback(()=>{
     setTransactions([
@@ -2713,7 +2802,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <div style={{flex:1,minWidth:200}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <span style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{p.name}</span>
-                      <button onClick={(e)=>{e.stopPropagation();const n=prompt("Rename project:",p.name);if(n&&n.trim())renameProject(activeClientId,p.id,n.trim());}} style={{background:"none",border:"none",color:"#777777",fontSize:10,cursor:"pointer",padding:"0 4px"}}>✏️</button>
+                      {p.locked && <span title="Locked — read-only" style={{fontSize:10,color:"#a16207"}}>🔒</span>}
+                      {!p.locked && <button onClick={(e)=>{e.stopPropagation();const n=prompt("Rename project:",p.name);if(n&&n.trim())renameProject(activeClientId,p.id,n.trim());}} style={{background:"none",border:"none",color:"#777777",fontSize:10,cursor:"pointer",padding:"0 4px"}}>✏️</button>}
                     </div>
                     <div style={{fontSize:10,color:"#777777",marginTop:2}}>Exported: {new Date(p.date).toLocaleString()} • <span style={{color:"#0891b2"}}>Click to view & re-download</span></div>
                     {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (p.ownerName||p.ownerEmail) && (
@@ -2728,7 +2818,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     {p.suspenseCount>0&&<span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:"rgba(217,119,6,0.08)",color:"#d97706"}}>Sus: {p.suspenseCount}</span>}
                     <span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:"rgba(105,88,194,0.08)",color:"#666666"}}>{p.txnCount} txns</span>
                   </div>
-                  <button onClick={(e)=>{e.stopPropagation();if(confirm("Delete this project log entry?"))deleteProject(activeClientId,p.id,p.dataPath);}} style={{background:"none",border:"none",color:"#cccccc",fontSize:10,cursor:"pointer",padding:"2px 6px"}}>✕</button>
+                  <button onClick={(e)=>{e.stopPropagation();if(confirm("Delete this project log entry?"))deleteProject(activeClientId,p.id,p.dataPath,p.locked);}} style={{background:"none",border:"none",color:"#cccccc",fontSize:10,cursor:"pointer",padding:"2px 6px"}}>✕</button>
                 </div>
               ))}
             </div>
@@ -2744,8 +2834,15 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <div style={{fontSize:11,color:"#6958C2",fontStyle:"italic",marginTop:3}}>👤 Created by: {viewingProject.ownerName||viewingProject.ownerEmail}</div>
                 )}
               </div>
-              <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                {!viewingProject.locked && <button onClick={()=>reopenProject(viewingProject)} title="Re-open this project to re-classify transactions or apply client clarifications" style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 14px",color:"#ffffff",fontSize:11,fontWeight:600,cursor:"pointer"}}>↺ Re-classify & edit</button>}
+                {viewingProject.locked
+                  ? <button onClick={()=>{if(confirm("Unlock this project? It will become editable again."))setProjectLocked(viewingProject.id,false);}} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Unlock</button>
+                  : <button onClick={()=>{if(confirm("Lock this project? It becomes read-only — you can still re-download files but cannot re-classify, rename or delete it until unlocked."))setProjectLocked(viewingProject.id,true);}} style={{background:"#ffffff",border:"1px solid #16a34a",borderRadius:6,padding:"6px 14px",color:"#16a34a",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔒 Lock</button>}
+                <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
+              </div>
             </div>
+            {viewingProject.locked && <div style={{background:"rgba(161,98,7,0.08)",border:"1px solid rgba(161,98,7,0.25)",color:"#a16207",fontSize:11,padding:"8px 12px",borderRadius:6,marginBottom:12}}>🔒 This project is locked. Unlock it to re-classify or change anything.</div>}
 
             {/* Summary cards */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:16}}>
