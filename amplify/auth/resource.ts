@@ -3,11 +3,16 @@ import { defineAuth } from '@aws-amplify/backend';
 /**
  * Cognito User Pool for BCL AutoLedger.
  *
- * Role hierarchy (visibility/access from highest to lowest):
- *   - 'admin'     → super-admin, can manage users.
- *   - 'manager'   → sees and edits everyone's clients/projects.
- *   - 'team-lead' → sees and edits everyone's clients/projects.
- *   - 'staff'     → "Executive" in the UI: owner-scoped (sees only own work).
+ * Visibility tree:
+ *   - 'admin'        → super-admin, sees every Level 1 User and their sub-users.
+ *   - Level 1 User   → invited by Admin. Each Level 1 has their own Cognito
+ *                       team group `team-<sub>`; only they are in it. They see
+ *                       their sub-users' records via that group.
+ *   - Sub-user       → invited by a Level 1 User. NOT in the team Cognito
+ *                       group themselves (so they remain owner-scoped), but
+ *                       their `custom:team` attribute tags every record they
+ *                       create with the Level 1's group — so the Level 1 User
+ *                       can see all of their sub-users' work.
  *
  * Email-based sign-in.
  */
@@ -16,7 +21,11 @@ export const auth = defineAuth({
     email: true
   },
   userAttributes: {
-    fullname: { required: true, mutable: true }
+    fullname: { required: true, mutable: true },
+    // Cognito custom attribute storing the team group name for each user.
+    // Admins leave it blank; Team Leads set it to their own team-<sub>;
+    // Members inherit their Team Lead's team-<sub>.
+    'custom:team': { dataType: 'String', mutable: true, minLen: 0, maxLen: 80 }
   },
-  groups: ['admin', 'manager', 'team-lead', 'staff']
+  groups: ['admin', 'staff']
 });

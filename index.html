@@ -332,10 +332,9 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
       <div class="auth-field">
         <label class="auth-label">Role</label>
         <select id="invite-role">
-          <option value="staff">Executive</option>
-          <option value="team-lead">Team Lead</option>
-          <option value="manager">Manager</option>
-          <option value="admin">Admin</option>
+          <!-- Options are populated dynamically based on the caller's role
+               (see openInviteModal): Admin can invite Level 1 Users or other
+               Admins; Level 1 Users can only invite their Sub-users. -->
         </select>
       </div>
       <div id="invite-error" class="auth-error auth-hidden"></div>
@@ -413,7 +412,8 @@ window.storeAndLogExport = async (p) => {
     sourceCoa: sf.chartOfAccounts || null,
     sourceVendors: sf.vendors || null,
     sourceCustomers: sf.customers || null,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    team: u.team || null,
   });
 };
 
@@ -431,6 +431,7 @@ window.alClientCreate = async (name) => {
     name,
     ownerEmail: u.email || null,
     ownerName: u.name || null,
+    team: u.team || null,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return { id: res.data.id, name: res.data.name, ownerEmail: res.data.ownerEmail, ownerName: res.data.ownerName };
@@ -479,6 +480,7 @@ window.projectSave = async (p) => {
     dataPath,
     ownerEmail: u.email || null,
     ownerName: u.name || null,
+    team: u.team || null,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return res.data;
@@ -616,7 +618,7 @@ function showForgot() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wr
 function showApp() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); hide('forgot-wrap'); show('auth-user-menu'); populateUserMenu(); if (window.startAutoLedger) window.startAutoLedger(); }
 
 // Map internal role keys to user-friendly designations.
-const ROLE_LABEL = { admin: 'Admin', manager: 'Manager', 'team-lead': 'Team Lead', staff: 'Executive' };
+const ROLE_LABEL = { admin: 'Admin', 'team-lead': 'Level 1 User', staff: 'Sub-user' };
 window.ROLE_LABEL = ROLE_LABEL;
 
 function populateUserMenu() {
@@ -627,7 +629,8 @@ function populateUserMenu() {
   $('auth-dd-name').textContent = name;
   $('auth-dd-email').textContent = u.email || '';
   $('auth-dd-role').textContent = ROLE_LABEL[u.role] || u.role || 'user';
-  if (u.role === 'admin') {
+  // Admins manage every team; Level 1 Users manage just their own sub-users.
+  if (u.role === 'admin' || u.role === 'team-lead') {
     $('auth-manage-users-btn').classList.remove('auth-hidden');
   } else {
     $('auth-manage-users-btn').classList.add('auth-hidden');
@@ -645,9 +648,13 @@ try {
     const user = await getCurrentUser();
     const session = await fetchAuthSession();
     const groups = session.tokens?.idToken?.payload?.['cognito:groups'] || [];
+    // Resolve effective role from the user's Cognito groups:
+    //   - 'admin'                       → Admin (sees all teams)
+    //   - in a team-<sub> group         → Team Lead (Level 1)
+    //   - 'staff' only                  → Member (Level 2)
+    const teamGroupFromGroups = groups.find(g => g.startsWith('team-')) || '';
     const role = groups.includes('admin') ? 'admin'
-      : groups.includes('manager') ? 'manager'
-      : groups.includes('team-lead') ? 'team-lead'
+      : teamGroupFromGroups ? 'team-lead'
       : groups.includes('staff') ? 'staff'
       : null;
     if (!role) {
@@ -657,10 +664,15 @@ try {
     } else {
       let attrs = {};
       try { attrs = await fetchUserAttributes(); } catch (_) {}
+      // For Team Leads the team comes from their team-<sub> group membership.
+      // For Members it's stored in their custom:team attribute (Members are
+      // not in the team Cognito group themselves).
+      const team = teamGroupFromGroups || attrs['custom:team'] || '';
       window.AUTH_USER = {
         email: user.signInDetails?.loginId || user.username,
         name: attrs.name || attrs.email || user.username,
-        role
+        role,
+        team
       };
       showApp();
     }
@@ -860,15 +872,7 @@ async function loadUsersList() {
           + '<button class="user-action-btn user-action-reset" data-action="reset" data-email="' + escapeHtml(u.email) + '" title="Generate new temporary password">Reset</button>'
           + '<button class="user-action-btn user-action-delete" data-action="delete" data-email="' + escapeHtml(u.email) + '" data-name="' + escapeHtml(displayName) + '" title="Permanently delete this user">Delete</button>'
           + '</div>';
-      const roleControl = isSelf
-        ? '<span class="user-role">' + escapeHtml((window.ROLE_LABEL && window.ROLE_LABEL[u.role]) || u.role || 'none') + '</span>'
-        : '<select class="user-role-select" data-action="set-role" data-email="' + escapeHtml(u.email) + '" data-current="' + escapeHtml(u.role || '') + '" title="Change role">'
-          + ['staff','team-lead','manager','admin'].map(r =>
-              '<option value="' + r + '"' + (u.role === r ? ' selected' : '') + '>'
-              + ((window.ROLE_LABEL && window.ROLE_LABEL[r]) || r).toUpperCase()
-              + '</option>'
-            ).join('')
-          + '</select>';
+      const roleControl = '<span class="user-role">' + escapeHtml((window.ROLE_LABEL && window.ROLE_LABEL[u.role]) || u.role || 'none') + '</span>';
       return '<div class="user-row">'
         + '<div style="flex:1;min-width:0;">'
         +   '<div class="user-row-name">' + escapeHtml(displayName) + '</div>'
@@ -890,7 +894,12 @@ function openInviteModal() {
   $('auth-dropdown').classList.remove('auth-open');
   $('invite-email').value = '';
   $('invite-name').value = '';
-  $('invite-role').value = 'staff';
+  // Populate role options based on who is doing the inviting.
+  const role = (window.AUTH_USER && window.AUTH_USER.role) || '';
+  const opts = role === 'admin'
+    ? [{ v: 'team-lead', l: 'Level 1 User — can invite their own sub-users' }, { v: 'admin', l: 'Admin — full access' }]
+    : [{ v: 'member', l: 'Sub-user under you' }];
+  $('invite-role').innerHTML = opts.map(o => '<option value="' + o.v + '">' + o.l + '</option>').join('');
   hideError('invite-error');
   $('invite-success').classList.add('auth-hidden');
   switchModalTab('invite');
@@ -905,37 +914,6 @@ $('users-refresh-btn').addEventListener('click', loadUsersList);
 $('tab-invite-btn').addEventListener('click', function() { switchModalTab('invite'); });
 $('tab-list-btn').addEventListener('click', function() { switchModalTab('list'); });
 $('invite-modal').addEventListener('click', (e) => { if (e.target === $('invite-modal')) closeInviteModal(); });
-
-// ===== Change role (inline dropdown in the user list) =====
-$('users-list-container').addEventListener('change', async function(e) {
-  const sel = e.target.closest('select[data-action="set-role"]');
-  if (!sel || sel.disabled) return;
-  const email = sel.dataset.email;
-  const previous = sel.dataset.current;
-  const newRole = sel.value;
-  if (!email || !newRole || newRole === previous) return;
-
-  const niceNew = (window.ROLE_LABEL && window.ROLE_LABEL[newRole]) || newRole;
-  if (!confirm('Change role for ' + email + ' to ' + niceNew + '?')) {
-    sel.value = previous || '';
-    return;
-  }
-
-  sel.disabled = true;
-  try {
-    const res = await dataClient.mutations.manageUser({ email, action: 'set-role', role: newRole });
-    let data = res.data;
-    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (_) {} }
-    if (!data || !data.success) throw new Error((data && data.message) || 'Failed to change role.');
-    sel.dataset.current = newRole;
-    loadUsersList();
-  } catch (err) {
-    alert('Could not change role: ' + (err && err.message ? err.message : String(err)));
-    sel.value = previous || '';
-  } finally {
-    sel.disabled = false;
-  }
-});
 
 // ===== User action buttons (Reset / Delete) =====
 $('users-list-container').addEventListener('click', async function(e) {
@@ -2578,7 +2556,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{fontSize:10,color:"#888888",marginTop:2}}>Bank: {getClientData(c.id,"bank","Not set")}</div>
                     <div style={{fontSize:10,color:"#777777"}}>References: {Object.keys(getClientData(c.id,"refdb",{})).length} mappings</div>
                     {(projectLog[c.id]||[]).length>0&&<div style={{fontSize:10,color:"#0891b2",marginTop:2}}>📁 {(projectLog[c.id]||[]).length} project(s)</div>}
-                    {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (c.ownerName||c.ownerEmail) && (
+                    {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (c.ownerName||c.ownerEmail) && (
                       <div style={{fontSize:10,color:"#6958C2",fontStyle:"italic",marginTop:2}}>👤 Created by: {c.ownerName||c.ownerEmail}</div>
                     )}
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea"}}>
@@ -2806,7 +2784,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                       {!p.locked && <button onClick={(e)=>{e.stopPropagation();const n=prompt("Rename project:",p.name);if(n&&n.trim())renameProject(activeClientId,p.id,n.trim());}} style={{background:"none",border:"none",color:"#777777",fontSize:10,cursor:"pointer",padding:"0 4px"}}>✏️</button>}
                     </div>
                     <div style={{fontSize:10,color:"#777777",marginTop:2}}>Exported: {new Date(p.date).toLocaleString()} • <span style={{color:"#0891b2"}}>Click to view & re-download</span></div>
-                    {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (p.ownerName||p.ownerEmail) && (
+                    {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (p.ownerName||p.ownerEmail) && (
                       <div style={{fontSize:10,color:"#6958C2",fontStyle:"italic",marginTop:2}}>👤 Created by: {p.ownerName||p.ownerEmail}</div>
                     )}
                   </div>
@@ -2830,7 +2808,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:"#0891b2"}}>{viewingProject.name}</div>
                 <div style={{fontSize:11,color:"#777777",marginTop:2}}>Exported: {new Date(viewingProject.date).toLocaleString()} • {viewingProject.txnCount} transactions</div>
-                {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (viewingProject.ownerName||viewingProject.ownerEmail) && (
+                {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (viewingProject.ownerName||viewingProject.ownerEmail) && (
                   <div style={{fontSize:11,color:"#6958C2",fontStyle:"italic",marginTop:3}}>👤 Created by: {viewingProject.ownerName||viewingProject.ownerEmail}</div>
                 )}
               </div>

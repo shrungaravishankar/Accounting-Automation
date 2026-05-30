@@ -18,14 +18,17 @@ const backend = defineBackend({
 
 const userPool = backend.auth.resources.userPool;
 
-// ---- invite-user: create users and assign to groups ----
+// ---- invite-user: create users, assign role group, and (for new Team Leads) ----
+// auto-create their team Cognito group + set the custom:team attribute.
 backend.inviteUser.addEnvironment('USER_POOL_ID', userPool.userPoolId);
 backend.inviteUser.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
     actions: [
       'cognito-idp:AdminCreateUser',
-      'cognito-idp:AdminAddUserToGroup'
+      'cognito-idp:AdminAddUserToGroup',
+      'cognito-idp:AdminUpdateUserAttributes',
+      'cognito-idp:CreateGroup'
     ],
     resources: [userPool.userPoolArn]
   })
@@ -44,17 +47,14 @@ backend.listAppUsers.resources.lambda.addToRolePolicy(
   })
 );
 
-// ---- manage-user: reset passwords, delete users, change role (group) ----
+// ---- manage-user: reset passwords + delete users ----
 backend.manageUser.addEnvironment('USER_POOL_ID', userPool.userPoolId);
 backend.manageUser.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
     actions: [
       'cognito-idp:AdminSetUserPassword',
-      'cognito-idp:AdminDeleteUser',
-      'cognito-idp:AdminListGroupsForUser',
-      'cognito-idp:AdminAddUserToGroup',
-      'cognito-idp:AdminRemoveUserFromGroup'
+      'cognito-idp:AdminDeleteUser'
     ],
     resources: [userPool.userPoolArn]
   })

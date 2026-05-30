@@ -4,78 +4,146 @@ import {
   CognitoIdentityProviderClient,
   AdminCreateUserCommand,
   AdminAddUserToGroupCommand,
-  UsernameExistsException
+  AdminUpdateUserAttributesCommand,
+  CreateGroupCommand,
+  UsernameExistsException,
+  GroupExistsException
 } from '@aws-sdk/client-cognito-identity-provider';
 
 const client = new CognitoIdentityProviderClient();
 
 /**
- * AppSync resolver event shape (simplified).
- * The `identity` object includes the caller's Cognito groups.
+ * Hierarchy rules:
+ *   - An Admin invitee always becomes another Admin (no team).
+ *   - When the inviter is the platform Admin, the new user becomes a
+ *     Team Lead: we create their team Cognito group (team-<sub>) and add
+ *     them to it.
+ *   - When the inviter is a Team Lead, the new user becomes a Member of
+ *     the inviter's team: we tag custom:team but do NOT add them to the
+ *     team group (so they stay owner-scoped — only their Team Lead and
+ *     Admin can see their work).
  */
 type InviteEvent = {
   arguments: {
     email: string;
     fullName: string;
-    role: 'admin' | 'manager' | 'team-lead' | 'staff';
+    role: string; // 'admin' | 'team-lead' | 'member' (semantic — actual group mapping done below)
   };
   identity?: {
+    sub?: string;
     groups?: string[];
     username?: string;
   };
 };
 
-const ALLOWED_ROLES = ['admin', 'manager', 'team-lead', 'staff'] as const;
-
 export const handler = async (event: InviteEvent) => {
-  // ---- Authorization: only admins can invite users ----
-  const callerGroups = event.identity?.groups || [];
-  if (!callerGroups.includes('admin')) {
-    return {
-      success: false,
-      message: 'Unauthorized: only admins can invite users.'
-    };
-  }
-
-  const { email, fullName, role } = event.arguments;
   const userPoolId = process.env.USER_POOL_ID;
-
-  // ---- Validation ----
-  if (!email || !fullName || !role) {
-    return { success: false, message: 'Email, full name, and role are required.' };
-  }
-  if (!(ALLOWED_ROLES as readonly string[]).includes(role)) {
-    return { success: false, message: 'Role must be admin, manager, team-lead, or staff.' };
-  }
   if (!userPoolId) {
     return { success: false, message: 'Server misconfiguration: USER_POOL_ID missing.' };
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
+  const callerGroups = event.identity?.groups || [];
+  const isAdmin = callerGroups.includes('admin');
+  const callerTeamGroup = callerGroups.find(g => g.startsWith('team-'));
+  const isTeamLead = !isAdmin && !!callerTeamGroup;
+
+  if (!isAdmin && !isTeamLead) {
+    return { success: false, message: 'Only admins or team leads can invite users.' };
+  }
+
+  const email = (event.arguments?.email || '').trim().toLowerCase();
+  const fullName = (event.arguments?.fullName || '').trim();
+  const requestedRole = (event.arguments?.role || '').trim();
+  if (!email || !fullName) {
+    return { success: false, message: 'Email and full name are required.' };
+  }
+
+  // Decide the effective invitee role + behaviour.
+  // 'inviteeRoleGroup' is the Cognito role group: 'admin' or 'staff'.
+  // 'createTeamForInvitee' = true means we auto-create team-<sub> and add the
+  // invitee to it (i.e. they become a Team Lead).
+  // 'inheritedTeamGroup' is the team group string to stamp into custom:team
+  // for Members; empty for Admins.
+  let inviteeRoleGroup: 'admin' | 'staff';
+  let createTeamForInvitee = false;
+  let inheritedTeamGroup = '';
+
+  if (isAdmin) {
+    if (requestedRole === 'admin') {
+      inviteeRoleGroup = 'admin';
+      createTeamForInvitee = false;
+      inheritedTeamGroup = ''; // admins are team-agnostic
+    } else {
+      // Anything else from an admin = create a new Team Lead.
+      inviteeRoleGroup = 'staff';
+      createTeamForInvitee = true;
+    }
+  } else {
+    // Team Lead invite → always a Member of the inviter's team.
+    if (requestedRole === 'admin' || requestedRole === 'team-lead') {
+      return { success: false, message: 'Team leads can only invite Members.' };
+    }
+    inviteeRoleGroup = 'staff';
+    createTeamForInvitee = false;
+    inheritedTeamGroup = callerTeamGroup!;
+  }
 
   try {
-    // ---- Step 1: Create the user (sends email invite automatically) ----
-    await client.send(new AdminCreateUserCommand({
+    // Step 1: create the user (custom:team set up-front if we know it).
+    const createRes = await client.send(new AdminCreateUserCommand({
       UserPoolId: userPoolId,
-      Username: normalizedEmail,
+      Username: email,
       UserAttributes: [
-        { Name: 'email', Value: normalizedEmail },
+        { Name: 'email', Value: email },
         { Name: 'email_verified', Value: 'true' },
-        { Name: 'name', Value: fullName }
+        { Name: 'name', Value: fullName },
+        ...(inheritedTeamGroup ? [{ Name: 'custom:team', Value: inheritedTeamGroup }] : [])
       ],
       DesiredDeliveryMediums: ['EMAIL']
     }));
 
-    // ---- Step 2: Add the user to the requested group ----
+    // Step 2: add to role Cognito group ('admin' or 'staff').
     await client.send(new AdminAddUserToGroupCommand({
       UserPoolId: userPoolId,
-      Username: normalizedEmail,
-      GroupName: role
+      Username: email,
+      GroupName: inviteeRoleGroup
     }));
+
+    // Step 3: if this is a new Team Lead, create their team group + add them.
+    if (createTeamForInvitee) {
+      const newSub =
+        createRes.User?.Attributes?.find(a => a.Name === 'sub')?.Value || '';
+      if (!newSub) {
+        return {
+          success: true,
+          message: `Invitation sent to ${email}, but team group could not be created (no sub returned). Contact an admin.`
+        };
+      }
+      const teamGroup = `team-${newSub}`;
+      try {
+        await client.send(new CreateGroupCommand({
+          UserPoolId: userPoolId,
+          GroupName: teamGroup,
+          Description: `Team led by ${email}`
+        }));
+      } catch (err: any) {
+        if (!(err instanceof GroupExistsException)) throw err;
+      }
+      await client.send(new AdminAddUserToGroupCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        GroupName: teamGroup
+      }));
+      await client.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        UserAttributes: [{ Name: 'custom:team', Value: teamGroup }]
+      }));
+    }
 
     return {
       success: true,
-      message: `Invitation sent to ${normalizedEmail}. They'll receive a temporary password by email.`
+      message: `Invitation sent to ${email}. They'll receive a temporary password by email.`
     };
   } catch (err: any) {
     if (err instanceof UsernameExistsException) {

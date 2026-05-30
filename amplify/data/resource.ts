@@ -41,24 +41,31 @@ const schema = a.schema({
       sourceCoa: a.string(),
       sourceVendors: a.string(),
       sourceCustomers: a.string(),
-      generatedAt: a.datetime()
+      generatedAt: a.datetime(),
+      // Cognito team group (e.g. team-<sub>) stamped at creation. The Team
+      // Lead in that group sees all rows tagged with it.
+      team: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
-      allow.groups(['admin', 'manager', 'team-lead']).to(['read', 'delete'])
+      allow.groupsDefinedIn('team').to(['read', 'delete']),
+      allow.group('admin').to(['read', 'delete'])
     ]),
 
-  /** A client/company the signed-in user works on. Owner + manager/lead full access. */
+  /** A client/company the signed-in user works on. Owner + team-lead full access. */
   Client: a
     .model({
       name: a.string().required(),
-      // Captured at creation so Managers/Team Leads can see who created what.
+      // Captured at creation so Team Leads / Admin can see who created what.
       ownerEmail: a.string(),
       ownerName: a.string(),
+      // Cognito team group stamped at creation.
+      team: a.string(),
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
-      allow.groups(['admin', 'manager', 'team-lead']).to(['create', 'read', 'update', 'delete']),
+      allow.groupsDefinedIn('team').to(['create', 'read', 'update', 'delete']),
+      allow.group('admin').to(['create', 'read', 'update', 'delete']),
     ]),
 
   /**
@@ -86,10 +93,13 @@ const schema = a.schema({
       ownerName: a.string(),
       // When true the project is read-only — reopen / rename / delete are blocked.
       locked: a.boolean(),
+      // Cognito team group stamped at creation.
+      team: a.string(),
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
-      allow.groups(['admin', 'manager', 'team-lead']).to(['create', 'read', 'update', 'delete']),
+      allow.groupsDefinedIn('team').to(['create', 'read', 'update', 'delete']),
+      allow.group('admin').to(['create', 'read', 'update', 'delete']),
     ]),
 
   InviteResult: a.customType({
@@ -124,8 +134,7 @@ const schema = a.schema({
     .mutation()
     .arguments({
       email: a.string().required(),
-      action: a.string().required(),
-      role: a.string()
+      action: a.string().required()
     })
     .returns(a.ref('ManageResult'))
     .authorization((allow) => [allow.authenticated()])

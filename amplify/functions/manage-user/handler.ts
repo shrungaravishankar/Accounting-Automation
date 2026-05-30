@@ -4,22 +4,15 @@ import {
   CognitoIdentityProviderClient,
   AdminSetUserPasswordCommand,
   AdminDeleteUserCommand,
-  AdminAddUserToGroupCommand,
-  AdminRemoveUserFromGroupCommand,
-  AdminListGroupsForUserCommand,
   UserNotFoundException
 } from '@aws-sdk/client-cognito-identity-provider';
 
 const client = new CognitoIdentityProviderClient();
 
-const ROLE_GROUPS = ['admin', 'manager', 'team-lead', 'staff'] as const;
-type Role = typeof ROLE_GROUPS[number];
-
 type ManageEvent = {
   arguments: {
     email: string;
-    action: 'reset-password' | 'delete' | 'set-role';
-    role?: string;
+    action: 'reset-password' | 'delete';
   };
   identity?: {
     groups?: string[];
@@ -115,39 +108,6 @@ export const handler = async (event: ManageEvent) => {
       return {
         success: true,
         message: `User ${normalizedEmail} has been permanently deleted.`,
-        tempPassword: ''
-      };
-    } else if (action === 'set-role') {
-      const newRole = (event.arguments.role || '').trim() as Role;
-      if (!(ROLE_GROUPS as readonly string[]).includes(newRole)) {
-        return { success: false, message: 'Role must be admin, manager, team-lead, or staff.', tempPassword: '' };
-      }
-      // Remove the user from any of the role groups they currently belong to.
-      const grpRes = await client.send(new AdminListGroupsForUserCommand({
-        UserPoolId: userPoolId,
-        Username: normalizedEmail
-      }));
-      const currentGroups = (grpRes.Groups || []).map(g => g.GroupName).filter((g): g is string => !!g);
-      for (const g of currentGroups) {
-        if ((ROLE_GROUPS as readonly string[]).includes(g) && g !== newRole) {
-          await client.send(new AdminRemoveUserFromGroupCommand({
-            UserPoolId: userPoolId,
-            Username: normalizedEmail,
-            GroupName: g
-          }));
-        }
-      }
-      // Add the new role (idempotent — Cognito ignores duplicates).
-      if (!currentGroups.includes(newRole)) {
-        await client.send(new AdminAddUserToGroupCommand({
-          UserPoolId: userPoolId,
-          Username: normalizedEmail,
-          GroupName: newRole
-        }));
-      }
-      return {
-        success: true,
-        message: `Role for ${normalizedEmail} updated to ${newRole}.`,
         tempPassword: ''
       };
     } else {
