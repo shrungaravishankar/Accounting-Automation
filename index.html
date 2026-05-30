@@ -618,7 +618,7 @@ function showForgot() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wr
 function showApp() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); hide('forgot-wrap'); show('auth-user-menu'); populateUserMenu(); if (window.startAutoLedger) window.startAutoLedger(); }
 
 // Map internal role keys to user-friendly designations.
-const ROLE_LABEL = { admin: 'Admin', 'team-lead': 'Level 1 User', staff: 'Sub-user' };
+const ROLE_LABEL = { admin: 'Super Admin', 'team-lead': 'Admin', staff: 'User' };
 window.ROLE_LABEL = ROLE_LABEL;
 
 function populateUserMenu() {
@@ -897,8 +897,8 @@ function openInviteModal() {
   // Populate role options based on who is doing the inviting.
   const role = (window.AUTH_USER && window.AUTH_USER.role) || '';
   const opts = role === 'admin'
-    ? [{ v: 'team-lead', l: 'Level 1 User — can invite their own sub-users' }, { v: 'admin', l: 'Admin — full access' }]
-    : [{ v: 'member', l: 'Sub-user under you' }];
+    ? [{ v: 'team-lead', l: 'Admin — can invite their own users' }, { v: 'admin', l: 'Super Admin — full access' }]
+    : [{ v: 'member', l: 'User under you' }];
   $('invite-role').innerHTML = opts.map(o => '<option value="' + o.v + '">' + o.l + '</option>').join('');
   hideError('invite-error');
   $('invite-success').classList.add('auth-hidden');
@@ -2823,7 +2823,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
               </div>
             </div>
-            {viewingProject.locked && <div style={{background:"rgba(161,98,7,0.08)",border:"1px solid rgba(161,98,7,0.25)",color:"#a16207",fontSize:11,padding:"8px 12px",borderRadius:6,marginBottom:12}}>🔒 This project is locked.{["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) ? " Click Unlock to make it editable again." : " Ask your Level 1 User (or an Admin) to unlock it before you can make any changes."}</div>}
+            {viewingProject.locked && <div style={{background:"rgba(161,98,7,0.08)",border:"1px solid rgba(161,98,7,0.25)",color:"#a16207",fontSize:11,padding:"8px 12px",borderRadius:6,marginBottom:12}}>🔒 This project is locked.{["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) ? " Click Unlock to make it editable again." : " Ask your Admin (or a Super Admin) to unlock it before you can make any changes."}</div>}
 
             {/* Summary cards */}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:16}}>
