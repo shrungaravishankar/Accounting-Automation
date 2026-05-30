@@ -45,17 +45,17 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
-      allow.group('admin').to(['read', 'delete'])
+      allow.groups(['admin', 'manager', 'team-lead']).to(['read', 'delete'])
     ]),
 
-  /** A client/company the signed-in user works on. Owner-scoped. */
+  /** A client/company the signed-in user works on. Owner + manager/lead full access. */
   Client: a
     .model({
       name: a.string().required(),
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
-      allow.group('admin').to(['read']),
+      allow.groups(['admin', 'manager', 'team-lead']).to(['create', 'read', 'update', 'delete']),
     ]),
 
   /**
@@ -81,7 +81,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
-      allow.group('admin').to(['read', 'delete']),
+      allow.groups(['admin', 'manager', 'team-lead']).to(['create', 'read', 'update', 'delete']),
     ]),
 
   InviteResult: a.customType({

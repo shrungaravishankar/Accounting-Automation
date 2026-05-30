@@ -49,6 +49,9 @@
 .auth-logo-row { display:flex; align-items:center; justify-content:center; gap:14px; margin-bottom:6px; min-height:64px; }
 .auth-logo-dots { width:60px; height:60px; flex-shrink:0; animation: logo-enter 1.1s cubic-bezier(0.34, 1.56, 0.64, 1) both, logo-pulse 5s ease-in-out 1.6s infinite; transform-origin:center; }
 .auth-logo-img { height:56px; width:auto; flex-shrink:0; animation: logo-enter 1.1s cubic-bezier(0.34, 1.56, 0.64, 1) both, logo-pulse 5s ease-in-out 1.6s infinite; transform-origin:center; object-fit:contain; }
+.auth-forgot-row { text-align:center; margin-top:14px; }
+.auth-forgot-link { font-size:12px; color:#6958C2; text-decoration:none; cursor:pointer; }
+.auth-forgot-link:hover { text-decoration:underline; color:#4D3FA0; }
 .auth-logo-dots circle { opacity:0; animation: dot-fade 0.55s ease-out both; transform-origin:center; }
 .auth-logo-dots circle:nth-child(1) { animation-delay:0.10s; }
 .auth-logo-dots circle:nth-child(2) { animation-delay:0.16s; }
@@ -238,6 +241,7 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
     <div class="auth-field"><label class="auth-label">Password</label><input type="password" id="login-pwd" class="auth-input" placeholder="••••••" autocomplete="current-password"/></div>
     <div id="login-error" class="auth-error auth-hidden"></div>
     <button class="auth-btn" id="login-btn">Sign in →</button>
+    <div class="auth-forgot-row"><a href="#" id="forgot-link" class="auth-forgot-link">Forgot password?</a></div>
   </div>
 </div>
 
@@ -259,6 +263,35 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
     <div class="auth-field"><label class="auth-label">Confirm</label><input type="password" id="newpw-pwd2" class="auth-input" placeholder="Repeat" autocomplete="new-password"/></div>
     <div id="newpw-error" class="auth-error auth-hidden"></div>
     <button class="auth-btn" id="newpw-btn">Save & continue →</button>
+  </div>
+</div>
+
+<div id="forgot-wrap" class="auth-overlay auth-overlay-scenic auth-hidden">
+  <div class="auth-bg-scene">
+    <div class="auth-bg-grid"></div>
+    <div class="auth-bg-orb auth-bg-orb-1"></div>
+    <div class="auth-bg-orb auth-bg-orb-3"></div>
+    <div class="auth-bg-orb auth-bg-orb-5"></div>
+  </div>
+  <div class="auth-card">
+    <div class="auth-title" style="font-size:18px;">Reset password</div>
+
+    <div id="forgot-step1">
+      <div class="auth-sub">Enter your email and we'll send you a 6-digit reset code.</div>
+      <div class="auth-field"><label class="auth-label">Email</label><input type="email" id="forgot-email" class="auth-input" placeholder="you@bcl.ae" autocomplete="email"/></div>
+      <div id="forgot-error1" class="auth-error auth-hidden"></div>
+      <button class="auth-btn" id="forgot-send-btn">Send reset code →</button>
+    </div>
+
+    <div id="forgot-step2" class="auth-hidden">
+      <div class="auth-sub">Check your email for the 6-digit code, then set a new password.</div>
+      <div class="auth-field"><label class="auth-label">Reset code</label><input type="text" id="forgot-code" class="auth-input" placeholder="6-digit code" inputmode="numeric" autocomplete="one-time-code"/></div>
+      <div class="auth-field"><label class="auth-label">New password</label><input type="password" id="forgot-newpw" class="auth-input" placeholder="Min 8 characters" autocomplete="new-password"/></div>
+      <div id="forgot-error2" class="auth-error auth-hidden"></div>
+      <button class="auth-btn" id="forgot-confirm-btn">Save new password →</button>
+    </div>
+
+    <div class="auth-forgot-row"><a href="#" id="forgot-back-link" class="auth-forgot-link">← Back to sign in</a></div>
   </div>
 </div>
 
@@ -296,7 +329,9 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
       <div class="auth-field">
         <label class="auth-label">Role</label>
         <select id="invite-role">
-          <option value="staff">Staff</option>
+          <option value="staff">Executive</option>
+          <option value="team-lead">Team Lead</option>
+          <option value="manager">Manager</option>
           <option value="admin">Admin</option>
         </select>
       </div>
@@ -335,7 +370,7 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
 
 <script type="module">
 import { Amplify } from 'aws-amplify';
-import { signIn, signOut, confirmSignIn, getCurrentUser, fetchAuthSession, fetchUserAttributes } from 'aws-amplify/auth';
+import { signIn, signOut, confirmSignIn, getCurrentUser, fetchAuthSession, fetchUserAttributes, resetPassword, confirmResetPassword } from 'aws-amplify/auth';
 import { generateClient } from 'aws-amplify/data';
 import { uploadData, downloadData, remove as removeFromStorage } from 'aws-amplify/storage';
 
@@ -517,9 +552,14 @@ const hide = id => $(id).classList.add('auth-hidden');
 const showError = (id, msg) => { const e = $(id); e.textContent = msg; e.classList.remove('auth-hidden'); };
 const hideError = id => $(id).classList.add('auth-hidden');
 
-function showLogin() { hide('boot-spinner'); show('login-wrap'); hide('newpw-wrap'); hide('auth-user-menu'); }
-function showNewPw() { hide('boot-spinner'); hide('login-wrap'); show('newpw-wrap'); hide('auth-user-menu'); }
-function showApp() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); show('auth-user-menu'); populateUserMenu(); if (window.startAutoLedger) window.startAutoLedger(); }
+function showLogin() { hide('boot-spinner'); show('login-wrap'); hide('newpw-wrap'); hide('forgot-wrap'); hide('auth-user-menu'); }
+function showNewPw() { hide('boot-spinner'); hide('login-wrap'); show('newpw-wrap'); hide('forgot-wrap'); hide('auth-user-menu'); }
+function showForgot() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); show('forgot-wrap'); hide('auth-user-menu'); $('forgot-step1').classList.remove('auth-hidden'); $('forgot-step2').classList.add('auth-hidden'); hideError('forgot-error1'); hideError('forgot-error2'); }
+function showApp() { hide('boot-spinner'); hide('login-wrap'); hide('newpw-wrap'); hide('forgot-wrap'); show('auth-user-menu'); populateUserMenu(); if (window.startAutoLedger) window.startAutoLedger(); }
+
+// Map internal role keys to user-friendly designations.
+const ROLE_LABEL = { admin: 'Admin', manager: 'Manager', 'team-lead': 'Team Lead', staff: 'Executive' };
+window.ROLE_LABEL = ROLE_LABEL;
 
 function populateUserMenu() {
   const u = window.AUTH_USER || {};
@@ -528,7 +568,7 @@ function populateUserMenu() {
   $('auth-avatar').textContent = initials;
   $('auth-dd-name').textContent = name;
   $('auth-dd-email').textContent = u.email || '';
-  $('auth-dd-role').textContent = u.role || 'user';
+  $('auth-dd-role').textContent = ROLE_LABEL[u.role] || u.role || 'user';
   if (u.role === 'admin') {
     $('auth-manage-users-btn').classList.remove('auth-hidden');
   } else {
@@ -547,7 +587,11 @@ try {
     const user = await getCurrentUser();
     const session = await fetchAuthSession();
     const groups = session.tokens?.idToken?.payload?.['cognito:groups'] || [];
-    const role = groups.includes('admin') ? 'admin' : groups.includes('staff') ? 'staff' : null;
+    const role = groups.includes('admin') ? 'admin'
+      : groups.includes('manager') ? 'manager'
+      : groups.includes('team-lead') ? 'team-lead'
+      : groups.includes('staff') ? 'staff'
+      : null;
     if (!role) {
       await signOut().catch(() => {});
       showLogin();
@@ -610,6 +654,61 @@ $('newpw-btn').addEventListener('click', async () => {
     showError('newpw-error', e.message || String(e));
   } finally {
     btn.disabled = false; btn.textContent = 'Save & continue →';
+  }
+});
+
+// ===== Forgot password (Cognito reset flow) =====
+$('forgot-link').addEventListener('click', (e) => { e.preventDefault(); $('forgot-email').value = $('login-email').value; showForgot(); });
+$('forgot-back-link').addEventListener('click', (e) => { e.preventDefault(); showLogin(); });
+
+$('forgot-send-btn').addEventListener('click', async () => {
+  const email = $('forgot-email').value.trim().toLowerCase();
+  if (!email) { showError('forgot-error1', 'Enter your email.'); return; }
+  hideError('forgot-error1');
+  const btn = $('forgot-send-btn');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    await resetPassword({ username: email });
+    $('forgot-step1').classList.add('auth-hidden');
+    $('forgot-step2').classList.remove('auth-hidden');
+    $('forgot-code').focus();
+  } catch (e) {
+    const m = e?.message || String(e);
+    let friendly = m;
+    if (/UserNotFoundException/.test(m)) friendly = 'No account with that email.';
+    else if (/LimitExceededException/.test(m)) friendly = 'Too many attempts. Try again in a few minutes.';
+    showError('forgot-error1', friendly);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send reset code →';
+  }
+});
+
+$('forgot-confirm-btn').addEventListener('click', async () => {
+  const email = $('forgot-email').value.trim().toLowerCase();
+  const code = $('forgot-code').value.trim();
+  const newPw = $('forgot-newpw').value;
+  if (!code) { showError('forgot-error2', 'Enter the 6-digit code from your email.'); return; }
+  if (newPw.length < 8) { showError('forgot-error2', 'Password must be at least 8 characters.'); return; }
+  hideError('forgot-error2');
+  const btn = $('forgot-confirm-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await confirmResetPassword({ username: email, confirmationCode: code, newPassword: newPw });
+    showLogin();
+    $('login-email').value = email;
+    showError('login-error', 'Password updated. Sign in with your new password.');
+    // Style as success (uses same alert slot; user clears on next attempt).
+    $('login-error').style.color = '#16a34a';
+    setTimeout(() => { $('login-error').style.color = ''; }, 4000);
+  } catch (e) {
+    const m = e?.message || String(e);
+    let friendly = m;
+    if (/CodeMismatchException/.test(m)) friendly = 'That code is incorrect.';
+    else if (/ExpiredCodeException/.test(m)) friendly = 'That code expired — request a new one.';
+    else if (/InvalidPasswordException/.test(m)) friendly = 'Password too weak: needs 8+ chars with upper, lower, and a number.';
+    showError('forgot-error2', friendly);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save new password →';
   }
 });
 
@@ -709,7 +808,7 @@ async function loadUsersList() {
         +   '<div class="user-row-email">' + escapeHtml(u.email) + '</div>'
         + '</div>'
         + '<div class="user-row-meta">'
-        +   '<span class="user-role">' + escapeHtml(u.role || 'none') + '</span>'
+        +   '<span class="user-role">' + escapeHtml((window.ROLE_LABEL && window.ROLE_LABEL[u.role]) || u.role || 'none') + '</span>'
         +   '<span class="user-status user-status-' + s.cls + '">' + s.label + '</span>'
         + '</div>'
         + actions
@@ -2402,11 +2501,11 @@ td,th{padding:8px 12px;vertical-align:middle}
             {globalRefCount>0&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.15)"}}>{globalRefCount} global</span>}
 
           </div>
-          <div style={{display:"flex",gap:6,alignItems:"center"}}>
-            <select value={activeClientId} onChange={e=>switchClient(e.target.value)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"4px 8px",color:"#888888",fontSize:10,cursor:"pointer"}}>
+          <div style={{display:"flex",gap:10,alignItems:"center"}}>
+            <select value={activeClientId} onChange={e=>switchClient(e.target.value)} style={{background:"#ffffff",border:"1px solid #d4d4dc",borderRadius:8,padding:"8px 32px 8px 14px",color:"#1a1a2e",fontSize:13,fontWeight:500,cursor:"pointer",boxShadow:"0 1px 2px rgba(0,0,0,0.04)",minWidth:180,outline:"none",appearance:"none",backgroundImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234D3FA0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>\")",backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center"}}>
               {clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            <button onClick={()=>{setActiveClientId("");setActiveClientName("");localStorage.removeItem("autoledger_active_client");}} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"4px 10px",color:"#888888",fontSize:10,cursor:"pointer"}}>Switch / New</button>
+            <button onClick={()=>{setActiveClientId("");setActiveClientName("");localStorage.removeItem("autoledger_active_client");}} style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:8,padding:"8px 16px",color:"#ffffff",fontSize:13,fontWeight:600,cursor:"pointer",boxShadow:"0 1px 3px rgba(77,63,160,0.25)",transition:"all .15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#3C3489";}} onMouseLeave={e=>{e.currentTarget.style.background="#4D3FA0";}}>+ Switch / New</button>
           </div>
         </div>
 

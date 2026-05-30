@@ -66,7 +66,10 @@ export const handler = async (event: ListEvent) => {
         const groupNames = (grps.Groups || [])
           .map((g) => g.GroupName)
           .filter((g): g is string => !!g);
+        // Highest authority wins (admin > manager > team-lead > staff).
         if (groupNames.includes('admin')) role = 'admin';
+        else if (groupNames.includes('manager')) role = 'manager';
+        else if (groupNames.includes('team-lead')) role = 'team-lead';
         else if (groupNames.includes('staff')) role = 'staff';
       } catch (_) {
         // ignore per-user group fetch errors

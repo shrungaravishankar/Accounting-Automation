@@ -17,13 +17,15 @@ type InviteEvent = {
   arguments: {
     email: string;
     fullName: string;
-    role: 'admin' | 'staff';
+    role: 'admin' | 'manager' | 'team-lead' | 'staff';
   };
   identity?: {
     groups?: string[];
     username?: string;
   };
 };
+
+const ALLOWED_ROLES = ['admin', 'manager', 'team-lead', 'staff'] as const;
 
 export const handler = async (event: InviteEvent) => {
   // ---- Authorization: only admins can invite users ----
@@ -42,8 +44,8 @@ export const handler = async (event: InviteEvent) => {
   if (!email || !fullName || !role) {
     return { success: false, message: 'Email, full name, and role are required.' };
   }
-  if (role !== 'admin' && role !== 'staff') {
-    return { success: false, message: 'Role must be "admin" or "staff".' };
+  if (!(ALLOWED_ROLES as readonly string[]).includes(role)) {
+    return { success: false, message: 'Role must be admin, manager, team-lead, or staff.' };
   }
   if (!userPoolId) {
     return { success: false, message: 'Server misconfiguration: USER_POOL_ID missing.' };
