@@ -122,7 +122,8 @@ const schema = a.schema({
     .mutation()
     .arguments({
       email: a.string().required(),
-      action: a.string().required()
+      action: a.string().required(),
+      role: a.string()
     })
     .returns(a.ref('ManageResult'))
     .authorization((allow) => [allow.authenticated()])

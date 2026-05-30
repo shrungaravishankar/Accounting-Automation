@@ -44,14 +44,17 @@ backend.listAppUsers.resources.lambda.addToRolePolicy(
   })
 );
 
-// ---- manage-user: reset passwords + delete users ----
+// ---- manage-user: reset passwords, delete users, change role (group) ----
 backend.manageUser.addEnvironment('USER_POOL_ID', userPool.userPoolId);
 backend.manageUser.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
     actions: [
       'cognito-idp:AdminSetUserPassword',
-      'cognito-idp:AdminDeleteUser'
+      'cognito-idp:AdminDeleteUser',
+      'cognito-idp:AdminListGroupsForUser',
+      'cognito-idp:AdminAddUserToGroup',
+      'cognito-idp:AdminRemoveUserFromGroup'
     ],
     resources: [userPool.userPoolArn]
   })
