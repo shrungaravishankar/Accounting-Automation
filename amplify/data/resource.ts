@@ -52,6 +52,9 @@ const schema = a.schema({
   Client: a
     .model({
       name: a.string().required(),
+      // Captured at creation so Managers/Team Leads can see who created what.
+      ownerEmail: a.string(),
+      ownerName: a.string(),
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
@@ -78,6 +81,9 @@ const schema = a.schema({
       prCount: a.integer(),
       suspenseCount: a.integer(),
       dataPath: a.string().required(),
+      // Captured at creation so Managers/Team Leads can see who exported what.
+      ownerEmail: a.string(),
+      ownerName: a.string(),
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),

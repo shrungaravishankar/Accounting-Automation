@@ -420,12 +420,17 @@ window.storeAndLogExport = async (p) => {
 window.alClientList = async () => {
   const res = await dataClient.models.Client.list({ limit: 200 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).map(c => ({ id: c.id, name: c.name }));
+  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
 };
 window.alClientCreate = async (name) => {
-  const res = await dataClient.models.Client.create({ name });
+  const u = window.AUTH_USER || {};
+  const res = await dataClient.models.Client.create({
+    name,
+    ownerEmail: u.email || null,
+    ownerName: u.name || null,
+  });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return { id: res.data.id, name: res.data.name };
+  return { id: res.data.id, name: res.data.name, ownerEmail: res.data.ownerEmail, ownerName: res.data.ownerName };
 };
 window.alClientDelete = async (id) => {
   const res = await dataClient.models.Client.delete({ id });
@@ -442,6 +447,7 @@ window.projectSave = async (p) => {
     data: new Blob([JSON.stringify(p.data || {})], { type: 'application/json' }),
     options: { contentType: 'application/json' }
   }).result;
+  const u = window.AUTH_USER || {};
   const res = await dataClient.models.Project.create({
     clientId: p.clientId,
     clientName: p.clientName || null,
@@ -456,6 +462,8 @@ window.projectSave = async (p) => {
     prCount: p.prCount ?? null,
     suspenseCount: p.suspenseCount ?? null,
     dataPath,
+    ownerEmail: u.email || null,
+    ownerName: u.name || null,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return res.data;
@@ -2404,6 +2412,9 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{fontSize:10,color:"#888888",marginTop:2}}>Bank: {getClientData(c.id,"bank","Not set")}</div>
                     <div style={{fontSize:10,color:"#777777"}}>References: {Object.keys(getClientData(c.id,"refdb",{})).length} mappings</div>
                     {(projectLog[c.id]||[]).length>0&&<div style={{fontSize:10,color:"#0891b2",marginTop:2}}>📁 {(projectLog[c.id]||[]).length} project(s)</div>}
+                    {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (c.ownerName||c.ownerEmail) && (
+                      <div style={{fontSize:10,color:"#6958C2",fontStyle:"italic",marginTop:2}}>👤 Created by: {c.ownerName||c.ownerEmail}</div>
+                    )}
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea"}}>
                       <span style={{fontSize:10,color:"#cccccc"}}>Created {new Date(c.created).toLocaleDateString()}</span>
                       <span onClick={(e)=>{e.stopPropagation();deleteClient(c.id);}} style={{fontSize:10,color:"#dc2626",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)"}}>Delete</span>
@@ -2627,6 +2638,9 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <button onClick={(e)=>{e.stopPropagation();const n=prompt("Rename project:",p.name);if(n&&n.trim())renameProject(activeClientId,p.id,n.trim());}} style={{background:"none",border:"none",color:"#777777",fontSize:10,cursor:"pointer",padding:"0 4px"}}>✏️</button>
                     </div>
                     <div style={{fontSize:10,color:"#777777",marginTop:2}}>Exported: {new Date(p.date).toLocaleString()} • <span style={{color:"#0891b2"}}>Click to view & re-download</span></div>
+                    {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (p.ownerName||p.ownerEmail) && (
+                      <div style={{fontSize:10,color:"#6958C2",fontStyle:"italic",marginTop:2}}>👤 Created by: {p.ownerName||p.ownerEmail}</div>
+                    )}
                   </div>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                     {p.expenseCount>0&&<span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)",color:"#dc2626"}}>P&L: {p.expenseCount}</span>}
@@ -2648,6 +2662,9 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:"#0891b2"}}>{viewingProject.name}</div>
                 <div style={{fontSize:11,color:"#777777",marginTop:2}}>Exported: {new Date(viewingProject.date).toLocaleString()} • {viewingProject.txnCount} transactions</div>
+                {["admin","manager","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (viewingProject.ownerName||viewingProject.ownerEmail) && (
+                  <div style={{fontSize:11,color:"#6958C2",fontStyle:"italic",marginTop:3}}>👤 Created by: {viewingProject.ownerName||viewingProject.ownerEmail}</div>
+                )}
               </div>
               <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
             </div>
