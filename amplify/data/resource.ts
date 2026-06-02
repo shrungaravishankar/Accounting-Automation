@@ -41,8 +41,7 @@ const schema = a.schema({
       sourceCoa: a.string(),
       sourceVendors: a.string(),
       sourceCustomers: a.string(),
-      generatedAt: a.datetime(),
-      team: a.string()
+      generatedAt: a.datetime()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
@@ -56,8 +55,7 @@ const schema = a.schema({
       name: a.string().required(),
       // Captured at creation so Team Leads / Admin can see who created what.
       ownerEmail: a.string(),
-      ownerName: a.string(),
-      team: a.string()
+      ownerName: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
@@ -89,8 +87,7 @@ const schema = a.schema({
       ownerEmail: a.string(),
       ownerName: a.string(),
       // When true the project is read-only — reopen / rename / delete are blocked.
-      locked: a.boolean(),
-      team: a.string()
+      locked: a.boolean()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
