@@ -41,8 +41,8 @@ const schema = a.schema({
       sourceCoa: a.string(),
       sourceVendors: a.string(),
       sourceCustomers: a.string(),
-      generatedAt: a.datetime()
-      // (the `team` field is implicitly created by allow.groupsDefinedIn('team') below)
+      generatedAt: a.datetime(),
+      team: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
@@ -57,7 +57,7 @@ const schema = a.schema({
       // Captured at creation so Team Leads / Admin can see who created what.
       ownerEmail: a.string(),
       ownerName: a.string(),
-      // (the `team` field is implicitly created by allow.groupsDefinedIn('team') below)
+      team: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
@@ -90,7 +90,7 @@ const schema = a.schema({
       ownerName: a.string(),
       // When true the project is read-only — reopen / rename / delete are blocked.
       locked: a.boolean(),
-      // (the `team` field is implicitly created by allow.groupsDefinedIn('team') below)
+      team: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
