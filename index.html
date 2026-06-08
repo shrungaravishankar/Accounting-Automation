@@ -316,6 +316,7 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
     <div class="modal-tabs">
       <button id="tab-invite-btn" type="button" class="modal-tab active">Invite User</button>
       <button id="tab-list-btn" type="button" class="modal-tab">Current Users</button>
+      <button id="tab-unlock-btn" type="button" class="modal-tab">Unlock Requests</button>
     </div>
 
     <div id="invite-section">
@@ -352,6 +353,22 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
       <div class="auth-row" style="justify-content:flex-end;">
         <button class="auth-btn-secondary" id="users-close-btn" style="flex:0 0 auto; min-width:120px;">Close</button>
         <button class="auth-btn" id="users-refresh-btn" style="flex:0 0 auto; min-width:120px;">Refresh</button>
+      </div>
+    </div>
+
+    <div id="unlock-section" class="auth-hidden">
+      <h3>Pending Unlock Requests</h3>
+      <p class="sub">Approve to unlock the project for further edits, or deny to keep it locked.</p>
+      <div id="unlock-list-container" style="max-height:300px; overflow-y:auto;"></div>
+      <div id="backfill-panel" class="auth-hidden" style="margin-top:14px;padding:12px;background:#f8f9fc;border:1px solid #e2e2ea;border-radius:6px;">
+        <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Backfill team tags</div>
+        <p class="sub" style="margin:0 0 8px 0;">One-shot migration. Stamps the <code>team</code> field on historical Projects, Clients, and Export Logs from each row's owner. Required for team-lead Admins to see data created before the per-team auth was added. Safe to run more than once.</p>
+        <div id="backfill-status" style="font-size:11px;color:#555555;margin-bottom:8px;"></div>
+        <button class="auth-btn" id="backfill-run-btn" style="flex:0 0 auto; min-width:160px;">Run backfill</button>
+      </div>
+      <div class="auth-row" style="justify-content:flex-end;">
+        <button class="auth-btn-secondary" id="unlock-close-btn" style="flex:0 0 auto; min-width:120px;">Close</button>
+        <button class="auth-btn" id="unlock-refresh-btn" style="flex:0 0 auto; min-width:120px;">Refresh</button>
       </div>
     </div>
   </div>
@@ -421,6 +438,17 @@ window.storeAndLogExport = async (p) => {
 // Exposed to the React app. All owner-scoped by the Cognito session.
 
 window.alClientList = async () => {
+  const u = window.AUTH_USER || {};
+  // Team-lead Admins need to see clients created by their team members too.
+  // Schema auth only gives them their own + super-admin sees all, so go via
+  // the listTeamData Lambda which filters server-side by Cognito team group.
+  if (u.role === 'team-lead') {
+    const r = await dataClient.queries.listTeamData({ kind: 'clients' });
+    let d = r.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
+    return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+  }
   const res = await dataClient.models.Client.list({ limit: 200 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
@@ -478,6 +506,7 @@ window.projectSave = async (p) => {
     prCount: p.prCount ?? null,
     suspenseCount: p.suspenseCount ?? null,
     dataPath,
+    locked: p.locked === true,
     ownerEmail: u.email || null,
     ownerName: u.name || null,
     team: u.team || null,
@@ -487,7 +516,17 @@ window.projectSave = async (p) => {
 };
 
 // List a client's saved projects (metadata only), newest first.
+// Owners + super-admin hit the model directly. Team-lead Admins go via the
+// listTeamData Lambda which filters by their Cognito team group server-side.
 window.projectList = async (clientId) => {
+  const u = window.AUTH_USER || {};
+  if (u.role === 'team-lead') {
+    const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
+    let d = r.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
+    return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+  }
   const res = await dataClient.models.Project.list({
     filter: { clientId: { eq: clientId } },
     limit: 200,
@@ -533,6 +572,7 @@ window.projectUpdate = async (id, p) => {
     prCount: p.prCount ?? null,
     suspenseCount: p.suspenseCount ?? null,
     dataPath,
+    ...(p.locked === true || p.locked === false ? { locked: p.locked } : {}),
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return res.data;
@@ -542,6 +582,101 @@ window.projectSetLocked = async (id, locked) => {
   const res = await dataClient.models.Project.update({ id, locked: !!locked });
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return res.data;
+};
+
+// Create an unlock request for a locked project. Used by Members who lack
+// permission to flip the lock themselves — an Admin / Super Admin decides
+// from their dashboard.
+window.projectRequestUnlock = async (project, reason) => {
+  const u = window.AUTH_USER || {};
+  const res = await dataClient.models.UnlockRequest.create({
+    projectId: project.id,
+    projectName: project.name || null,
+    clientId: project.clientId || null,
+    clientName: project.clientName || null,
+    requestedByEmail: u.email || null,
+    requestedByName: u.name || null,
+    status: 'pending',
+    requestedAt: new Date().toISOString(),
+    reason: reason || null,
+    team: project.team || u.team || null,
+  });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return res.data;
+};
+
+// List pending unlock requests visible to the caller. Routed through the
+// listTeamData Lambda so team-lead Admins see requests from their team
+// (the data-model auth rules only grant the super-admin group blanket read).
+window.unlockRequestList = async () => {
+  const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
+  let d = r.data;
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+  if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
+  return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+};
+
+// Approve or deny an unlock request. The decideUnlockRequest Lambda enforces
+// team scoping, unlocks the project on approval, and stamps the decision.
+window.unlockRequestDecide = async (req, approve) => {
+  const r = await dataClient.mutations.decideUnlockRequest({ requestId: req.id, approve: !!approve });
+  let d = r.data;
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+  if (!d || !d.success) throw new Error((d && d.message) || 'Decision failed');
+  return d;
+};
+
+// One-shot migration helper: walk Projects / Clients / ExportLogs that were
+// created before per-team auth was wired up and stamp their `team` field from
+// the owner's current Cognito attributes. Without this, historical rows stay
+// invisible to team-lead Admins (groupsDefinedIn('team') has nothing to match).
+// Restricted to Super Admin — relies on the broad `admin` Cognito-group auth
+// rule to list and update every row.
+window.backfillTeams = async (onProgress) => {
+  const u = window.AUTH_USER || {};
+  if (u.role !== 'admin') throw new Error('Only Super Admin can run the backfill.');
+  const report = (msg) => { try { onProgress && onProgress(msg); } catch (_) {} };
+
+  // 1) Email → team map from Cognito (already returned by listAppUsers).
+  report('Loading users…');
+  const usersRes = await dataClient.queries.listAppUsers();
+  let usersData = usersRes.data;
+  if (typeof usersData === 'string') { try { usersData = JSON.parse(usersData); } catch (_) {} }
+  if (!usersData || usersData.error) throw new Error((usersData && usersData.error) || 'Could not load users.');
+  const emailToTeam = new Map();
+  for (const row of (usersData.users || [])) {
+    if (row.email && row.team) emailToTeam.set(row.email.toLowerCase(), row.team);
+  }
+
+  // 2) Walk one model: list every page, update rows whose team is empty and
+  //    whose owner is known. Returns { updated, missingOwner, skippedOwnerless }.
+  const walk = async (model, label, ownerField) => {
+    let updated = 0, missingOwner = 0, skippedOwnerless = 0, scanned = 0;
+    let nextToken = undefined;
+    do {
+      const res = await model.list({ limit: 200, nextToken });
+      if (res.errors?.length) throw new Error(label + ': ' + res.errors[0].message);
+      for (const row of (res.data || [])) {
+        scanned++;
+        if (row.team) continue;
+        const owner = (row[ownerField] || '').toLowerCase();
+        if (!owner) { skippedOwnerless++; continue; }
+        const team = emailToTeam.get(owner);
+        if (!team) { missingOwner++; continue; }
+        const upd = await model.update({ id: row.id, team });
+        if (upd.errors?.length) { console.warn(label + ' update failed for ' + row.id, upd.errors); continue; }
+        updated++;
+      }
+      nextToken = res.nextToken;
+      report(label + ': scanned ' + scanned + ', updated ' + updated + '…');
+    } while (nextToken);
+    return { scanned, updated, missingOwner, skippedOwnerless };
+  };
+
+  const projects = await walk(dataClient.models.Project, 'Projects', 'ownerEmail');
+  const clients  = await walk(dataClient.models.Client, 'Clients', 'ownerEmail');
+  const exports_ = await walk(dataClient.models.ExportLog, 'ExportLogs', 'userEmail');
+  return { projects, clients, exports: exports_ };
 };
 
 window.projectDelete = async (id, dataPath) => {
@@ -816,19 +951,75 @@ $('auth-signout-btn').addEventListener('click', async () => {
 
 // ===== Manage Users (admin only) =====
 function switchModalTab(tab) {
+  $('tab-invite-btn').classList.remove('active');
+  $('tab-list-btn').classList.remove('active');
+  $('tab-unlock-btn').classList.remove('active');
+  $('invite-section').classList.add('auth-hidden');
+  $('users-list-section').classList.add('auth-hidden');
+  $('unlock-section').classList.add('auth-hidden');
   if (tab === 'invite') {
     $('tab-invite-btn').classList.add('active');
-    $('tab-list-btn').classList.remove('active');
     $('invite-section').classList.remove('auth-hidden');
-    $('users-list-section').classList.add('auth-hidden');
+  } else if (tab === 'unlock') {
+    $('tab-unlock-btn').classList.add('active');
+    $('unlock-section').classList.remove('auth-hidden');
+    // Backfill is a destructive bulk operation — Super Admin only.
+    const isSuperAdmin = window.AUTH_USER && window.AUTH_USER.role === 'admin';
+    $('backfill-panel').classList.toggle('auth-hidden', !isSuperAdmin);
+    loadUnlockRequests();
   } else {
-    $('tab-invite-btn').classList.remove('active');
     $('tab-list-btn').classList.add('active');
-    $('invite-section').classList.add('auth-hidden');
     $('users-list-section').classList.remove('auth-hidden');
     loadUsersList();
   }
 }
+
+async function loadUnlockRequests() {
+  const container = $('unlock-list-container');
+  container.innerHTML = '<div style="text-align:center;color:#555555;font-size:12px;padding:30px;">Loading requests…</div>';
+  try {
+    const reqs = await window.unlockRequestList();
+    $('tab-unlock-btn').textContent = 'Unlock Requests (' + reqs.length + ')';
+    if (!reqs.length) {
+      container.innerHTML = '<div style="color:#555555;font-size:12px;padding:30px;text-align:center;">No pending unlock requests.</div>';
+      return;
+    }
+    container.innerHTML = reqs.map(r => {
+      const when = r.requestedAt ? new Date(r.requestedAt).toLocaleString() : '';
+      return '<div class="user-row" data-req-id="' + escapeHtml(r.id) + '" data-project-id="' + escapeHtml(r.projectId || '') + '">'
+        + '<div style="flex:1;min-width:0;">'
+        +   '<div class="user-row-name">' + escapeHtml(r.projectName || '(unnamed project)') + '</div>'
+        +   '<div class="user-row-email">' + escapeHtml(r.clientName || '') + ' · ' + escapeHtml(r.requestedByName || r.requestedByEmail || '') + ' · ' + escapeHtml(when) + '</div>'
+        +   (r.reason ? '<div style="font-size:11px;color:#555555;margin-top:4px;font-style:italic;">"' + escapeHtml(r.reason) + '"</div>' : '')
+        + '</div>'
+        + '<div class="user-row-actions">'
+        +   '<button class="user-action-btn user-action-reset" data-unlock-action="approve">Approve</button>'
+        +   '<button class="user-action-btn user-action-delete" data-unlock-action="deny">Deny</button>'
+        + '</div>'
+        + '</div>';
+    }).join('');
+  } catch (e) {
+    container.innerHTML = '<div style="color:#dc2626;font-size:12px;padding:20px;text-align:center;">Error: ' + escapeHtml(e && e.message ? e.message : String(e)) + '</div>';
+  }
+}
+
+document.addEventListener('click', async function(e) {
+  const btn = e.target.closest('button[data-unlock-action]');
+  if (!btn) return;
+  const row = btn.closest('[data-req-id]');
+  if (!row) return;
+  const id = row.dataset.reqId;
+  const approve = btn.dataset.unlockAction === 'approve';
+  if (!confirm(approve ? 'Approve and unlock this project?' : 'Deny this unlock request?')) return;
+  btn.disabled = true;
+  try {
+    await window.unlockRequestDecide({ id, projectId: row.dataset.projectId || '' }, approve);
+    loadUnlockRequests();
+  } catch (err) {
+    alert('Could not update request: ' + (err.message || err));
+    btn.disabled = false;
+  }
+});
 
 function escapeHtml(s) {
   return (s == null ? '' : String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -926,6 +1117,26 @@ $('users-close-btn').addEventListener('click', closeInviteModal);
 $('users-refresh-btn').addEventListener('click', loadUsersList);
 $('tab-invite-btn').addEventListener('click', function() { switchModalTab('invite'); });
 $('tab-list-btn').addEventListener('click', function() { switchModalTab('list'); });
+$('tab-unlock-btn').addEventListener('click', function() { switchModalTab('unlock'); });
+$('unlock-close-btn').addEventListener('click', closeInviteModal);
+$('unlock-refresh-btn').addEventListener('click', loadUnlockRequests);
+
+$('backfill-run-btn').addEventListener('click', async function() {
+  if (!confirm('Run the team-tag backfill?\n\nThis scans every Project, Client, and Export Log and stamps team where missing. Safe to repeat — already-tagged rows are left alone.')) return;
+  const btn = $('backfill-run-btn');
+  const status = $('backfill-status');
+  btn.disabled = true; btn.textContent = 'Running…';
+  status.textContent = 'Starting…';
+  try {
+    const result = await window.backfillTeams((msg) => { status.textContent = msg; });
+    const fmt = (r) => 'scanned ' + r.scanned + ', updated ' + r.updated + (r.missingOwner ? ', ' + r.missingOwner + ' skipped (owner gone)' : '') + (r.skippedOwnerless ? ', ' + r.skippedOwnerless + ' skipped (no owner)' : '');
+    status.innerHTML = 'Done. <br>Projects: ' + fmt(result.projects) + '<br>Clients: ' + fmt(result.clients) + '<br>Export Logs: ' + fmt(result.exports);
+  } catch (e) {
+    status.textContent = 'Error: ' + (e.message || e);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Run backfill';
+  }
+});
 $('invite-modal').addEventListener('click', (e) => { if (e.target === $('invite-modal')) closeInviteModal(); });
 
 // ===== Inline role change (Super Admin only) =====
@@ -1504,6 +1715,10 @@ function App(){
   },[activeClientId]);
   const[viewingProject,setViewingProject]=useState(null); // project object when viewing a past project
   const[editingProjectId,setEditingProjectId]=useState(""); // set when re-opening a saved project for edits; next save UPDATEs this project instead of creating a new one
+  // When a saved project is re-opened to clarify its suspense list, we remember
+  // the original suspense rows' keys here. On the next export we offer the user
+  // a "suspense-only" export (Zoho import for just the freshly-classified rows).
+  const[originalSuspenseKeys,setOriginalSuspenseKeys]=useState(()=>new Set());
   const[billProcessing,setBillProcessing]=useState(false);
   const[billProgress,setBillProgress]=useState("");
   const billInputRef=useRef(null);
@@ -1874,7 +2089,37 @@ function App(){
       return{...txn,suggestedLedger:r.ledger==="Review Required"?(chartOfAccounts.find(a=>a.name.toLowerCase().includes("suspense"))||{name:"Suspense Account"}).name:r.ledger,selectedLedger:ledger,confidence:r.confidence,status,source:r.source,matchCount:r.matchCount||0,txnType,entryMode,contactName:""};
     });
     await new Promise(r=>setTimeout(r,800));setClassifiedTxns(classified);setAiClassifying(false);setProcessing(false);setStep(4);
-  },[transactions,learnedRules,refDB,chartOfAccounts,activeClientId,globalRefDB,globalKeywordIndex]);
+    // Save a draft project on import so admins / users can see in-progress work
+    // and so the project survives a tab close. Only when we aren't already
+    // editing an existing project (otherwise the export step will UPDATE it).
+    if(activeClientId && classified.length>0 && !editingProjectId){
+      try{
+        const dates=classified.map(t=>t.date).filter(Boolean);
+        const period=(dates[0]||"")+" to "+(dates[dates.length-1]||"");
+        const susCount=classified.filter(t=>(t.selectedLedger||"").toLowerCase().includes("suspense")).length;
+        const payload={
+          clientId: activeClientId,
+          clientName: activeClientName || null,
+          name: (bankAccount||"Bank")+" — "+period+" (draft)",
+          exportedAt: new Date().toISOString(),
+          bankName: bankAccount||"Bank Account",
+          period,
+          txnCount: classified.length,
+          expenseCount: 0,
+          journalCount: 0,
+          bsCount: 0,
+          prCount: 0,
+          suspenseCount: susCount,
+          locked: false,
+          data: { transactions: classified, expenses:[], journals:[], bsItems:[], revenue:[], suspense:[] }
+        };
+        const saved=await window.projectSave(payload);
+        const summary={...saved, date: saved.exportedAt};
+        setProjectLog(prev=>({...prev,[activeClientId]:[...(prev[activeClientId]||[]), summary]}));
+        setEditingProjectId(saved.id);
+      }catch(e){ console.warn("Could not save import draft:",e); }
+    }
+  },[transactions,learnedRules,refDB,chartOfAccounts,activeClientId,activeClientName,bankAccount,editingProjectId,globalRefDB,globalKeywordIndex]);
 
   const handleLedgerChange=useCallback((id,newLedger)=>{
     setClassifiedTxns(prev=>prev.map(t=>{
@@ -2230,12 +2475,46 @@ td,th{padding:8px 12px;vertical-align:middle}
 
 
   const exportCSV=useCallback(()=>{
+    // When re-opening a saved project to clarify its suspense list, offer to
+    // export ONLY the freshly-classified rows so the user imports just the
+    // delta into Zoho instead of the full statement again.
+    let suspenseOnly=false;
+    if(editingProjectId && originalSuspenseKeys.size>0){
+      suspenseOnly=confirm(
+        "You re-opened this project to clarify suspense entries.\n\n"+
+        "OK = Export ONLY the newly-classified suspense entries (recommended — import just the delta into Zoho).\n"+
+        "Cancel = Export all sheets (full statement)."
+      );
+    }
+    const keyOf=(date,desc,debit,credit)=>(date||"")+"|"+(desc||"")+"|"+(debit||0)+"|"+(credit||0);
+    const filterPairs=(rows)=>{
+      // Journal/BS entries are stored as paired (debit,credit) rows. Keep a
+      // pair iff its first row's narration matches an original suspense row.
+      const out=[];
+      for(let i=0;i<rows.length;i+=2){
+        const e1=rows[i],e2=rows[i+1]; if(!e1)continue;
+        const debit=e1.debit||0, credit=e2?e2.credit||0:0;
+        if(originalSuspenseKeys.has(keyOf(e1.date,e1.narration,debit,credit))){ out.push(e1); if(e2)out.push(e2); }
+      }
+      return out;
+    };
+    const exp = suspenseOnly
+      ? (journalEntries.expenses||[]).filter(r=>originalSuspenseKeys.has(keyOf(r.date,r.description,r.amount,0)))
+      : (journalEntries.expenses||[]);
+    const jrn = suspenseOnly ? filterPairs(journalEntries.journals||[]) : (journalEntries.journals||[]);
+    const bs  = suspenseOnly ? filterPairs(journalEntries.bsItems||[])  : (journalEntries.bsItems||[]);
+    const rev = suspenseOnly
+      ? (journalEntries.revenue||[]).filter(r=>originalSuspenseKeys.has(keyOf(r.date,r.description,0,r.amount)))
+      : (journalEntries.revenue||[]);
+
     let delay=0;
-    if((journalEntries.expenses||[]).length>0){exportExpenses();delay+=400;}
-    if((journalEntries.journals||[]).length>0){setTimeout(exportJournals,delay);delay+=400;}
-    if((journalEntries.bsItems||[]).length>0){setTimeout(exportBSItems,delay);delay+=400;}
-    if((journalEntries.revenue||[]).length>0){setTimeout(exportPaymentReceived,delay);delay+=400;}
-    if((journalEntries.suspense||[]).length>0){setTimeout(exportSuspense,delay);}
+    const fileTag=suspenseOnly?"_suspense_resolved":"";
+    if(exp.length>0){ downloadFile(buildExpenseCSV(exp),prefix()+"_PL_expenses"+fileTag+".csv"); delay+=400; }
+    if(jrn.length>0){ setTimeout(()=>downloadFile(buildJournalCSV(jrn),prefix()+"_journals"+fileTag+".csv"),delay); delay+=400; }
+    if(bs.length>0){  setTimeout(()=>downloadFile(buildJournalCSV(bs),prefix()+"_BS_items"+fileTag+".csv"),delay); delay+=400; }
+    if(rev.length>0){ setTimeout(()=>downloadFile(buildPaymentReceivedCSV(rev),prefix()+"_payment_received"+fileTag+".csv"),delay); delay+=400; }
+    // Suspense clarification sheet only makes sense on the full export.
+    if(!suspenseOnly && (journalEntries.suspense||[]).length>0){setTimeout(exportSuspense,delay);}
 
     // Save project log with full data for re-viewing
     if(activeClientId&&transactions.length>0){
@@ -2283,6 +2562,9 @@ td,th{padding:8px 12px;vertical-align:middle}
             bsCount: project.bsCount,
             prCount: project.prCount,
             suspenseCount: project.suspenseCount,
+            // Auto-lock after a successful export. Unlock requires an Admin
+            // approval — see UnlockRequest flow.
+            locked: true,
             data: project.data,
           };
           if (editingId) {
@@ -2290,6 +2572,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             const summary = { ...updated, date: updated.exportedAt };
             setProjectLog(prev => ({ ...prev, [activeClientId]: (prev[activeClientId]||[]).map(p => p.id === editingId ? summary : p) }));
             setEditingProjectId("");
+            setOriginalSuspenseKeys(new Set());
           } else {
             const saved = await window.projectSave(payload);
             const summary = { ...saved, date: saved.exportedAt };
@@ -2299,7 +2582,7 @@ td,th{padding:8px 12px;vertical-align:middle}
       })();
     }
     setStep(6);
-  },[exportExpenses,exportJournals,exportBSItems,exportPaymentReceived,exportSuspense,journalEntries,activeClientId,activeClientName,transactions,bankAccount,editingProjectId]);
+  },[exportSuspense,journalEntries,activeClientId,activeClientName,transactions,bankAccount,editingProjectId,originalSuspenseKeys,classifiedTxns,currency]);
 
   const renameProject=useCallback((clientId,projectId,newName)=>{
     setProjectLog(prev=>{
@@ -2337,6 +2620,12 @@ td,th{padding:8px 12px;vertical-align:middle}
       suspense:d.suspense||[],
     });
     setEditingProjectId(p.id);
+    // Snapshot the suspense rows from the saved project. Next export uses
+    // these keys to offer a "suspense-only" Zoho import after the user
+    // re-classifies based on client clarifications.
+    const sk=new Set();
+    (d.suspense||[]).forEach(s=>{ sk.add((s.date||"")+"|"+(s.description||"")+"|"+(s.debit||0)+"|"+(s.credit||0)); });
+    setOriginalSuspenseKeys(sk);
     setViewingProject(null);
     setReviewTab("expenses");
     setStep(4);
@@ -2859,10 +3148,15 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                 {!viewingProject.locked && <button onClick={()=>reopenProject(viewingProject)} title="Re-open this project to re-classify transactions or apply client clarifications" style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 14px",color:"#ffffff",fontSize:11,fontWeight:600,cursor:"pointer"}}>↺ Re-classify & edit</button>}
                 {viewingProject.locked
-                  // Only Admin and Level 1 Users can unlock — Sub-users must ask their Level 1.
                   ? (["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role)
                       ? <button onClick={()=>{if(confirm("Unlock this project? It will become editable again."))setProjectLocked(viewingProject.id,false);}} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Unlock</button>
-                      : null)
+                      // Members can't unlock — they file a request that an Admin approves from the dashboard.
+                      : <button onClick={async()=>{
+                          const reason=prompt("Briefly explain why this project needs to be unlocked:");
+                          if(!reason||!reason.trim())return;
+                          try{ await window.projectRequestUnlock(viewingProject,reason.trim()); alert("Unlock request submitted. An Admin will review it."); }
+                          catch(e){ alert("Could not submit request: "+(e.message||e)); }
+                        }} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Request Unlock</button>)
                   : <button onClick={()=>{if(confirm("Lock this project? It becomes read-only — you can still re-download files but cannot re-classify, rename or delete it until unlocked."))setProjectLocked(viewingProject.id,true);}} style={{background:"#ffffff",border:"1px solid #16a34a",borderRadius:6,padding:"6px 14px",color:"#16a34a",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔒 Lock</button>}
                 <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
               </div>

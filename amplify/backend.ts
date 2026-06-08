@@ -6,6 +6,8 @@ import { storage } from './storage/resource';
 import { inviteUser } from './functions/invite-user/resource';
 import { listAppUsers } from './functions/list-app-users/resource';
 import { manageUser } from './functions/manage-user/resource';
+import { listTeamData } from './functions/list-team-data/resource';
+import { decideUnlockRequest } from './functions/decide-unlock-request/resource';
 
 const backend = defineBackend({
   auth,
@@ -13,7 +15,9 @@ const backend = defineBackend({
   storage,
   inviteUser,
   listAppUsers,
-  manageUser
+  manageUser,
+  listTeamData,
+  decideUnlockRequest
 });
 
 const userPool = backend.auth.resources.userPool;
