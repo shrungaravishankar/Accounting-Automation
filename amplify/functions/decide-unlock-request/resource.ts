@@ -8,5 +8,7 @@ import { defineFunction } from '@aws-amplify/backend';
 export const decideUnlockRequest = defineFunction({
   name: 'decide-unlock-request',
   entry: './handler.ts',
-  timeoutSeconds: 30
+  timeoutSeconds: 30,
+  // Co-locate with the data stack: resolver + DynamoDB table writer.
+  resourceGroupName: 'data'
 });
