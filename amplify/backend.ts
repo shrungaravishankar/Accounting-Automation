@@ -64,7 +64,9 @@ backend.manageUser.resources.lambda.addToRolePolicy(
       'cognito-idp:AdminAddUserToGroup',
       'cognito-idp:AdminRemoveUserFromGroup',
       'cognito-idp:AdminUpdateUserAttributes',
-      'cognito-idp:CreateGroup'
+      'cognito-idp:CreateGroup',
+      // migrate-team-leads needs to enumerate the whole user pool.
+      'cognito-idp:ListUsers'
     ],
     resources: [userPool.userPoolArn]
   })
