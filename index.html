@@ -444,16 +444,21 @@ window.storeAndLogExport = async (p) => {
 
 window.alClientList = async () => {
   const u = window.AUTH_USER || {};
-  // Super Admin reads everything via the 'admin' Cognito-group rule.
-  // Admins (team-lead role) read everything via the flat 'team-lead' group
-  // rule, then we filter client-side to their own team — this avoids the
-  // groupsDefinedIn('team') Amplify bug.
-  // Users (staff) only get their own rows via the owner rule.
+  // Admins go through the listTeamData Lambda which filters server-side by
+  // the caller's team-<sub> group. This is the strict-isolation path: an
+  // Admin literally cannot see other teams' rows, even via direct API calls.
+  // Super Admin uses Client.list directly (admin Cognito group → see all).
+  // Users (staff) use Client.list and get their own via the owner rule.
+  if (u.role === 'team-lead') {
+    const r = await dataClient.queries.listTeamData({ kind: 'clients' });
+    let d = r.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
+    return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+  }
   const res = await dataClient.models.Client.list({ limit: 500 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  let rows = res.data || [];
-  if (u.role === 'team-lead' && u.team) rows = rows.filter(c => !c.team || c.team === u.team);
-  return rows.map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
 };
 window.alClientCreate = async (name) => {
   const u = window.AUTH_USER || {};
@@ -518,17 +523,23 @@ window.projectSave = async (p) => {
 };
 
 // List a client's saved projects (metadata only), newest first.
-// Same auth-flow notes as alClientList — admins filter client-side by team.
+// Same auth-flow notes as alClientList — Admins go through the lambda for
+// strict team isolation; Super Admin + owners use the direct model call.
 window.projectList = async (clientId) => {
   const u = window.AUTH_USER || {};
+  if (u.role === 'team-lead') {
+    const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
+    let d = r.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
+    return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+  }
   const res = await dataClient.models.Project.list({
     filter: { clientId: { eq: clientId } },
     limit: 500,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  let rows = res.data || [];
-  if (u.role === 'team-lead' && u.team) rows = rows.filter(p => !p.team || p.team === u.team);
-  return rows.sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+  return (res.data || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
 };
 
 // Download + parse a project's heavy data JSON from S3.
@@ -601,19 +612,23 @@ window.projectRequestUnlock = async (project, reason) => {
   return res.data;
 };
 
-// List pending unlock requests visible to the caller. Super Admin sees all
-// via the admin Cognito-group rule; Admin sees all via the team-lead group
-// rule and filters to their team here.
+// List pending unlock requests visible to the caller. Admins go through the
+// lambda for strict team isolation; Super Admin reads everything directly.
 window.unlockRequestList = async () => {
   const u = window.AUTH_USER || {};
+  if (u.role === 'team-lead') {
+    const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
+    let d = r.data;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
+    return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+  }
   const res = await dataClient.models.UnlockRequest.list({
     filter: { status: { eq: 'pending' } },
     limit: 500,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  let rows = res.data || [];
-  if (u.role === 'team-lead' && u.team) rows = rows.filter(r => r.team === u.team);
-  return rows.sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+  return (res.data || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
 };
 
 // Approve or deny an unlock request. The decideUnlockRequest Lambda enforces
