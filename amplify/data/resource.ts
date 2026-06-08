@@ -4,7 +4,6 @@ import { listAppUsers } from '../functions/list-app-users/resource';
 import { manageUser } from '../functions/manage-user/resource';
 import { listTeamData } from '../functions/list-team-data/resource';
 import { decideUnlockRequest } from '../functions/decide-unlock-request/resource';
-
 /**
  * AppSync GraphQL schema for BCL AutoLedger.
  *
@@ -55,8 +54,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
-      allow.group('admin').to(['read', 'delete']),
-      allow.resource(listTeamData).to(['read'])
+      allow.group('admin').to(['read', 'delete'])
     ]),
 
   /** A client/company the signed-in user works on. Owner + admin full access. */
@@ -70,8 +68,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
-      allow.group('admin').to(['create', 'read', 'update', 'delete']),
-      allow.resource(listTeamData).to(['read'])
+      allow.group('admin').to(['create', 'read', 'update', 'delete'])
     ]),
 
   /**
@@ -103,9 +100,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
-      allow.group('admin').to(['create', 'read', 'update', 'delete']),
-      allow.resource(listTeamData).to(['read']),
-      allow.resource(decideUnlockRequest).to(['read', 'update'])
+      allow.group('admin').to(['create', 'read', 'update', 'delete'])
     ]),
 
   /**
@@ -131,9 +126,7 @@ const schema = a.schema({
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
-      allow.group('admin').to(['read', 'update', 'delete']),
-      allow.resource(listTeamData).to(['read']),
-      allow.resource(decideUnlockRequest).to(['read', 'update'])
+      allow.group('admin').to(['read', 'update', 'delete'])
     ]),
 
   InviteResult: a.customType({

@@ -69,3 +69,39 @@ backend.manageUser.resources.lambda.addToRolePolicy(
     resources: [userPool.userPoolArn]
   })
 );
+
+// ---- list-team-data / decide-unlock-request: direct DynamoDB access ----
+// These Lambdas filter rows by the caller's Cognito team group server-side,
+// since Amplify Gen2 1.4's groupsDefinedIn('team') has a field-writability bug.
+// Talk to the auto-generated DynamoDB tables directly using the SDK.
+const projectTable = backend.data.resources.tables['Project'];
+const clientTable = backend.data.resources.tables['Client'];
+const exportLogTable = backend.data.resources.tables['ExportLog'];
+const unlockTable = backend.data.resources.tables['UnlockRequest'];
+
+backend.listTeamData.addEnvironment('PROJECT_TABLE_NAME', projectTable.tableName);
+backend.listTeamData.addEnvironment('CLIENT_TABLE_NAME', clientTable.tableName);
+backend.listTeamData.addEnvironment('EXPORTLOG_TABLE_NAME', exportLogTable.tableName);
+backend.listTeamData.addEnvironment('UNLOCKREQUEST_TABLE_NAME', unlockTable.tableName);
+backend.listTeamData.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['dynamodb:Scan', 'dynamodb:Query'],
+    resources: [
+      projectTable.tableArn, projectTable.tableArn + '/index/*',
+      clientTable.tableArn, clientTable.tableArn + '/index/*',
+      exportLogTable.tableArn, exportLogTable.tableArn + '/index/*',
+      unlockTable.tableArn, unlockTable.tableArn + '/index/*'
+    ]
+  })
+);
+
+backend.decideUnlockRequest.addEnvironment('PROJECT_TABLE_NAME', projectTable.tableName);
+backend.decideUnlockRequest.addEnvironment('UNLOCKREQUEST_TABLE_NAME', unlockTable.tableName);
+backend.decideUnlockRequest.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+    resources: [projectTable.tableArn, unlockTable.tableArn]
+  })
+);
