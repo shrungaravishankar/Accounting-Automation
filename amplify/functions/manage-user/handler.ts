@@ -11,7 +11,8 @@ import {
   AdminGetUserCommand,
   CreateGroupCommand,
   GroupExistsException,
-  UserNotFoundException
+  UserNotFoundException,
+  ListUsersCommand
 } from '@aws-sdk/client-cognito-identity-provider';
 
 const client = new CognitoIdentityProviderClient();
@@ -19,7 +20,7 @@ const client = new CognitoIdentityProviderClient();
 type ManageEvent = {
   arguments: {
     email: string;
-    action: 'reset-password' | 'delete' | 'set-role';
+    action: 'reset-password' | 'delete' | 'set-role' | 'migrate-team-leads';
     role?: string; // 'admin' | 'team-lead' | 'staff'  (only for set-role)
   };
   identity?: {
@@ -78,15 +79,15 @@ export const handler = async (event: ManageEvent) => {
   if (!userPoolId) {
     return { success: false, message: 'Server misconfiguration: USER_POOL_ID missing.', tempPassword: '' };
   }
-  if (!email || !action) {
+  if (!action || (action !== 'migrate-team-leads' && !email)) {
     return { success: false, message: 'Email and action are required.', tempPassword: '' };
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail = (email || '').trim().toLowerCase();
 
-  // ---- Self-action protection ----
+  // ---- Self-action protection (skip for bulk operations) ----
   const callerEmail = (event.identity?.claims?.email || event.identity?.username || '').toLowerCase();
-  if (callerEmail && callerEmail === normalizedEmail) {
+  if (action !== 'migrate-team-leads' && callerEmail && callerEmail === normalizedEmail) {
     return {
       success: false,
       message: 'You cannot perform this action on your own account.',
@@ -169,7 +170,8 @@ export const handler = async (event: ManageEvent) => {
           UserAttributes: [{ Name: 'custom:team', Value: '' }]
         }));
       } else if (newRole === 'team-lead') {
-        // Make them an Admin with their own team: remove 'admin'; ensure team-<sub> + 'staff'; set custom:team.
+        // Make them an Admin with their own team: remove 'admin'; ensure
+        // team-<sub> + 'staff' + flat 'team-lead' group; set custom:team.
         if (!sub) return { success: false, message: 'Could not determine user sub; aborting.', tempPassword: '' };
         const team = `team-${sub}`;
         try {
@@ -178,26 +180,73 @@ export const handler = async (event: ManageEvent) => {
             Description: `Team led by ${normalizedEmail}`
           }));
         } catch (e: any) { if (!(e instanceof GroupExistsException)) throw e; }
+        try {
+          await client.send(new CreateGroupCommand({
+            UserPoolId: userPoolId, GroupName: 'team-lead',
+            Description: 'Flat group containing every Team Lead (Admin) — used for data read auth.'
+          }));
+        } catch (e: any) { if (!(e instanceof GroupExistsException)) throw e; }
         await remove('admin');
         await add('staff');
         await add(team);
+        await add('team-lead');
         // Remove any OTHER team-* groups they were in.
-        for (const g of current.filter(g => g.startsWith('team-') && g !== team)) await remove(g);
+        for (const g of current.filter(g => g.startsWith('team-') && g !== team && g !== 'team-lead')) await remove(g);
         await client.send(new AdminUpdateUserAttributesCommand({
           UserPoolId: userPoolId, Username: normalizedEmail,
           UserAttributes: [{ Name: 'custom:team', Value: team }]
         }));
       } else {
-        // Demote / set as User: ensure 'staff'; remove 'admin' and any team-* group.
-        // custom:team is left as-is (it should already point to their Admin's team if applicable).
+        // Demote / set as User: ensure 'staff'; remove 'admin', 'team-lead'
+        // and any team-* group. custom:team is left as-is.
         await add('staff');
         await remove('admin');
+        await remove('team-lead');
         for (const g of current.filter(g => g.startsWith('team-'))) await remove(g);
       }
 
       return {
         success: true,
         message: `Role updated for ${normalizedEmail}.`,
+        tempPassword: ''
+      };
+    } else if (action === 'migrate-team-leads') {
+      // One-shot Super-Admin migration: create the flat 'team-lead' group,
+      // then walk every Cognito user and add anyone in a 'team-<sub>' group
+      // to it. Idempotent — safe to re-run.
+      try {
+        await client.send(new CreateGroupCommand({
+          UserPoolId: userPoolId, GroupName: 'team-lead',
+          Description: 'Flat group containing every Team Lead (Admin) — used for data read auth.'
+        }));
+      } catch (e: any) { if (!(e instanceof GroupExistsException)) throw e; }
+
+      let added = 0, scanned = 0, alreadyIn = 0;
+      let paginationToken: string | undefined = undefined;
+      do {
+        const lr = await client.send(new ListUsersCommand({
+          UserPoolId: userPoolId, Limit: 60, PaginationToken: paginationToken
+        }));
+        for (const u of (lr.Users || [])) {
+          if (!u.Username) continue;
+          scanned++;
+          const gr = await client.send(new AdminListGroupsForUserCommand({
+            UserPoolId: userPoolId, Username: u.Username
+          }));
+          const names = (gr.Groups || []).map(g => g.GroupName).filter((g): g is string => !!g);
+          if (!names.some(g => g.startsWith('team-') && g !== 'team-lead')) continue;
+          if (names.includes('team-lead')) { alreadyIn++; continue; }
+          await client.send(new AdminAddUserToGroupCommand({
+            UserPoolId: userPoolId, Username: u.Username, GroupName: 'team-lead'
+          }));
+          added++;
+        }
+        paginationToken = lr.PaginationToken;
+      } while (paginationToken);
+
+      return {
+        success: true,
+        message: `Migration done. Scanned ${scanned} users, added ${added} to team-lead group (${alreadyIn} already in).`,
         tempPassword: ''
       };
     } else {

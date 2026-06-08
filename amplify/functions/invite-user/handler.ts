@@ -129,10 +129,28 @@ export const handler = async (event: InviteEvent) => {
       } catch (err: any) {
         if (!(err instanceof GroupExistsException)) throw err;
       }
+      // Also ensure the flat 'team-lead' group exists, and add the new Admin
+      // to it. This is what the data-schema `allow.group('team-lead')` rule
+      // keys on so Admins can read their team's rows (filtered client-side
+      // by the row's `team` field).
+      try {
+        await client.send(new CreateGroupCommand({
+          UserPoolId: userPoolId,
+          GroupName: 'team-lead',
+          Description: 'Flat group containing every Team Lead (Admin) — used for data read auth.'
+        }));
+      } catch (err: any) {
+        if (!(err instanceof GroupExistsException)) throw err;
+      }
       await client.send(new AdminAddUserToGroupCommand({
         UserPoolId: userPoolId,
         Username: email,
         GroupName: teamGroup
+      }));
+      await client.send(new AdminAddUserToGroupCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        GroupName: 'team-lead'
       }));
       await client.send(new AdminUpdateUserAttributesCommand({
         UserPoolId: userPoolId,

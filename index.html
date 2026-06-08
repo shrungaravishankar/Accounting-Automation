@@ -361,8 +361,13 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
       <p class="sub">Approve to unlock the project for further edits, or deny to keep it locked.</p>
       <div id="unlock-list-container" style="max-height:300px; overflow-y:auto;"></div>
       <div id="backfill-panel" class="auth-hidden" style="margin-top:14px;padding:12px;background:#f8f9fc;border:1px solid #e2e2ea;border-radius:6px;">
+        <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Migrate existing Admins</div>
+        <p class="sub" style="margin:0 0 8px 0;">Adds every existing Admin into the new flat <code>team-lead</code> Cognito group. <strong>Run this first</strong> — without it, current Admins can't see Users' data. New Admins invited after this deploy are added automatically.</p>
+        <div id="migrate-status" style="font-size:11px;color:#555555;margin-bottom:8px;"></div>
+        <button class="auth-btn" id="migrate-run-btn" style="flex:0 0 auto; min-width:200px; margin-bottom:14px;">Migrate Admins to team-lead group</button>
+
         <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Backfill team tags</div>
-        <p class="sub" style="margin:0 0 8px 0;">One-shot migration. Stamps the <code>team</code> field on historical Projects, Clients, and Export Logs from each row's owner. Required for team-lead Admins to see data created before the per-team auth was added. Safe to run more than once.</p>
+        <p class="sub" style="margin:0 0 8px 0;">Stamps the <code>team</code> field on historical Projects, Clients, and Export Logs from each row's owner. Required for Admins to see data created before the per-team auth was added. Safe to run more than once.</p>
         <div id="backfill-status" style="font-size:11px;color:#555555;margin-bottom:8px;"></div>
         <button class="auth-btn" id="backfill-run-btn" style="flex:0 0 auto; min-width:160px;">Run backfill</button>
       </div>
@@ -439,19 +444,16 @@ window.storeAndLogExport = async (p) => {
 
 window.alClientList = async () => {
   const u = window.AUTH_USER || {};
-  // Team-lead Admins need to see clients created by their team members too.
-  // Schema auth only gives them their own + super-admin sees all, so go via
-  // the listTeamData Lambda which filters server-side by Cognito team group.
-  if (u.role === 'team-lead') {
-    const r = await dataClient.queries.listTeamData({ kind: 'clients' });
-    let d = r.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
-    return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
-  }
-  const res = await dataClient.models.Client.list({ limit: 200 });
+  // Super Admin reads everything via the 'admin' Cognito-group rule.
+  // Admins (team-lead role) read everything via the flat 'team-lead' group
+  // rule, then we filter client-side to their own team — this avoids the
+  // groupsDefinedIn('team') Amplify bug.
+  // Users (staff) only get their own rows via the owner rule.
+  const res = await dataClient.models.Client.list({ limit: 500 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+  let rows = res.data || [];
+  if (u.role === 'team-lead' && u.team) rows = rows.filter(c => !c.team || c.team === u.team);
+  return rows.map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
 };
 window.alClientCreate = async (name) => {
   const u = window.AUTH_USER || {};
@@ -516,23 +518,17 @@ window.projectSave = async (p) => {
 };
 
 // List a client's saved projects (metadata only), newest first.
-// Owners + super-admin hit the model directly. Team-lead Admins go via the
-// listTeamData Lambda which filters by their Cognito team group server-side.
+// Same auth-flow notes as alClientList — admins filter client-side by team.
 window.projectList = async (clientId) => {
   const u = window.AUTH_USER || {};
-  if (u.role === 'team-lead') {
-    const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
-    let d = r.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
-    return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
-  }
   const res = await dataClient.models.Project.list({
     filter: { clientId: { eq: clientId } },
-    limit: 200,
+    limit: 500,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+  let rows = res.data || [];
+  if (u.role === 'team-lead' && u.team) rows = rows.filter(p => !p.team || p.team === u.team);
+  return rows.sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
 };
 
 // Download + parse a project's heavy data JSON from S3.
@@ -605,25 +601,51 @@ window.projectRequestUnlock = async (project, reason) => {
   return res.data;
 };
 
-// List pending unlock requests visible to the caller. Routed through the
-// listTeamData Lambda so team-lead Admins see requests from their team
-// (the data-model auth rules only grant the super-admin group blanket read).
+// List pending unlock requests visible to the caller. Super Admin sees all
+// via the admin Cognito-group rule; Admin sees all via the team-lead group
+// rule and filters to their team here.
 window.unlockRequestList = async () => {
-  const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
-  let d = r.data;
-  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-  if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
-  return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+  const u = window.AUTH_USER || {};
+  const res = await dataClient.models.UnlockRequest.list({
+    filter: { status: { eq: 'pending' } },
+    limit: 500,
+  });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  let rows = res.data || [];
+  if (u.role === 'team-lead' && u.team) rows = rows.filter(r => r.team === u.team);
+  return rows.sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
 };
 
 // Approve or deny an unlock request. The decideUnlockRequest Lambda enforces
-// team scoping, unlocks the project on approval, and stamps the decision.
+// team scoping server-side, unlocks the project on approval, and stamps the
+// decision (Admins lack direct Project.update permission).
 window.unlockRequestDecide = async (req, approve) => {
   const r = await dataClient.mutations.decideUnlockRequest({ requestId: req.id, approve: !!approve });
   let d = r.data;
   if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
   if (!d || !d.success) throw new Error((d && d.message) || 'Decision failed');
   return d;
+};
+
+// Admin direct unlock — no request entry needed. Routed through the same
+// Lambda so the team-scope check stays server-side.
+window.projectAdminUnlock = async (projectId) => {
+  const r = await dataClient.mutations.decideUnlockRequest({ projectId, approve: true });
+  let d = r.data;
+  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+  if (!d || !d.success) throw new Error((d && d.message) || 'Unlock failed');
+  return d;
+};
+
+// Run the one-shot Cognito migration that puts every existing Team Lead into
+// the flat 'team-lead' group. Required so the new schema rule has anything
+// to match. Idempotent — safe to re-run.
+window.migrateTeamLeads = async () => {
+  const r = await dataClient.mutations.manageUser({ email: '', action: 'migrate-team-leads' });
+  let d = r.data;
+  if (typeof d === 'object' && d) return d;
+  if (typeof d === 'string') { try { return JSON.parse(d); } catch (_) {} }
+  throw new Error('Unexpected response from manageUser.');
 };
 
 // One-shot migration helper: walk Projects / Clients / ExportLogs that were
@@ -787,9 +809,12 @@ try {
     //   - 'admin'                       → Admin (sees all teams)
     //   - in a team-<sub> group         → Team Lead (Level 1)
     //   - 'staff' only                  → Member (Level 2)
-    const teamGroupFromGroups = groups.find(g => g.startsWith('team-')) || '';
+    // Resolve effective role. The flat 'team-lead' group is the auth-rule
+    // hook for Admins reading their team's data; the team-<sub> group is the
+    // per-team identity. Either marks the user as an Admin.
+    const teamGroupFromGroups = groups.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
     const role = groups.includes('admin') ? 'admin'
-      : teamGroupFromGroups ? 'team-lead'
+      : (groups.includes('team-lead') || teamGroupFromGroups) ? 'team-lead'
       : groups.includes('staff') ? 'staff'
       : null;
     if (!role) {
@@ -1120,6 +1145,22 @@ $('tab-list-btn').addEventListener('click', function() { switchModalTab('list');
 $('tab-unlock-btn').addEventListener('click', function() { switchModalTab('unlock'); });
 $('unlock-close-btn').addEventListener('click', closeInviteModal);
 $('unlock-refresh-btn').addEventListener('click', loadUnlockRequests);
+
+$('migrate-run-btn').addEventListener('click', async function() {
+  if (!confirm('Add every existing Admin to the new team-lead Cognito group?\n\nThis is required for Admins to see their team\'s Projects, Clients, and Export Logs. Safe to repeat — already-migrated users are left alone.')) return;
+  const btn = $('migrate-run-btn');
+  const status = $('migrate-status');
+  btn.disabled = true; btn.textContent = 'Migrating…';
+  status.textContent = 'Running…';
+  try {
+    const result = await window.migrateTeamLeads();
+    status.textContent = result && result.message ? result.message : 'Done.';
+  } catch (e) {
+    status.textContent = 'Error: ' + (e.message || e);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Migrate Admins to team-lead group';
+  }
+});
 
 $('backfill-run-btn').addEventListener('click', async function() {
   if (!confirm('Run the team-tag backfill?\n\nThis scans every Project, Client, and Export Log and stamps team where missing. Safe to repeat — already-tagged rows are left alone.')) return;
@@ -2631,10 +2672,18 @@ td,th{padding:8px 12px;vertical-align:middle}
     setStep(4);
   },[]);
 
-  // Lock / unlock a project. Locked projects can't be re-opened, renamed or deleted.
+  // Lock / unlock a project. Locked projects can't be re-opened, renamed or
+  // deleted. Super Admin writes directly; Admin (team-lead) goes through the
+  // decideUnlockRequest Lambda because they don't have direct Project.update.
   const setProjectLocked=useCallback(async (projectId,locked)=>{
     try{
-      await window.projectSetLocked(projectId,locked);
+      const u = window.AUTH_USER || {};
+      if (u.role === 'team-lead') {
+        if (locked) throw new Error('Admins cannot lock projects from this view; only unlock.');
+        await window.projectAdminUnlock(projectId);
+      } else {
+        await window.projectSetLocked(projectId,locked);
+      }
       // Update in-memory state across viewingProject + projectLog.
       setViewingProject(prev=>prev&&prev.id===projectId?{...prev,locked}:prev);
       setProjectLog(prev=>{
@@ -3150,13 +3199,14 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {viewingProject.locked
                   ? (["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role)
                       ? <button onClick={()=>{if(confirm("Unlock this project? It will become editable again."))setProjectLocked(viewingProject.id,false);}} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Unlock</button>
-                      // Members can't unlock — they file a request that an Admin approves from the dashboard.
+                      // Users can't unlock — they file a request that an Admin approves from the dashboard.
                       : <button onClick={async()=>{
-                          const reason=prompt("Briefly explain why this project needs to be unlocked:");
+                          if(!confirm("This project is locked. An unlock request will be sent to your Admin for approval — you'll be able to edit once they approve. Continue?")) return;
+                          const reason=prompt("Briefly explain why this project needs to be unlocked (this goes to your Admin):");
                           if(!reason||!reason.trim())return;
-                          try{ await window.projectRequestUnlock(viewingProject,reason.trim()); alert("Unlock request submitted. An Admin will review it."); }
+                          try{ await window.projectRequestUnlock(viewingProject,reason.trim()); alert("Unlock request submitted. Your Admin will review it shortly."); }
                           catch(e){ alert("Could not submit request: "+(e.message||e)); }
-                        }} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Request Unlock</button>)
+                        }} style={{background:"#ffffff",border:"1px solid #a16207",borderRadius:6,padding:"6px 14px",color:"#a16207",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔓 Unlock</button>)
                   : <button onClick={()=>{if(confirm("Lock this project? It becomes read-only — you can still re-download files but cannot re-classify, rename or delete it until unlocked."))setProjectLocked(viewingProject.id,true);}} style={{background:"#ffffff",border:"1px solid #16a34a",borderRadius:6,padding:"6px 14px",color:"#16a34a",fontSize:11,fontWeight:600,cursor:"pointer"}}>🔒 Lock</button>}
                 <button onClick={()=>setViewingProject(null)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,cursor:"pointer"}}>← Close</button>
               </div>
