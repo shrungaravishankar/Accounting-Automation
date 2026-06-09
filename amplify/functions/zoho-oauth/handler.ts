@@ -30,6 +30,15 @@ export const handler = async (event: Event) => {
     return JSON.stringify({ success: false, message: 'Server misconfiguration — Zoho env vars missing.' });
   }
 
+  // Diagnostic: don't reveal the secret, but tell us if it's actually set
+  // and what shape it has. process.env.ZOHO_CLIENT_SECRET should be a ~42-char
+  // hex string. If it's empty, undefined, or starts with '${' the Amplify
+  // secret reference wasn't resolved at deploy time.
+  const secretFingerprint = clientSecret
+    ? `len=${clientSecret.length}, prefix=${clientSecret.slice(0, 4)}…`
+    : 'MISSING';
+  console.log('[zoho-oauth] redirect_uri=', redirectUri, ' clientId=', clientId, ' region=', region, ' secret=', secretFingerprint);
+
   try {
     // Exchange the auth code for a refresh + access token.
     const body = new URLSearchParams({
@@ -44,8 +53,18 @@ export const handler = async (event: Event) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString()
     });
-    const tok: any = await tokRes.json();
+    const rawText = await tokRes.text();
+    let tok: any;
+    try { tok = JSON.parse(rawText); }
+    catch (parseErr) {
+      console.error('[zoho-oauth] Non-JSON response from Zoho:', tokRes.status, rawText.slice(0, 500));
+      return JSON.stringify({
+        success: false,
+        message: `Zoho returned a non-JSON response (HTTP ${tokRes.status}). Check the Lambda logs — first 200 chars: ${rawText.slice(0, 200)}`
+      });
+    }
     if (!tokRes.ok || !tok.refresh_token) {
+      console.error('[zoho-oauth] Zoho rejected:', tokRes.status, tok);
       return JSON.stringify({
         success: false,
         message: 'Zoho rejected the code: ' + (tok.error || tok.error_description || tokRes.statusText)
