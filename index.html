@@ -361,10 +361,10 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
       <p class="sub">Approve to unlock the project for further edits, or deny to keep it locked.</p>
       <div id="unlock-list-container" style="max-height:300px; overflow-y:auto;"></div>
       <div id="backfill-panel" class="auth-hidden" style="margin-top:14px;padding:12px;background:#f8f9fc;border:1px solid #e2e2ea;border-radius:6px;">
-        <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Migrate existing Admins</div>
-        <p class="sub" style="margin:0 0 8px 0;">Adds every existing Admin into the new flat <code>team-lead</code> Cognito group. <strong>Run this first</strong> — without it, current Admins can't see Users' data. New Admins invited after this deploy are added automatically.</p>
+        <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Enable team visibility for existing Admins</div>
+        <p class="sub" style="margin:0 0 8px 0;">One-shot migration that lets pre-existing Admins see their team's data. <strong>Run this first</strong> — without it, current Admins can't see Users' projects. New Admins invited after this deploy are configured automatically.</p>
         <div id="migrate-status" style="font-size:11px;color:#555555;margin-bottom:8px;"></div>
-        <button class="auth-btn" id="migrate-run-btn" style="flex:0 0 auto; min-width:200px; margin-bottom:14px;">Migrate Admins to team-lead group</button>
+        <button class="auth-btn" id="migrate-run-btn" style="flex:0 0 auto; min-width:200px; margin-bottom:14px;">Enable team visibility for Admins</button>
 
         <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Backfill team tags</div>
         <p class="sub" style="margin:0 0 8px 0;">Stamps the <code>team</code> field on historical Projects, Clients, and Export Logs from each row's owner. Required for Admins to see data created before the per-team auth was added. Safe to run more than once.</p>
@@ -1162,7 +1162,7 @@ $('unlock-close-btn').addEventListener('click', closeInviteModal);
 $('unlock-refresh-btn').addEventListener('click', loadUnlockRequests);
 
 $('migrate-run-btn').addEventListener('click', async function() {
-  if (!confirm('Add every existing Admin to the new team-lead Cognito group?\n\nThis is required for Admins to see their team\'s Projects, Clients, and Export Logs. Safe to repeat — already-migrated users are left alone.')) return;
+  if (!confirm('Enable team visibility for every existing Admin?\n\nThis is required for Admins to see their team\'s Projects, Clients, and Export Logs. Safe to repeat — already-configured users are left alone.')) return;
   const btn = $('migrate-run-btn');
   const status = $('migrate-status');
   btn.disabled = true; btn.textContent = 'Migrating…';
@@ -1173,7 +1173,7 @@ $('migrate-run-btn').addEventListener('click', async function() {
   } catch (e) {
     status.textContent = 'Error: ' + (e.message || e);
   } finally {
-    btn.disabled = false; btn.textContent = 'Migrate Admins to team-lead group';
+    btn.disabled = false; btn.textContent = 'Enable team visibility for Admins';
   }
 });
 
@@ -1720,6 +1720,8 @@ function App(){
   const[showNewClient,setShowNewClient]=useState(false);
   const[newClientName,setNewClientName]=useState("");
   const[newClientVersion,setNewClientVersion]=useState("free");
+  // Free-text filter for the landing-page client picker.
+  const[clientSearch,setClientSearch]=useState("");
 
   // Per-session state (not persisted — resets on new upload)
   const[step,setStep]=useState(1);const[transactions,setTransactions]=useState([]);
@@ -2941,8 +2943,20 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
 
             {clients.length > 0 && (
+              <div style={{width:"100%",maxWidth:720,display:"flex",justifyContent:"center"}}>
+                <input
+                  type="text"
+                  value={clientSearch}
+                  onChange={e=>setClientSearch(e.target.value)}
+                  placeholder="🔍 Search clients by name…"
+                  style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#1a1a2e",fontSize:13,width:"100%",maxWidth:420,outline:"none",boxShadow:"0 1px 2px rgba(0,0,0,0.04)"}}
+                />
+              </div>
+            )}
+
+            {clients.length > 0 && (
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:14,width:"100%",maxWidth:720}}>
-                {clients.map(c => (
+                {clients.filter(c => !clientSearch.trim() || (c.name||"").toLowerCase().includes(clientSearch.trim().toLowerCase())).map(c => (
                   <div key={c.id} onClick={()=>switchClient(c.id)} style={{background:"linear-gradient(135deg,#ffffff,#f8f9fc)",border:"1px solid #e2e2ea",borderRadius:12,padding:"18px 20px",cursor:"pointer",transition:"all 0.3s",display:"flex",flexDirection:"column",gap:6,boxShadow:"0 2px 12px rgba(77,63,160,0.08)"}} onMouseEnter={e=>{e.currentTarget.style.borderColor="rgba(105,88,194,0.5)";e.currentTarget.style.boxShadow="0 4px 24px rgba(77,63,160,0.2)";}} onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e2ea";e.currentTarget.style.boxShadow="0 2px 12px rgba(77,63,160,0.08)";}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />

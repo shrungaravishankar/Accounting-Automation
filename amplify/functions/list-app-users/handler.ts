@@ -31,10 +31,15 @@ export const handler = async (event: ListEvent) => {
   if (!userPoolId) return { error: 'USER_POOL_ID missing', users: [] as UserRow[] };
 
   const callerGroups = event.identity?.groups || [];
-  const isAdmin = callerGroups.includes('admin');
-  const callerTeam = callerGroups.find(g => g.startsWith('team-')) || '';
+  const isSuperAdmin = callerGroups.includes('admin');
+  // The flat 'team-lead' Cognito group marks someone as an Admin, but it is
+  // NOT their team. Their team is the team-<sub> group they own. Skip it
+  // explicitly — without this, every Admin migrated into 'team-lead' would
+  // be treated as members of the same team and see each other.
+  const callerTeam = callerGroups.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
+  const callerEmail = ((event.identity as any)?.claims?.email || event.identity?.username || '').toLowerCase();
 
-  if (!isAdmin && !callerTeam) {
+  if (!isSuperAdmin && !callerTeam) {
     return { error: 'Not authorized to view users.', users: [] as UserRow[] };
   }
 
@@ -57,9 +62,10 @@ export const handler = async (event: ListEvent) => {
         }));
         const groupNames = (grps.Groups || []).map(g => g.GroupName).filter((g): g is string => !!g);
         if (groupNames.includes('admin')) role = 'admin';
-        else if (groupNames.some(g => g.startsWith('team-'))) role = 'team-lead';
+        else if (groupNames.some(g => g.startsWith('team-') && g !== 'team-lead')) role = 'team-lead';
         else if (groupNames.includes('staff')) role = 'staff';
-        teamFromGroup = groupNames.find(g => g.startsWith('team-')) || '';
+        // Same exclusion as above — the flat 'team-lead' group is not a team.
+        teamFromGroup = groupNames.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
       } catch (_) { /* ignore per-user group fetch errors */ }
 
       // Team Lead's own team group wins; otherwise use custom:team (Members inherit it).
@@ -76,10 +82,19 @@ export const handler = async (event: ListEvent) => {
       });
     }
 
-    // Scope the result: a Team Lead sees only their team (themselves + members).
-    const visible = isAdmin
+    // Scope the result:
+    //   - Super Admin: sees everyone.
+    //   - Admin (team-lead role): sees only themselves + the Users they
+    //     invited (i.e. rows whose team == caller's team-<sub>). Other
+    //     Admins and Super Admins are hidden even though they exist.
+    const visible = isSuperAdmin
       ? rows
-      : rows.filter(r => r.team === callerTeam);
+      : rows.filter(r => {
+          if (callerEmail && r.email.toLowerCase() === callerEmail) return true;
+          if (r.role === 'admin') return false;       // hide Super Admins
+          if (r.role === 'team-lead') return false;   // hide other Admins
+          return r.team === callerTeam;                // own Users only
+        });
 
     // Sort: pending invites first, then by name.
     visible.sort((a, b) => {

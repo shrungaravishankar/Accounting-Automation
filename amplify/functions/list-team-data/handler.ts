@@ -34,7 +34,8 @@ async function scanAll(tableName: string, filter?: { expression: string; values:
 export const handler = async (event: Event) => {
   const groups = event.identity?.groups || [];
   const isSuperAdmin = groups.includes('admin');
-  const teamGroup = groups.find(g => g.startsWith('team-')) || '';
+  // Skip the flat 'team-lead' group — it's a role marker, not a team.
+  const teamGroup = groups.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
 
   if (!isSuperAdmin && !teamGroup) {
     return JSON.stringify({ error: 'Not authorized to list team data.', items: [] });
