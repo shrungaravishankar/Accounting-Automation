@@ -10,6 +10,7 @@ import { listTeamData } from './functions/list-team-data/resource';
 import { decideUnlockRequest } from './functions/decide-unlock-request/resource';
 import { zohoOauth } from './functions/zoho-oauth/resource';
 import { zohoSync } from './functions/zoho-sync/resource';
+import { replaceUser } from './functions/replace-user/resource';
 
 const backend = defineBackend({
   auth,
@@ -21,7 +22,8 @@ const backend = defineBackend({
   listTeamData,
   decideUnlockRequest,
   zohoOauth,
-  zohoSync
+  zohoSync,
+  replaceUser
 });
 
 const userPool = backend.auth.resources.userPool;
@@ -128,5 +130,35 @@ backend.zohoSync.resources.lambda.addToRolePolicy(
     effect: Effect.ALLOW,
     actions: ['dynamodb:Scan', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
     resources: [zohoCredTable.tableArn, zohoCredTable.tableArn + '/index/*']
+  })
+);
+
+// ---- replace-user: Cognito admin actions + DDB table mutations ----
+backend.replaceUser.addEnvironment('USER_POOL_ID', userPool.userPoolId);
+backend.replaceUser.addEnvironment('CLIENT_TABLE_NAME', clientTable.tableName);
+backend.replaceUser.addEnvironment('PROJECT_TABLE_NAME', projectTable.tableName);
+backend.replaceUser.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: [
+      'cognito-idp:AdminGetUser',
+      'cognito-idp:AdminCreateUser',
+      'cognito-idp:AdminAddUserToGroup',
+      'cognito-idp:AdminRemoveUserFromGroup',
+      'cognito-idp:AdminListGroupsForUser',
+      'cognito-idp:AdminUpdateUserAttributes',
+      'cognito-idp:AdminDeleteUser'
+    ],
+    resources: [userPool.userPoolArn]
+  })
+);
+backend.replaceUser.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['dynamodb:Scan', 'dynamodb:UpdateItem'],
+    resources: [
+      clientTable.tableArn, clientTable.tableArn + '/index/*',
+      projectTable.tableArn, projectTable.tableArn + '/index/*'
+    ]
   })
 );

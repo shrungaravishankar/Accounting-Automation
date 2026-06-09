@@ -6,6 +6,7 @@ import { listTeamData } from '../functions/list-team-data/resource';
 import { decideUnlockRequest } from '../functions/decide-unlock-request/resource';
 import { zohoOauth } from '../functions/zoho-oauth/resource';
 import { zohoSync } from '../functions/zoho-sync/resource';
+import { replaceUser } from '../functions/replace-user/resource';
 /**
  * AppSync GraphQL schema for BCL AutoLedger.
  *
@@ -256,7 +257,24 @@ const schema = a.schema({
     .arguments({ kind: a.string().required(), organizationId: a.string() })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(zohoSync))
+    .handler(a.handler.function(zohoSync)),
+
+  /**
+   * Replace a User or Admin with a new email. Inherits their client
+   * assignments + project ownership. Admin can replace Users in their team;
+   * Super Admin can replace anyone (including other Admins).
+   */
+  replaceUser: a
+    .mutation()
+    .arguments({
+      oldEmail: a.string().required(),
+      newEmail: a.string().required(),
+      newName: a.string(),
+      deleteOld: a.boolean()
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(replaceUser))
 });
 
 export type Schema = ClientSchema<typeof schema>;

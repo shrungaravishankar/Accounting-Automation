@@ -91,6 +91,12 @@ export const handler = async (event: Event) => {
             const assignedTo = assignedCsv.split(',').map((s: string) => s.trim()).filter(Boolean);
             return owns || assignedTo.includes(callerEmail);
           }
+          // For Users listing projects, only return ones they "own" by
+          // ownerEmail (covers inherited projects after a replace-user run
+          // even though the Cognito sub doesn't match anymore).
+          if (isStaff && kind === 'projects') {
+            return (r.ownerEmail || '').toLowerCase() === callerEmail;
+          }
           return true;
         });
     return JSON.stringify({ error: null, items: visible });
