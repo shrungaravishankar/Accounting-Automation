@@ -2,8 +2,10 @@ declare const process: { env: Record<string, string | undefined> };
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const cognito = new CognitoIdentityProviderClient({});
 
 type Kind = 'projects' | 'clients' | 'exportLogs' | 'unlockRequests';
 
@@ -37,12 +39,29 @@ export const handler = async (event: Event) => {
   // Skip the flat 'team-lead' group — it's a role marker, not a team.
   const teamFromGroup = groups.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
   // Staff users aren't in a team-<sub> Cognito group; their team is in the
-  // custom:team attribute (set by invite-user). Read from JWT claims.
+  // custom:team attribute (set by invite-user). Read from JWT claims first
+  // (fast path); fall back to AdminGetUser if the app client doesn't expose
+  // custom:team in the ID token.
   const claims = ((event.identity as any)?.claims || {}) as any;
-  const teamFromClaim = (claims['custom:team'] || '') as string;
-  const teamGroup = teamFromGroup || teamFromClaim;
-  const isStaff = !isSuperAdmin && !teamFromGroup;
+  let teamFromClaim = (claims['custom:team'] || '') as string;
   const callerEmail = ((claims.email || event.identity?.username || '') as string).toLowerCase();
+  const isStaff = !isSuperAdmin && !teamFromGroup;
+
+  if (isStaff && !teamFromClaim && callerEmail && process.env.USER_POOL_ID) {
+    try {
+      const u = await cognito.send(new AdminGetUserCommand({
+        UserPoolId: process.env.USER_POOL_ID,
+        Username: callerEmail
+      }));
+      teamFromClaim = u.UserAttributes?.find(a => a.Name === 'custom:team')?.Value || '';
+      console.log('[list-team-data] Fetched custom:team from Cognito for', callerEmail, '->', teamFromClaim);
+    } catch (err: any) {
+      console.warn('[list-team-data] AdminGetUser failed for', callerEmail, err?.message);
+    }
+  }
+
+  const teamGroup = teamFromGroup || teamFromClaim;
+  console.log('[list-team-data] callerEmail=', callerEmail, 'groups=', JSON.stringify(groups), 'teamGroup=', teamGroup, 'isStaff=', isStaff, 'kind=', event.arguments?.kind);
 
   if (!isSuperAdmin && !teamGroup) {
     return JSON.stringify({ error: 'Not authorized to list team data.', items: [] });

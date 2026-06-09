@@ -91,6 +91,7 @@ backend.listTeamData.addEnvironment('PROJECT_TABLE_NAME', projectTable.tableName
 backend.listTeamData.addEnvironment('CLIENT_TABLE_NAME', clientTable.tableName);
 backend.listTeamData.addEnvironment('EXPORTLOG_TABLE_NAME', exportLogTable.tableName);
 backend.listTeamData.addEnvironment('UNLOCKREQUEST_TABLE_NAME', unlockTable.tableName);
+backend.listTeamData.addEnvironment('USER_POOL_ID', userPool.userPoolId);
 backend.listTeamData.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
@@ -101,6 +102,13 @@ backend.listTeamData.resources.lambda.addToRolePolicy(
       exportLogTable.tableArn, exportLogTable.tableArn + '/index/*',
       unlockTable.tableArn, unlockTable.tableArn + '/index/*'
     ]
+  })
+);
+backend.listTeamData.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['cognito-idp:AdminGetUser'],
+    resources: [userPool.userPoolArn]
   })
 );
 

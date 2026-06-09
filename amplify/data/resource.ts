@@ -80,7 +80,11 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
       allow.group('admin').to(['create', 'read', 'update', 'delete']),
-      allow.group('team-lead').to(['read']),
+      // Admins (team-lead role) can update + delete clients in their team,
+      // even ones they didn't personally create — e.g. a User's legacy
+      // client. UI still filters cross-team rows out of view; API access
+      // is gated by client-side team filter in alClientList.
+      allow.group('team-lead').to(['read', 'update', 'delete']),
     ]),
 
   /**
@@ -113,7 +117,10 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
       allow.group('admin').to(['create', 'read', 'update', 'delete']),
-      allow.group('team-lead').to(['read']),
+      // Admins can update + delete projects in their team (e.g. clean up a
+      // User's old work after a hand-off). Cross-team API access is gated
+      // by the same client-side team filter as Client.
+      allow.group('team-lead').to(['read', 'update', 'delete']),
     ]),
 
   /**
