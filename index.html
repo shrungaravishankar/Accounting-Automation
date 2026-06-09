@@ -496,6 +496,15 @@ window.alClientDelete = async (id) => {
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return true;
 };
+// List every Cognito user the caller is allowed to see (Lambda enforces it).
+// Wrapped for the React layer since dataClient lives in the boot module.
+window.alListUsers = async () => {
+  const r = await dataClient.queries.listAppUsers();
+  const d = __unwrapJson(r.data);
+  if (!d || d.error) throw new Error((d && d.error) || 'Could not load users.');
+  return d.users || [];
+};
+
 // Admin assigns Users to a client. assignedTo is a CSV of lowercased emails.
 window.alClientAssign = async (id, emails) => {
   const csv = (emails || []).map(e => (e || '').toString().trim().toLowerCase()).filter(Boolean).join(',');
@@ -2222,11 +2231,9 @@ function App(){
     setAssignAvailableUsers([]);
     setAssignSelected(new Set());
     try {
-      const r = await dataClient.queries.listAppUsers();
-      const d = __unwrapJson(r.data);
-      if (!d || d.error) throw new Error((d && d.error) || 'Could not load users.');
+      const all = await window.alListUsers();
       // Only show Users (staff role) — never offer to assign other Admins.
-      const users = (d.users || []).filter(u => u.role === 'staff');
+      const users = all.filter(u => u.role === 'staff');
       setAssignAvailableUsers(users.map(u => ({ email: (u.email||'').toLowerCase(), name: u.name || u.email })));
       const c = clients.find(x=>x.id===clientId);
       const currentAssigned = (c && c.assignedTo || '').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
