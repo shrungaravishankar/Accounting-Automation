@@ -30,13 +30,20 @@ export const storage = defineStorage({
       allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
     // Per-client working config + global reference DB (JSON blobs).
+    // LEGACY per-identity path — kept for backward compat with pre-assignment
+    // clients. New writes always go to the shared 'clients/{clientId}/*' path
+    // below so assigned Users can read what their Admin synced.
     'config/{entity_id}/*': [
       allow.entity('identity').to(['read', 'write', 'delete']),
-      // Amplify Gen2 attaches entity-based policies only to the default
-      // auth role; users in Cognito groups assume group-specific roles
-      // that lack the rule. Grant the two CDK-managed groups explicitly.
-      // Team-lead Admins are also members of 'staff' (set by invite-user),
-      // so they assume the staff role and pick this rule up automatically.
+      allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
+    ],
+    // Shared per-client config — readable by any authenticated user, written
+    // by anyone with a Cognito group (the app UI gates write access to
+    // Admins + Super Admins; this rule is just an IAM safety net). The
+    // path segment after 'clients/' is the clientId. No entity scoping,
+    // so assigned Users in the same team can read what the Admin synced.
+    'clients/*': [
+      allow.authenticated().to(['read']),
       allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
   }),

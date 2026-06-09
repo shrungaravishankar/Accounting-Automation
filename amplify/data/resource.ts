@@ -70,7 +70,11 @@ const schema = a.schema({
       team: a.string(),
       // Zoho Books organization ID this client is linked to. Set when the
       // client was imported from Zoho; null for manually-created clients.
-      zohoOrgId: a.string()
+      zohoOrgId: a.string(),
+      // Comma-separated list of User emails this client is shared with.
+      // Admin populates this via the Assign Users dialog. Users only see
+      // clients where their email appears here (or that they own).
+      assignedTo: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),

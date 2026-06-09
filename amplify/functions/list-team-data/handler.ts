@@ -35,7 +35,14 @@ export const handler = async (event: Event) => {
   const groups = event.identity?.groups || [];
   const isSuperAdmin = groups.includes('admin');
   // Skip the flat 'team-lead' group — it's a role marker, not a team.
-  const teamGroup = groups.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
+  const teamFromGroup = groups.find(g => g.startsWith('team-') && g !== 'team-lead') || '';
+  // Staff users aren't in a team-<sub> Cognito group; their team is in the
+  // custom:team attribute (set by invite-user). Read from JWT claims.
+  const claims = ((event.identity as any)?.claims || {}) as any;
+  const teamFromClaim = (claims['custom:team'] || '') as string;
+  const teamGroup = teamFromGroup || teamFromClaim;
+  const isStaff = !isSuperAdmin && !teamFromGroup;
+  const callerEmail = ((claims.email || event.identity?.username || '') as string).toLowerCase();
 
   if (!isSuperAdmin && !teamGroup) {
     return JSON.stringify({ error: 'Not authorized to list team data.', items: [] });
@@ -71,7 +78,21 @@ export const handler = async (event: Event) => {
       items = await scanAll(tableName);
     }
 
-    const visible = isSuperAdmin ? items : items.filter(r => r.team === teamGroup);
+    const visible = isSuperAdmin
+      ? items
+      : items.filter(r => {
+          if (r.team !== teamGroup) return false;
+          // Extra restriction for Users (staff): clients must be explicitly
+          // assigned to them, or they must own the row. Admins see all rows
+          // in their team without needing to be in assignedTo.
+          if (isStaff && kind === 'clients') {
+            const owns = (r.ownerEmail || '').toLowerCase() === callerEmail;
+            const assignedCsv = (r.assignedTo || '').toLowerCase();
+            const assignedTo = assignedCsv.split(',').map((s: string) => s.trim()).filter(Boolean);
+            return owns || assignedTo.includes(callerEmail);
+          }
+          return true;
+        });
     return JSON.stringify({ error: null, items: visible });
   } catch (err: any) {
     return JSON.stringify({ error: err?.message || 'list-team-data failed', items: [] });

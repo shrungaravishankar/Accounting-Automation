@@ -458,30 +458,26 @@ function __unwrapJson(d) {
 
 window.alClientList = async () => {
   const u = window.AUTH_USER || {};
-  // Admins go through the listTeamData Lambda for strict team isolation.
-  // Super Admin uses Client.list directly. Users get their own via owner rule.
-  // If the Lambda fails or returns empty for an Admin, fall back to direct
-  // Client.list filtered client-side — they'll only see what their owner
-  // rule + admin Cognito policy allows, which is usually their own rows.
-  if (u.role === 'team-lead') {
-    console.log('[alClientList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
+  // Admins AND Users now route through listTeamData. The Lambda filters:
+  //   - Super Admin (admin Cognito group): every row.
+  //   - Admin (team-<sub> Cognito group): every row matching their team.
+  //   - User (staff Cognito group): rows matching their custom:team AND
+  //     where their email is in assignedTo (or they own the row).
+  if (u.role === 'team-lead' || u.role === 'staff') {
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'clients' });
       const d = __unwrapJson(r.data);
-      console.log('[alClientList] listTeamData parsed:', d, 'items len:', d && d.items && d.items.length);
       if (d && !d.error) {
-        return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+        return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team }));
       }
-      console.warn('[alClientList] Lambda returned error, falling back to direct list:', d && d.error);
+      console.warn('[alClientList] Lambda returned error, falling back:', d && d.error);
     } catch (e) {
       console.warn('[alClientList] Lambda call threw, falling back:', e && e.message || e);
     }
   }
   const res = await dataClient.models.Client.list({ limit: 500 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  let rows = res.data || [];
-  if (u.role === 'team-lead' && u.team) rows = rows.filter(c => c.team === u.team);
-  return rows.map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team }));
 };
 window.alClientCreate = async (name, zohoOrgId) => {
   const u = window.AUTH_USER || {};
@@ -500,6 +496,14 @@ window.alClientDelete = async (id) => {
   if (res.errors?.length) throw new Error(res.errors[0].message);
   return true;
 };
+// Admin assigns Users to a client. assignedTo is a CSV of lowercased emails.
+window.alClientAssign = async (id, emails) => {
+  const csv = (emails || []).map(e => (e || '').toString().trim().toLowerCase()).filter(Boolean).join(',');
+  const res = await dataClient.models.Client.update({ id, assignedTo: csv });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  return csv;
+};
+
 window.alClientRename = async (id, name) => {
   const res = await dataClient.models.Client.update({ id, name });
   if (res.errors?.length) throw new Error(res.errors[0].message);
@@ -809,19 +813,31 @@ window.projectDelete = async (id, dataPath) => {
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
 const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing'];
 
-// Download a client's config bundle from S3 into localStorage (the cache the app reads).
+// Download a client's config bundle from S3 into localStorage (the cache the
+// app reads). Tries the shared per-client path first (so assigned Users see
+// what their Admin synced); falls back to the legacy per-identity path for
+// clients that pre-date the shared-storage migration.
 window.alConfigLoad = async (clientId) => {
-  try {
-    const { body } = await downloadData({ path: ({ identityId }) => `config/${identityId}/${clientId}.json` }).result;
-    const obj = JSON.parse(await body.text());
-    for (const k of CONFIG_KEYS) {
-      if (obj[k] !== undefined) { try { localStorage.setItem('al_' + clientId + '_' + k, JSON.stringify(obj[k])); } catch (_) {} }
-    }
-    return true;
-  } catch (e) { return false; } // first time / not found
+  const tryPath = async (path) => {
+    const { body } = await downloadData({ path }).result;
+    return JSON.parse(await body.text());
+  };
+  let obj = null;
+  try { obj = await tryPath(`clients/${clientId}/config.json`); }
+  catch (_) {
+    try { obj = await tryPath(({ identityId }) => `config/${identityId}/${clientId}.json`); }
+    catch (_) { return false; }
+  }
+  if (!obj) return false;
+  for (const k of CONFIG_KEYS) {
+    if (obj[k] !== undefined) { try { localStorage.setItem('al_' + clientId + '_' + k, JSON.stringify(obj[k])); } catch (_) {} }
+  }
+  return true;
 };
 
-// Debounced upload of a client's config bundle (read from the localStorage cache).
+// Debounced upload of a client's config bundle (read from the localStorage
+// cache). Writes to the shared per-client path so any User assigned to this
+// client picks up the Admin's synced data on next load.
 const _cfgTimers = {};
 window.alConfigSave = (clientId) => {
   if (!clientId) return;
@@ -833,7 +849,7 @@ window.alConfigSave = (clientId) => {
     }
     try {
       await uploadData({
-        path: ({ identityId }) => `config/${identityId}/${clientId}.json`,
+        path: `clients/${clientId}/config.json`,
         data: new Blob([JSON.stringify(obj)], { type: 'application/json' }),
         options: { contentType: 'application/json' },
       }).result;
@@ -1844,6 +1860,14 @@ function App(){
   const[zohoPickerSearch,setZohoPickerSearch]=useState("");
   const[zohoPickerLoading,setZohoPickerLoading]=useState(false);
   const[zohoImportingOrgId,setZohoImportingOrgId]=useState("");
+  // Client-assignment dialog state. Admin opens this from a client card to
+  // pick which Users in their team can see/work on that client.
+  const[assignDialogOpen,setAssignDialogOpen]=useState(false);
+  const[assignClientId,setAssignClientId]=useState("");
+  const[assignAvailableUsers,setAssignAvailableUsers]=useState([]); // [{email,name}]
+  const[assignSelected,setAssignSelected]=useState(new Set());
+  const[assignLoading,setAssignLoading]=useState(false);
+  const[assignSaving,setAssignSaving]=useState(false);
 
   // Per-session state (not persisted — resets on new upload)
   const[step,setStep]=useState(1);const[transactions,setTransactions]=useState([]);
@@ -2187,6 +2211,56 @@ function App(){
       alert('Sync failed: '+(e.message||e));
     }
   },[activeClientId,clients]);
+
+  // Open the Assign Users dialog for a specific client. Loads the Admin's
+  // team Users (Suma, Neha, Priyanka…) via listAppUsers and pre-checks any
+  // already-assigned ones from the client's assignedTo CSV.
+  const openAssignDialog = useCallback(async (clientId)=>{
+    setAssignClientId(clientId);
+    setAssignDialogOpen(true);
+    setAssignLoading(true);
+    setAssignAvailableUsers([]);
+    setAssignSelected(new Set());
+    try {
+      const r = await dataClient.queries.listAppUsers();
+      const d = __unwrapJson(r.data);
+      if (!d || d.error) throw new Error((d && d.error) || 'Could not load users.');
+      // Only show Users (staff role) — never offer to assign other Admins.
+      const users = (d.users || []).filter(u => u.role === 'staff');
+      setAssignAvailableUsers(users.map(u => ({ email: (u.email||'').toLowerCase(), name: u.name || u.email })));
+      const c = clients.find(x=>x.id===clientId);
+      const currentAssigned = (c && c.assignedTo || '').toLowerCase().split(',').map(s=>s.trim()).filter(Boolean);
+      setAssignSelected(new Set(currentAssigned));
+    } catch (e) {
+      alert('Could not load users: ' + (e.message || e));
+      setAssignDialogOpen(false);
+    } finally {
+      setAssignLoading(false);
+    }
+  },[clients]);
+
+  const toggleAssignSelect = useCallback((email)=>{
+    setAssignSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(email)) next.delete(email); else next.add(email);
+      return next;
+    });
+  },[]);
+
+  const saveAssignment = useCallback(async ()=>{
+    if (!assignClientId) return;
+    setAssignSaving(true);
+    try {
+      const emails = Array.from(assignSelected);
+      const csv = await window.alClientAssign(assignClientId, emails);
+      setClients(prev => prev.map(c => c.id === assignClientId ? { ...c, assignedTo: csv } : c));
+      setAssignDialogOpen(false);
+    } catch (e) {
+      alert('Could not save assignment: ' + (e.message || e));
+    } finally {
+      setAssignSaving(false);
+    }
+  },[assignClientId, assignSelected]);
 
   const switchClient = useCallback((id)=>{
     const c = clients.find(c=>c.id===id);
@@ -3190,9 +3264,21 @@ td,th{padding:8px 12px;vertical-align:middle}
                     {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (c.ownerName||c.ownerEmail) && (
                       <div style={{fontSize:10,color:"#6958C2",fontStyle:"italic",marginTop:2}}>👤 Created by: {c.ownerName||c.ownerEmail}</div>
                     )}
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea"}}>
+                    {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
+                      <div style={{fontSize:10,color:"#0891b2",marginTop:2}}>
+                        👥 Assigned: {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length || 0} user(s)
+                      </div>
+                    )}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea",gap:6}}>
                       <span style={{fontSize:10,color:"#cccccc"}}>Created {new Date(c.created).toLocaleDateString()}</span>
-                      <span onClick={(e)=>{e.stopPropagation();deleteClient(c.id);}} style={{fontSize:10,color:"#dc2626",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)"}}>Delete</span>
+                      <div style={{display:"flex",gap:6}}>
+                        {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
+                          <span onClick={(e)=>{e.stopPropagation();openAssignDialog(c.id);}} title="Assign Users to this client" style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(77,63,160,0.08)"}}>👥 Assign</span>
+                        )}
+                        {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
+                          <span onClick={(e)=>{e.stopPropagation();deleteClient(c.id);}} style={{fontSize:10,color:"#dc2626",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)"}}>Delete</span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -3206,10 +3292,16 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <button onClick={()=>{setShowNewClient(false);setNewClientName("");}} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#888888",fontSize:13,cursor:"pointer"}}>Cancel</button>
               </div>
             ) : (
-              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
-                <button onClick={importClientFromZoho} style={{background:"#ffffff",color:"#4D3FA0",border:"1.5px solid #4D3FA0",borderRadius:10,padding:"12px 24px",fontSize:14,fontWeight:600,cursor:"pointer",transition:"all 0.2s"}}>🔗 Import from Zoho</button>
-                <button onClick={()=>setShowNewClient(true)} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:10,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 4px 20px rgba(77,63,160,0.35)",transition:"all 0.2s"}}>+ New Client (manual)</button>
-              </div>
+              ["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) ? (
+                <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
+                  <button onClick={importClientFromZoho} style={{background:"#ffffff",color:"#4D3FA0",border:"1.5px solid #4D3FA0",borderRadius:10,padding:"12px 24px",fontSize:14,fontWeight:600,cursor:"pointer",transition:"all 0.2s"}}>🔗 Import from Zoho</button>
+                  <button onClick={()=>setShowNewClient(true)} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:10,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 4px 20px rgba(77,63,160,0.35)",transition:"all 0.2s"}}>+ New Client (manual)</button>
+                </div>
+              ) : (
+                clients.length === 0 ? (
+                  <div style={{fontSize:13,color:"#888888",padding:"12px 16px",borderRadius:8,background:"rgba(105,88,194,0.05)",border:"1px solid rgba(105,88,194,0.15)",maxWidth:480,textAlign:"center"}}>No clients yet. Your Admin needs to import or create one before you can start.</div>
+                ) : null
+              )
             )}
 
             {/* ── GLOBAL BASE DATA — LEARN FROM ZOHO ── */}
@@ -3291,7 +3383,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <select value={activeClientId} onChange={e=>switchClient(e.target.value)} style={{background:"#ffffff",border:"1px solid #d4d4dc",borderRadius:8,padding:"8px 32px 8px 14px",color:"#1a1a2e",fontSize:13,fontWeight:500,cursor:"pointer",boxShadow:"0 1px 2px rgba(0,0,0,0.04)",minWidth:180,outline:"none",appearance:"none",backgroundImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234D3FA0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>\")",backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center"}}>
               {clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            {(()=>{ const c=clients.find(x=>x.id===activeClientId); return c && c.zohoOrgId ? (
+            {(()=>{ const c=clients.find(x=>x.id===activeClientId); const role=window.AUTH_USER&&window.AUTH_USER.role; const canSync = ["admin","team-lead"].includes(role); return c && c.zohoOrgId && canSync ? (
               <button onClick={syncFromZoho} title="Refresh Chart of Accounts / Vendors / Customers from Zoho" style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"8px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>
             ) : null; })()}
             <button onClick={()=>{setActiveClientId("");setActiveClientName("");localStorage.removeItem("autoledger_active_client");}} style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:8,padding:"8px 16px",color:"#ffffff",fontSize:13,fontWeight:600,cursor:"pointer",boxShadow:"0 1px 3px rgba(77,63,160,0.25)",transition:"all .15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#3C3489";}} onMouseLeave={e=>{e.currentTarget.style.background="#4D3FA0";}}>+ Switch / New</button>
@@ -4250,6 +4342,52 @@ td,th{padding:8px 12px;vertical-align:middle}
 
         {/* Bill Entry locked message — disabled in this build */}
         </>)}
+
+        {/* ═══════════════ ASSIGN USERS DIALOG ═══════════════ */}
+        {assignDialogOpen && (
+          <div onClick={()=>{if(!assignSaving)setAssignDialogOpen(false);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9999,padding:20}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#ffffff",borderRadius:14,boxShadow:"0 16px 60px rgba(77,63,160,0.25)",maxWidth:480,width:"100%",maxHeight:"82vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+              <div style={{padding:"20px 24px 12px",borderBottom:"1px solid #e2e2ea"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+                  <div>
+                    <div style={{fontSize:18,fontWeight:700,color:"#1a1a2e"}}>Assign Users to client</div>
+                    <div style={{fontSize:12,color:"#888888",marginTop:4}}>{(()=>{const c=clients.find(x=>x.id===assignClientId);return c?c.name:'';})()}</div>
+                    <div style={{fontSize:11,color:"#888888",marginTop:6}}>Select the Users in your team who should be able to see and work on this client.</div>
+                  </div>
+                  <button onClick={()=>{if(!assignSaving)setAssignDialogOpen(false);}} disabled={assignSaving} style={{background:"none",border:"none",fontSize:22,color:"#888888",cursor:assignSaving?"default":"pointer",padding:0,lineHeight:1}}>×</button>
+                </div>
+              </div>
+              <div style={{flex:1,overflowY:"auto",padding:"8px 12px"}}>
+                {assignLoading ? (
+                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>Loading your team Users…</div>
+                ) : assignAvailableUsers.length === 0 ? (
+                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>No Users in your team yet. Invite some via Manage Users first.</div>
+                ) : assignAvailableUsers.map(u => {
+                  const isSelected = assignSelected.has(u.email);
+                  return (
+                    <div key={u.email}
+                      onClick={()=>toggleAssignSelect(u.email)}
+                      style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",margin:"4px 0",borderRadius:8,border:"1px solid "+(isSelected?"#4D3FA0":"#e2e2ea"),background:isSelected?"rgba(77,63,160,0.06)":"#ffffff",cursor:"pointer",transition:"all 0.12s"}}
+                    >
+                      <input type="checkbox" checked={isSelected} readOnly style={{accentColor:"#4D3FA0",width:16,height:16,cursor:"pointer"}}/>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:600,color:"#1a1a2e"}}>{u.name}</div>
+                        <div style={{fontSize:11,color:"#888888",marginTop:1}}>{u.email}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{padding:"12px 24px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:11,color:"#888888"}}>{assignSelected.size} of {assignAvailableUsers.length} selected</div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>{if(!assignSaving)setAssignDialogOpen(false);}} disabled={assignSaving} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 18px",color:"#888888",fontSize:12,cursor:assignSaving?"default":"pointer"}}>Cancel</button>
+                  <button onClick={saveAssignment} disabled={assignSaving||assignLoading} style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:6,padding:"8px 18px",color:"#ffffff",fontSize:12,fontWeight:600,cursor:(assignSaving||assignLoading)?"default":"pointer",opacity:(assignSaving||assignLoading)?0.6:1}}>{assignSaving?'Saving…':'Save assignment'}</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ═══════════════ ZOHO ORGANIZATION PICKER ═══════════════ */}
         {zohoPickerOpen && (
