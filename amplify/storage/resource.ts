@@ -43,7 +43,7 @@ export const storage = defineStorage({
     // path segment after 'clients/' is the clientId. No entity scoping,
     // so assigned Users in the same team can read what the Admin synced.
     'clients/*': [
-      allow.authenticated().to(['read']),
+      allow.authenticated.to(['read']),
       allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
   }),
