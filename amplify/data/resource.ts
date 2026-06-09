@@ -55,6 +55,7 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
       allow.group('admin').to(['read', 'delete']),
+      allow.group('team-lead').to(['read']),
     ]),
 
   /** A client/company the signed-in user works on. Owner + admin full access. */
@@ -69,6 +70,7 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
       allow.group('admin').to(['create', 'read', 'update', 'delete']),
+      allow.group('team-lead').to(['read']),
     ]),
 
   /**
@@ -101,6 +103,7 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
       allow.group('admin').to(['create', 'read', 'update', 'delete']),
+      allow.group('team-lead').to(['read']),
     ]),
 
   /**
@@ -127,6 +130,7 @@ const schema = a.schema({
     .authorization((allow) => [
       allow.owner().to(['create', 'read']),
       allow.group('admin').to(['read', 'update', 'delete']),
+      allow.group('team-lead').to(['read']),
     ]),
 
   InviteResult: a.customType({

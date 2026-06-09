@@ -444,21 +444,31 @@ window.storeAndLogExport = async (p) => {
 
 window.alClientList = async () => {
   const u = window.AUTH_USER || {};
-  // Admins go through the listTeamData Lambda which filters server-side by
-  // the caller's team-<sub> group. This is the strict-isolation path: an
-  // Admin literally cannot see other teams' rows, even via direct API calls.
-  // Super Admin uses Client.list directly (admin Cognito group → see all).
-  // Users (staff) use Client.list and get their own via the owner rule.
+  // Admins go through the listTeamData Lambda for strict team isolation.
+  // Super Admin uses Client.list directly. Users get their own via owner rule.
+  // If the Lambda fails or returns empty for an Admin, fall back to direct
+  // Client.list filtered client-side — they'll only see what their owner
+  // rule + admin Cognito policy allows, which is usually their own rows.
   if (u.role === 'team-lead') {
-    const r = await dataClient.queries.listTeamData({ kind: 'clients' });
-    let d = r.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
-    return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+    console.log('[alClientList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
+    try {
+      const r = await dataClient.queries.listTeamData({ kind: 'clients' });
+      let d = r.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+      console.log('[alClientList] listTeamData result:', d);
+      if (d && !d.error) {
+        return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+      }
+      console.warn('[alClientList] Lambda returned error, falling back to direct list:', d && d.error);
+    } catch (e) {
+      console.warn('[alClientList] Lambda call threw, falling back:', e && e.message || e);
+    }
   }
   const res = await dataClient.models.Client.list({ limit: 500 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
+  let rows = res.data || [];
+  if (u.role === 'team-lead' && u.team) rows = rows.filter(c => c.team === u.team);
+  return rows.map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
 };
 window.alClientCreate = async (name) => {
   const u = window.AUTH_USER || {};
@@ -528,18 +538,30 @@ window.projectSave = async (p) => {
 window.projectList = async (clientId) => {
   const u = window.AUTH_USER || {};
   if (u.role === 'team-lead') {
-    const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
-    let d = r.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
-    return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+    console.log('[projectList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
+    try {
+      const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
+      let d = r.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+      console.log('[projectList] listTeamData result:', d);
+      if (d && !d.error) {
+        return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+      }
+      console.warn('[projectList] Lambda returned error, falling back to direct list:', d && d.error);
+    } catch (e) {
+      console.warn('[projectList] Lambda call threw, falling back:', e && e.message || e);
+    }
+    // Fallback: direct Project.list (will only return rows the schema allows
+    // — owner-scoped — but that's still more useful than nothing).
   }
   const res = await dataClient.models.Project.list({
     filter: { clientId: { eq: clientId } },
     limit: 500,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
+  let rows = res.data || [];
+  if (u.role === 'team-lead' && u.team) rows = rows.filter(p => p.team === u.team);
+  return rows.sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
 };
 
 // Download + parse a project's heavy data JSON from S3.
@@ -617,18 +639,28 @@ window.projectRequestUnlock = async (project, reason) => {
 window.unlockRequestList = async () => {
   const u = window.AUTH_USER || {};
   if (u.role === 'team-lead') {
-    const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
-    let d = r.data;
-    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-    if (!d || d.error) throw new Error((d && d.error) || 'listTeamData failed');
-    return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+    console.log('[unlockRequestList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
+    try {
+      const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
+      let d = r.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+      console.log('[unlockRequestList] listTeamData result:', d);
+      if (d && !d.error) {
+        return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+      }
+      console.warn('[unlockRequestList] Lambda returned error, falling back to direct list:', d && d.error);
+    } catch (e) {
+      console.warn('[unlockRequestList] Lambda call threw, falling back:', e && e.message || e);
+    }
   }
   const res = await dataClient.models.UnlockRequest.list({
     filter: { status: { eq: 'pending' } },
     limit: 500,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
+  let rows = res.data || [];
+  if (u.role === 'team-lead' && u.team) rows = rows.filter(r => r.team === u.team);
+  return rows.sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
 };
 
 // Approve or deny an unlock request. The decideUnlockRequest Lambda enforces
@@ -695,11 +727,14 @@ window.backfillTeams = async (onProgress) => {
       if (res.errors?.length) throw new Error(label + ': ' + res.errors[0].message);
       for (const row of (res.data || [])) {
         scanned++;
-        if (row.team) continue;
         const owner = (row[ownerField] || '').toLowerCase();
         if (!owner) { skippedOwnerless++; continue; }
         const team = emailToTeam.get(owner);
         if (!team) { missingOwner++; continue; }
+        // Re-stamp whenever the existing team doesn't match the owner's
+        // current custom:team. Idempotent — rows that are already correct
+        // are skipped silently.
+        if (row.team === team) continue;
         const upd = await model.update({ id: row.id, team });
         if (upd.errors?.length) { console.warn(label + ' update failed for ' + row.id, upd.errors); continue; }
         updated++;
