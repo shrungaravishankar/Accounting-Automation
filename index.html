@@ -442,6 +442,16 @@ window.storeAndLogExport = async (p) => {
 // ===== Cloud-backed clients + saved projects (DynamoDB + S3) =====
 // Exposed to the React app. All owner-scoped by the Cognito session.
 
+// AppSync's a.json() return type double-stringifies. Peel the layers until
+// we get an actual object — single JSON.parse isn't enough.
+function __unwrapJson(d) {
+  let out = d;
+  for (let i = 0; i < 3 && typeof out === 'string'; i++) {
+    try { out = JSON.parse(out); } catch (e) { console.warn('[unwrapJson] parse failed at iter', i, e); break; }
+  }
+  return out;
+}
+
 window.alClientList = async () => {
   const u = window.AUTH_USER || {};
   // Admins go through the listTeamData Lambda for strict team isolation.
@@ -453,9 +463,8 @@ window.alClientList = async () => {
     console.log('[alClientList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'clients' });
-      let d = r.data;
-      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-      console.log('[alClientList] listTeamData result:', d);
+      const d = __unwrapJson(r.data);
+      console.log('[alClientList] listTeamData parsed:', d, 'items len:', d && d.items && d.items.length);
       if (d && !d.error) {
         return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
       }
@@ -541,9 +550,8 @@ window.projectList = async (clientId) => {
     console.log('[projectList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
-      let d = r.data;
-      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-      console.log('[projectList] listTeamData result:', d);
+      const d = __unwrapJson(r.data);
+      console.log('[projectList] listTeamData parsed:', d, 'items len:', d && d.items && d.items.length);
       if (d && !d.error) {
         return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
       }
@@ -642,9 +650,8 @@ window.unlockRequestList = async () => {
     console.log('[unlockRequestList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
-      let d = r.data;
-      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
-      console.log('[unlockRequestList] listTeamData result:', d);
+      const d = __unwrapJson(r.data);
+      console.log('[unlockRequestList] listTeamData parsed:', d, 'items len:', d && d.items && d.items.length);
       if (d && !d.error) {
         return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
       }
@@ -668,8 +675,7 @@ window.unlockRequestList = async () => {
 // decision (Admins lack direct Project.update permission).
 window.unlockRequestDecide = async (req, approve) => {
   const r = await dataClient.mutations.decideUnlockRequest({ requestId: req.id, approve: !!approve });
-  let d = r.data;
-  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+  const d = __unwrapJson(r.data);
   if (!d || !d.success) throw new Error((d && d.message) || 'Decision failed');
   return d;
 };
@@ -678,8 +684,7 @@ window.unlockRequestDecide = async (req, approve) => {
 // Lambda so the team-scope check stays server-side.
 window.projectAdminUnlock = async (projectId) => {
   const r = await dataClient.mutations.decideUnlockRequest({ projectId, approve: true });
-  let d = r.data;
-  if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) {} }
+  const d = __unwrapJson(r.data);
   if (!d || !d.success) throw new Error((d && d.message) || 'Unlock failed');
   return d;
 };
@@ -689,10 +694,9 @@ window.projectAdminUnlock = async (projectId) => {
 // to match. Idempotent — safe to re-run.
 window.migrateTeamLeads = async () => {
   const r = await dataClient.mutations.manageUser({ email: '', action: 'migrate-team-leads' });
-  let d = r.data;
-  if (typeof d === 'object' && d) return d;
-  if (typeof d === 'string') { try { return JSON.parse(d); } catch (_) {} }
-  throw new Error('Unexpected response from manageUser.');
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Unexpected response from manageUser.');
+  return d;
 };
 
 // One-shot migration helper: walk Projects / Clients / ExportLogs that were
@@ -709,8 +713,7 @@ window.backfillTeams = async (onProgress) => {
   // 1) Email → team map from Cognito (already returned by listAppUsers).
   report('Loading users…');
   const usersRes = await dataClient.queries.listAppUsers();
-  let usersData = usersRes.data;
-  if (typeof usersData === 'string') { try { usersData = JSON.parse(usersData); } catch (_) {} }
+  const usersData = __unwrapJson(usersRes.data);
   if (!usersData || usersData.error) throw new Error((usersData && usersData.error) || 'Could not load users.');
   const emailToTeam = new Map();
   for (const row of (usersData.users || [])) {
@@ -1115,8 +1118,7 @@ async function loadUsersList() {
   container.innerHTML = '<div style="text-align:center;color:#555555;font-size:12px;padding:30px;">Loading users…</div>';
   try {
     const res = await dataClient.queries.listAppUsers();
-    let data = res.data;
-    if (typeof data === 'string') { try { data = JSON.parse(data); } catch(_) {} }
+    const data = __unwrapJson(res.data);
     if (!data || data.error) {
       container.innerHTML = '<div style="color:#dc2626;font-size:12px;padding:20px;text-align:center;">' + escapeHtml((data && data.error) || 'Could not load users.') + '</div>';
       return;
@@ -1248,8 +1250,7 @@ $('users-list-container').addEventListener('change', async function(e) {
   sel.disabled = true;
   try {
     const res = await dataClient.mutations.manageUser({ email, action: 'set-role', role: newRole });
-    let data = res.data;
-    if (typeof data === 'string') { try { data = JSON.parse(data); } catch (_) {} }
+    const data = __unwrapJson(res.data);
     if (!data || !data.success) throw new Error((data && data.message) || 'Failed to change role.');
     sel.dataset.current = newRole;
     loadUsersList();
