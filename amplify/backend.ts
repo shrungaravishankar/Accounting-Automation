@@ -8,6 +8,8 @@ import { listAppUsers } from './functions/list-app-users/resource';
 import { manageUser } from './functions/manage-user/resource';
 import { listTeamData } from './functions/list-team-data/resource';
 import { decideUnlockRequest } from './functions/decide-unlock-request/resource';
+import { zohoOauth } from './functions/zoho-oauth/resource';
+import { zohoSync } from './functions/zoho-sync/resource';
 
 const backend = defineBackend({
   auth,
@@ -17,7 +19,9 @@ const backend = defineBackend({
   listAppUsers,
   manageUser,
   listTeamData,
-  decideUnlockRequest
+  decideUnlockRequest,
+  zohoOauth,
+  zohoSync
 });
 
 const userPool = backend.auth.resources.userPool;
@@ -105,5 +109,24 @@ backend.decideUnlockRequest.resources.lambda.addToRolePolicy(
     effect: Effect.ALLOW,
     actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
     resources: [projectTable.tableArn, unlockTable.tableArn]
+  })
+);
+
+// ---- zoho-oauth / zoho-sync: store and use Admin's Zoho refresh token ----
+const zohoCredTable = backend.data.resources.tables['ZohoCredentials'];
+backend.zohoOauth.addEnvironment('ZOHOCRED_TABLE_NAME', zohoCredTable.tableName);
+backend.zohoOauth.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['dynamodb:Scan', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:GetItem'],
+    resources: [zohoCredTable.tableArn, zohoCredTable.tableArn + '/index/*']
+  })
+);
+backend.zohoSync.addEnvironment('ZOHOCRED_TABLE_NAME', zohoCredTable.tableName);
+backend.zohoSync.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['dynamodb:Scan', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
+    resources: [zohoCredTable.tableArn, zohoCredTable.tableArn + '/index/*']
   })
 );

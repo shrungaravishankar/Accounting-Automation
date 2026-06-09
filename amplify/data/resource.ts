@@ -4,6 +4,8 @@ import { listAppUsers } from '../functions/list-app-users/resource';
 import { manageUser } from '../functions/manage-user/resource';
 import { listTeamData } from '../functions/list-team-data/resource';
 import { decideUnlockRequest } from '../functions/decide-unlock-request/resource';
+import { zohoOauth } from '../functions/zoho-oauth/resource';
+import { zohoSync } from '../functions/zoho-sync/resource';
 /**
  * AppSync GraphQL schema for BCL AutoLedger.
  *
@@ -65,7 +67,10 @@ const schema = a.schema({
       // Captured at creation so Team Leads / Admin can see who created what.
       ownerEmail: a.string(),
       ownerName: a.string(),
-      team: a.string()
+      team: a.string(),
+      // Zoho Books organization ID this client is linked to. Set when the
+      // client was imported from Zoho; null for manually-created clients.
+      zohoOrgId: a.string()
     })
     .authorization((allow) => [
       allow.owner().to(['create', 'read', 'update', 'delete']),
@@ -131,6 +136,26 @@ const schema = a.schema({
       allow.owner().to(['create', 'read']),
       allow.group('admin').to(['read', 'update', 'delete']),
       allow.group('team-lead').to(['read']),
+    ]),
+
+  /**
+   * Per-Admin Zoho Books refresh token + region. One row per Admin — the
+   * refresh token gives access to ALL organizations under their Zoho login,
+   * so the per-client zohoOrgId on Client rows is what scopes API calls to a
+   * specific organization. Refresh tokens are long-lived; we only re-OAuth
+   * if Zoho revokes the grant.
+   */
+  ZohoCredentials: a
+    .model({
+      refreshToken: a.string().required(),
+      region: a.string(),
+      ownerEmail: a.string(),
+      connectedAt: a.datetime(),
+      lastUsedAt: a.datetime()
+    })
+    .authorization((allow) => [
+      allow.owner().to(['create', 'read', 'update', 'delete']),
+      allow.group('admin').to(['read', 'delete'])
     ]),
 
   InviteResult: a.customType({
@@ -203,7 +228,31 @@ const schema = a.schema({
     })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
-    .handler(a.handler.function(decideUnlockRequest))
+    .handler(a.handler.function(decideUnlockRequest)),
+
+  /**
+   * Completes a Zoho OAuth flow: exchanges the authorization code for a
+   * refresh token and stores it. Called by the frontend right after the user
+   * is redirected back from Zoho's consent page.
+   */
+  zohoConnect: a
+    .mutation()
+    .arguments({ code: a.string().required() })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(zohoOauth)),
+
+  /**
+   * Pulls data from Zoho Books on the caller's behalf.
+   * `kind` is one of: organizations, chartofaccounts, vendors, customers.
+   * `organizationId` is required for everything except 'organizations'.
+   */
+  zohoFetch: a
+    .query()
+    .arguments({ kind: a.string().required(), organizationId: a.string() })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(zohoSync))
 });
 
 export type Schema = ClientSchema<typeof schema>;

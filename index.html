@@ -305,6 +305,7 @@
       <span id="auth-dd-role" class="auth-dd-role">role</span>
     </div>
     <button id="auth-manage-users-btn" class="auth-dd-item auth-hidden" type="button" role="menuitem">Manage Users</button>
+    <button id="auth-zoho-connect-btn" class="auth-dd-item auth-hidden" type="button" role="menuitem">🔗 Connect to Zoho</button>
     <button id="auth-signout-btn" class="auth-dd-item" type="button" role="menuitem">Sign out</button>
   </div>
 </div>
@@ -477,16 +478,17 @@ window.alClientList = async () => {
   if (u.role === 'team-lead' && u.team) rows = rows.filter(c => c.team === u.team);
   return rows.map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName }));
 };
-window.alClientCreate = async (name) => {
+window.alClientCreate = async (name, zohoOrgId) => {
   const u = window.AUTH_USER || {};
   const res = await dataClient.models.Client.create({
     name,
     ownerEmail: u.email || null,
     ownerName: u.name || null,
     team: u.team || null,
+    zohoOrgId: zohoOrgId || null,
   });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return { id: res.data.id, name: res.data.name, ownerEmail: res.data.ownerEmail, ownerName: res.data.ownerName };
+  return { id: res.data.id, name: res.data.name, ownerEmail: res.data.ownerEmail, ownerName: res.data.ownerName, zohoOrgId: res.data.zohoOrgId };
 };
 window.alClientDelete = async (id) => {
   const res = await dataClient.models.Client.delete({ id });
@@ -752,6 +754,46 @@ window.backfillTeams = async (onProgress) => {
   return { projects, clients, exports: exports_ };
 };
 
+// ===== Zoho Books integration =====
+// Build the Zoho consent URL and redirect. Admin lands back on /oauth-callback
+// with ?code=… ; the boot code below catches it and calls zohoConnect.
+window.zohoStartOAuth = () => {
+  const clientId = '1000.QO9XLUC1QMJH4Q9CTYVYXRV9708DST';
+  const region = 'com';
+  const redirectUri = 'https://accounting-automation.bclworkspace.in/oauth-callback';
+  const state = Math.random().toString(36).slice(2);
+  try { sessionStorage.setItem('zoho_oauth_state', state); } catch (_) {}
+  const params = new URLSearchParams({
+    scope: 'ZohoBooks.fullaccess.all',
+    client_id: clientId,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    access_type: 'offline',
+    prompt: 'consent',
+    state
+  });
+  window.location.href = 'https://accounts.zoho.' + region + '/oauth/v2/auth?' + params.toString();
+};
+
+// Exchange the code Zoho redirected back with for a refresh token. Backend
+// stores the refresh token; we just need to wait for success/failure.
+window.zohoCompleteOAuth = async (code) => {
+  const r = await dataClient.mutations.zohoConnect({ code });
+  const d = __unwrapJson(r.data);
+  if (!d || !d.success) throw new Error((d && d.message) || 'Zoho connect failed');
+  return d;
+};
+
+// Generic Zoho-sync helper. kind: 'organizations'|'chartofaccounts'|'vendors'|'customers'.
+// organizationId is required for everything except 'organizations'.
+window.zohoFetch = async (kind, organizationId) => {
+  const r = await dataClient.queries.zohoFetch({ kind, organizationId });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response from Zoho.');
+  if (d.error) throw new Error(d.error);
+  return d.items || [];
+};
+
 window.projectDelete = async (id, dataPath) => {
   if (dataPath) { try { await removeFromStorage({ path: dataPath }); } catch (_) {} }
   const res = await dataClient.models.Project.delete({ id });
@@ -840,10 +882,20 @@ function populateUserMenu() {
   // Admins manage every team; Level 1 Users manage just their own sub-users.
   if (u.role === 'admin' || u.role === 'team-lead') {
     $('auth-manage-users-btn').classList.remove('auth-hidden');
+    $('auth-zoho-connect-btn').classList.remove('auth-hidden');
   } else {
     $('auth-manage-users-btn').classList.add('auth-hidden');
+    $('auth-zoho-connect-btn').classList.add('auth-hidden');
   }
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('auth-zoho-connect-btn');
+  if (btn) btn.addEventListener('click', () => {
+    if (!confirm('You will be redirected to Zoho to grant access to your Books data. Continue?')) return;
+    window.zohoStartOAuth();
+  });
+});
 
 try {
   $('boot-msg').textContent = 'Loading config…';
@@ -886,6 +938,27 @@ try {
         team
       };
       showApp();
+
+      // If we just came back from a Zoho OAuth consent screen, finish the
+      // handshake — exchange the code for a refresh token and store it.
+      try {
+        const url = new URL(window.location.href);
+        const code = url.searchParams.get('code');
+        const isCallback = window.location.pathname === '/oauth-callback' || url.searchParams.get('oauth_provider') === 'zoho';
+        if (code && (isCallback || window.location.pathname.indexOf('/oauth-callback') >= 0)) {
+          (async () => {
+            try {
+              await window.zohoCompleteOAuth(code);
+              alert('Connected to Zoho ✓ — you can now import clients and sync from Zoho.');
+            } catch (e) {
+              alert('Zoho connection failed: ' + (e.message || e));
+            } finally {
+              // Strip query string + restore root path.
+              try { history.replaceState({}, '', '/'); } catch (_) {}
+            }
+          })();
+        }
+      } catch (_) {}
     }
   } catch (_) {
     showLogin();
@@ -2015,6 +2088,80 @@ function App(){
     setNewClientVersion("free");
   }, [newClientVersion]);
 
+  // Pull the list of organizations from the Admin's Zoho account, let them
+  // pick one, and create a Client linked to that org. Auto-syncs CoA + vendors
+  // + customers on success so the new client lands fully populated.
+  const importClientFromZoho = useCallback(async ()=>{
+    let orgs;
+    try { orgs = await window.zohoFetch('organizations'); }
+    catch(e){
+      if(String(e.message||e).includes('Not connected')){
+        if(confirm('You need to connect Zoho first. Go to the Connect Zoho menu now?')){
+          window.zohoStartOAuth();
+        }
+        return;
+      }
+      alert('Could not list Zoho organizations: '+(e.message||e));
+      return;
+    }
+    if(!orgs.length){ alert('No Zoho organizations found under your account.'); return; }
+    const list = orgs.map((o,i)=>(i+1)+'. '+o.name+(o.country?' ('+o.country+')':''));
+    const pickStr = prompt('Pick a Zoho organization by number:\n\n'+list.join('\n'), '1');
+    if(!pickStr) return;
+    const idx = parseInt(pickStr,10)-1;
+    if(isNaN(idx) || idx<0 || idx>=orgs.length){ alert('Invalid selection.'); return; }
+    const org = orgs[idx];
+    let created;
+    try { created = await window.alClientCreate(org.name, org.organization_id); }
+    catch(e){ alert('Could not create client: '+(e.message||e)); return; }
+    const newClient = { id: created.id, name: created.name, version: 'free', zohoOrgId: org.organization_id };
+    setClients(prev=>[...prev, newClient]);
+    setActiveClientId(created.id);
+    setActiveClientName(created.name);
+    setClientVersion('free');
+    setClientData(created.id,'version','free');
+    try{localStorage.setItem('autoledger_active_client', created.id);}catch(e){}
+
+    // Best-effort initial sync.
+    try {
+      const [coa, vendors, customers] = await Promise.all([
+        window.zohoFetch('chartofaccounts', org.organization_id),
+        window.zohoFetch('vendors', org.organization_id),
+        window.zohoFetch('customers', org.organization_id)
+      ]);
+      if(coa && coa.length){ setChartOfAccounts(coa); setCoaFileName('Zoho: '+org.name); setClientData(created.id,'coa',coa); setClientData(created.id,'coa_name','Zoho: '+org.name); }
+      if(vendors && vendors.length){ setVendors(vendors); setVendorFileName('Zoho: '+vendors.length+' vendors'); setClientData(created.id,'vendors',vendors); setClientData(created.id,'vendor_file','Zoho: '+vendors.length+' vendors'); }
+      if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers'); }
+      alert('Client created from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
+    } catch(e){ alert('Client created but initial sync failed: '+(e.message||e)+'\n\nClick "Sync from Zoho" later to retry.'); }
+  },[]);
+
+  // Re-fetch CoA + vendors + customers from Zoho for the currently active
+  // client. Overwrites local state.
+  const syncFromZoho = useCallback(async ()=>{
+    const c = clients.find(x=>x.id===activeClientId);
+    const orgId = c && c.zohoOrgId;
+    if(!orgId){ alert('This client is not linked to a Zoho organization. Use "Import from Zoho" when creating it next time.'); return; }
+    if(!confirm('Overwrite local Chart of Accounts, Vendors, and Customers with Zoho\'s current data?')) return;
+    try {
+      const [coa, vendors, customers] = await Promise.all([
+        window.zohoFetch('chartofaccounts', orgId),
+        window.zohoFetch('vendors', orgId),
+        window.zohoFetch('customers', orgId)
+      ]);
+      setChartOfAccounts(coa||[]); setCoaFileName('Zoho: '+(c.name||'org')); setClientData(activeClientId,'coa',coa||[]); setClientData(activeClientId,'coa_name','Zoho: '+(c.name||'org'));
+      setVendors(vendors||[]); setVendorFileName('Zoho: '+(vendors||[]).length+' vendors'); setClientData(activeClientId,'vendors',vendors||[]); setClientData(activeClientId,'vendor_file','Zoho: '+(vendors||[]).length+' vendors');
+      setCustomers(customers||[]); setCustomerFileName('Zoho: '+(customers||[]).length+' customers'); setClientData(activeClientId,'customers',customers||[]); setClientData(activeClientId,'customer_file','Zoho: '+(customers||[]).length+' customers');
+      alert('Synced from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
+    } catch(e){
+      if(String(e.message||e).includes('Not connected')){
+        if(confirm('You need to (re)connect Zoho. Go to the Connect Zoho menu now?')) window.zohoStartOAuth();
+        return;
+      }
+      alert('Sync failed: '+(e.message||e));
+    }
+  },[activeClientId,clients]);
+
   const switchClient = useCallback((id)=>{
     const c = clients.find(c=>c.id===id);
     if (!c) return;
@@ -3033,7 +3180,10 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <button onClick={()=>{setShowNewClient(false);setNewClientName("");}} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#888888",fontSize:13,cursor:"pointer"}}>Cancel</button>
               </div>
             ) : (
-              <button onClick={()=>setShowNewClient(true)} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:10,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 4px 20px rgba(77,63,160,0.35)",transition:"all 0.2s"}}>+ New Client</button>
+              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
+                <button onClick={importClientFromZoho} style={{background:"#ffffff",color:"#4D3FA0",border:"1.5px solid #4D3FA0",borderRadius:10,padding:"12px 24px",fontSize:14,fontWeight:600,cursor:"pointer",transition:"all 0.2s"}}>🔗 Import from Zoho</button>
+                <button onClick={()=>setShowNewClient(true)} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:10,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 4px 20px rgba(77,63,160,0.35)",transition:"all 0.2s"}}>+ New Client (manual)</button>
+              </div>
             )}
 
             {/* ── GLOBAL BASE DATA — LEARN FROM ZOHO ── */}
@@ -3115,6 +3265,9 @@ td,th{padding:8px 12px;vertical-align:middle}
             <select value={activeClientId} onChange={e=>switchClient(e.target.value)} style={{background:"#ffffff",border:"1px solid #d4d4dc",borderRadius:8,padding:"8px 32px 8px 14px",color:"#1a1a2e",fontSize:13,fontWeight:500,cursor:"pointer",boxShadow:"0 1px 2px rgba(0,0,0,0.04)",minWidth:180,outline:"none",appearance:"none",backgroundImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234D3FA0' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>\")",backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center"}}>
               {clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
+            {(()=>{ const c=clients.find(x=>x.id===activeClientId); return c && c.zohoOrgId ? (
+              <button onClick={syncFromZoho} title="Refresh Chart of Accounts / Vendors / Customers from Zoho" style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"8px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>
+            ) : null; })()}
             <button onClick={()=>{setActiveClientId("");setActiveClientName("");localStorage.removeItem("autoledger_active_client");}} style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:8,padding:"8px 16px",color:"#ffffff",fontSize:13,fontWeight:600,cursor:"pointer",boxShadow:"0 1px 3px rgba(77,63,160,0.25)",transition:"all .15s"}} onMouseEnter={e=>{e.currentTarget.style.background="#3C3489";}} onMouseLeave={e=>{e.currentTarget.style.background="#4D3FA0";}}>+ Switch / New</button>
           </div>
         </div>
