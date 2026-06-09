@@ -26,8 +26,21 @@ export const handler = async (event: Event) => {
   const clientSecret = process.env.ZOHO_CLIENT_SECRET;
   const redirectUri = process.env.ZOHO_REDIRECT_URI;
   const tableName = process.env.ZOHOCRED_TABLE_NAME;
-  if (!clientId || !clientSecret || !redirectUri || !tableName) {
-    return JSON.stringify({ success: false, message: 'Server misconfiguration — Zoho env vars missing.' });
+
+  // Log every env var presence so we know exactly which one is missing.
+  console.log('[zoho-oauth env] ZOHO_CLIENT_ID:', clientId ? 'set(' + clientId.length + ')' : 'MISSING');
+  console.log('[zoho-oauth env] ZOHO_CLIENT_SECRET:', clientSecret ? 'set(' + clientSecret.length + ', prefix=' + clientSecret.slice(0, 4) + ')' : 'MISSING');
+  console.log('[zoho-oauth env] ZOHO_REDIRECT_URI:', redirectUri || 'MISSING');
+  console.log('[zoho-oauth env] ZOHOCRED_TABLE_NAME:', tableName || 'MISSING');
+  console.log('[zoho-oauth env] ZOHO_REGION:', region);
+
+  const missing: string[] = [];
+  if (!clientId) missing.push('ZOHO_CLIENT_ID');
+  if (!clientSecret) missing.push('ZOHO_CLIENT_SECRET');
+  if (!redirectUri) missing.push('ZOHO_REDIRECT_URI');
+  if (!tableName) missing.push('ZOHOCRED_TABLE_NAME');
+  if (missing.length) {
+    return JSON.stringify({ success: false, message: 'Server misconfiguration — missing: ' + missing.join(', ') });
   }
 
   // Diagnostic: don't reveal the secret, but tell us if it's actually set
