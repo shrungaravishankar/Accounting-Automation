@@ -3,6 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Anchor every relative URL to the site root. Without this, Amplify
+     rewrites to /index.html from a deep path (e.g. /oauth-callback)
+     leave the browser resolving bcl-logo.png and amplify-bundle.js as
+     /oauth-callback/bcl-logo.png — which 404s and prevents boot. -->
+<base href="/">
 <title>BCL AutoLedger — Transforming Lives With Wisdom</title>
 <link rel="icon" type="image/png" href="bcl-logo.png">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
