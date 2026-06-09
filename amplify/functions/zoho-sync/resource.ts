@@ -1,5 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
+declare const process: { env: Record<string, string | undefined> };
+
 /**
  * Fetches data from Zoho Books on behalf of the caller using their stored
  * refresh token. Supports kinds:

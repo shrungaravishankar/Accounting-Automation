@@ -1,5 +1,7 @@
 import { defineFunction } from '@aws-amplify/backend';
 
+declare const process: { env: Record<string, string | undefined> };
+
 /**
  * Exchanges a Zoho OAuth authorization code for a refresh token, stores it in
  * the ZohoCredentials table owned by the calling user, and reports success.
