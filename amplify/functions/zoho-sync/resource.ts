@@ -1,4 +1,4 @@
-import { defineFunction, secret } from '@aws-amplify/backend';
+import { defineFunction } from '@aws-amplify/backend';
 
 /**
  * Fetches data from Zoho Books on behalf of the caller using their stored
@@ -15,7 +15,8 @@ export const zohoSync = defineFunction({
   resourceGroupName: 'data',
   environment: {
     ZOHO_CLIENT_ID: '1000.QO9XLUC1QMJH4Q9CTYVYXRV9708DST',
-    ZOHO_CLIENT_SECRET: secret('ZOHO_CLIENT_SECRET'),
+    // Sourced from Amplify Console → App settings → Environment variables.
+    ZOHO_CLIENT_SECRET: process.env.ZOHO_CLIENT_SECRET || '',
     ZOHO_REGION: 'com'
   }
 });

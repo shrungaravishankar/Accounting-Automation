@@ -1,4 +1,4 @@
-import { defineFunction, secret } from '@aws-amplify/backend';
+import { defineFunction } from '@aws-amplify/backend';
 
 /**
  * Exchanges a Zoho OAuth authorization code for a refresh token, stores it in
@@ -15,7 +15,10 @@ export const zohoOauth = defineFunction({
   resourceGroupName: 'data',
   environment: {
     ZOHO_CLIENT_ID: '1000.QO9XLUC1QMJH4Q9CTYVYXRV9708DST',
-    ZOHO_CLIENT_SECRET: secret('ZOHO_CLIENT_SECRET'),
+    // Set this in Amplify Console → App settings → Environment variables.
+    // Read at build/synth time and baked into the Lambda's env. Safer than
+    // git but visible to anyone with CloudFormation access — rotate freely.
+    ZOHO_CLIENT_SECRET: process.env.ZOHO_CLIENT_SECRET || '',
     ZOHO_REGION: 'com',
     ZOHO_REDIRECT_URI: 'https://accounting-automation.bclworkspace.in/oauth-callback'
   }
