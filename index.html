@@ -88,8 +88,6 @@
 .auth-btn:hover { background:#000a2a; }
 .auth-btn:disabled { opacity:.55; cursor:not-allowed; }
 .auth-user-menu { position:fixed !important; top:18px !important; right:14px !important; z-index:100000 !important; font-family:'IBM Plex Sans',sans-serif; }
-/* Push Upgrade/Paid button left so avatar has clear space */
-button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !important; }
 .auth-avatar { width:34px; height:34px; border-radius:50%; background:linear-gradient(135deg,#6958C2,#4D3FA0); color:#fff; border:1px solid #d0d0d8; font-size:13px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; letter-spacing:.5px; transition:transform .15s ease, box-shadow .15s ease; }
 .auth-avatar:hover { transform:scale(1.05); box-shadow:0 0 0 3px rgba(0,20,65,.25); }
 .auth-dropdown { position:absolute; top:42px; right:0; min-width:220px; background:#ffffff; border:1px solid #cccccc; border-radius:8px; box-shadow:0 8px 24px rgba(105,88,194,0.18); padding:6px; opacity:0; visibility:hidden; transform:translateY(-4px); transition:opacity .15s ease, transform .15s ease, visibility .15s; }
@@ -1726,8 +1724,9 @@ function makeClientId(name) {
 
 function App(){
   // ─── VERSION is now per-client, not global ───
-  const[clientVersion,setClientVersion]=useState("free"); // "free" or "paid" — loaded per client
-  const isPaid=clientVersion==="paid";
+  // Paid / Bill Entry features are disabled — this build is Free-tier only.
+  const[clientVersion,setClientVersion]=useState("free");
+  const isPaid=false;
 
   // ─── APP MODE: bank | bills ───
   const[appMode,setAppMode]=useState("bank"); // "bank" or "bills"
@@ -2963,15 +2962,8 @@ td,th{padding:8px 12px;vertical-align:middle}
           <img src={BCL_LOGO} alt="BCL" style={{height:42,objectFit:"contain"}} />
           <div style={{width:1,height:28,background:"#e2e2ea"}} />
           <div><div style={{fontSize:14,fontWeight:600,letterSpacing:"-0.01em",color:"#4D3FA0"}}>AutoLedger</div><div style={{fontSize:10,color:"#888888"}}>Accounting Automation</div></div>
-          {/* Version badge */}
-          <span style={{fontSize:9,padding:"2px 8px",borderRadius:4,background:isPaid?"rgba(22,163,74,0.1)":"rgba(105,88,194,0.1)",color:isPaid?"#16a34a":"#6958C2",border:"1px solid "+(isPaid?"rgba(22,163,74,0.2)":"rgba(105,88,194,0.2)"),fontWeight:600}}>{isPaid?"Paid":"Free"}</span>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-          {/* Mode toggle (only when client is active) */}
-          {activeClientId&&<div style={{display:"flex",background:"#ffffff",borderRadius:6,padding:2,border:"1px solid #e2e2ea",marginRight:8}}>
-            <button onClick={()=>setAppMode("bank")} style={{padding:"5px 14px",borderRadius:5,fontSize:11,fontWeight:600,border:"none",cursor:"pointer",background:appMode==="bank"?"linear-gradient(135deg,#6958C2,#4D3FA0)":"transparent",color:appMode==="bank"?"#fff":"#888888"}}>Bank Statement</button>
-            <button onClick={()=>{if(isPaid)setAppMode("bills");else alert("Bill Entry is available in the Paid Version.\n\nUpgrade this client to enable it.");}} style={{padding:"5px 14px",borderRadius:5,fontSize:11,fontWeight:600,border:"none",cursor:"pointer",background:appMode==="bills"?"linear-gradient(135deg,#6958C2,#4D3FA0)":"transparent",color:appMode==="bills"?"#fff":isPaid?"#888888":"#cccccc",opacity:isPaid?1:0.5}}>Bill Entry {!isPaid&&"🔒"}</button>
-          </div>}
           {/* Step nav (only in bank mode) */}
           {appMode==="bank"&&<>
           <button onClick={()=>{if(step>1)setStep(step-1);}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"6px 10px",color:step>1?"#6958C2":"#e2e2ea",fontSize:14,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
@@ -2982,9 +2974,6 @@ td,th{padding:8px 12px;vertical-align:middle}
             else if(step>=2&&step<6)setStep(step+1);
           }}} disabled={step>=6||(step===1&&transactions.length===0)} style={{background:"none",border:"1px solid "+((step<6&&!(step===1&&transactions.length===0))?"#e2e2ea":"transparent"),borderRadius:6,padding:"6px 10px",color:(step<6&&!(step===1&&transactions.length===0))?"#6958C2":"#e2e2ea",fontSize:14,cursor:(step<6&&!(step===1&&transactions.length===0))?"pointer":"default",lineHeight:1,fontWeight:700}}>›</button>
           </>}
-          {appMode==="bills"&&<span style={{fontSize:13,fontWeight:600,color:"#6958C2",padding:"6px 12px"}}>Bill Entry</span>}
-          {/* Settings */}
-          <button onClick={()=>{if(isPaid){if(confirm("Downgrade to Free Version Version? Bill Entry will be disabled."))downgradeClient();}else{if(confirm("Upgrade to Paid Version? Enables Bill Entry with AI OCR."))upgradeClient();}}} style={{background:"none",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:isPaid?"#16a34a":"#6958C2",fontSize:10,cursor:"pointer",marginLeft:4}} title={isPaid?"Downgrade to Free Version":"Upgrade to Paid Version"}>{isPaid?"Paid ✓":"⬆ Upgrade"}</button>
         </div>
       </div>
 
@@ -3021,7 +3010,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />
                       <div style={{fontSize:15,fontWeight:600}}>{c.name}</div>
                       <button onClick={(e)=>{e.stopPropagation();renameClient(c.id);}} title="Rename client" style={{background:"none",border:"none",color:"#888888",fontSize:12,cursor:"pointer",padding:"0 4px"}}>✏️</button>
-                      <span style={{fontSize:8,padding:"1px 6px",borderRadius:4,fontWeight:700,background:(c.version||getClientData(c.id,"version","free"))==="paid"?"rgba(22,163,74,0.1)":"rgba(105,88,194,0.1)",color:(c.version||getClientData(c.id,"version","free"))==="paid"?"#16a34a":"#888888",border:"1px solid "+((c.version||getClientData(c.id,"version","free"))==="paid"?"rgba(22,163,74,0.2)":"rgba(105,88,194,0.2)")}}>{(c.version||getClientData(c.id,"version","free"))==="paid"?"PAID":"FREE"}</span>
                     </div>
                     <div style={{fontSize:10,color:"#888888",marginTop:2}}>Bank: {getClientData(c.id,"bank","Not set")}</div>
                     <div style={{fontSize:10,color:"#777777"}}>References: {Object.keys(getClientData(c.id,"refdb",{})).length} mappings</div>
@@ -3041,12 +3029,8 @@ td,th{padding:8px 12px;vertical-align:middle}
             {showNewClient ? (
               <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                 <input type="text" value={newClientName} onChange={e=>setNewClientName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newClientName.trim())createClient(newClientName);}} placeholder="Client name (e.g., Z2 Tech LLC)" autoFocus style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#1a1a2e",fontSize:13,width:260,outline:"none"}} />
-                <select value={newClientVersion} onChange={e=>setNewClientVersion(e.target.value)} style={{background:"#ffffff",border:"1px solid "+(newClientVersion==="paid"?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:8,padding:"10px 12px",color:newClientVersion==="paid"?"#16a34a":"#6958C2",fontSize:12,cursor:"pointer",fontWeight:600}}>
-                  <option value="free">Free</option>
-                  <option value="paid">Paid Version</option>
-                </select>
                 <button onClick={()=>createClient(newClientName)} disabled={!newClientName.trim()} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:13,fontWeight:600,cursor:newClientName.trim()?"pointer":"default",opacity:newClientName.trim()?1:0.5,boxShadow:"0 2px 12px rgba(77,63,160,0.3)"}}>Create</button>
-                <button onClick={()=>{setShowNewClient(false);setNewClientName("");setNewClientVersion("free");}} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#888888",fontSize:13,cursor:"pointer"}}>Cancel</button>
+                <button onClick={()=>{setShowNewClient(false);setNewClientName("");}} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#888888",fontSize:13,cursor:"pointer"}}>Cancel</button>
               </div>
             ) : (
               <button onClick={()=>setShowNewClient(true)} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:10,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 4px 20px rgba(77,63,160,0.35)",transition:"all 0.2s"}}>+ New Client</button>
@@ -3753,10 +3737,9 @@ td,th{padding:8px 12px;vertical-align:middle}
               </td>
               {/* Entry Mode (expenses only) */}
               {reviewTab==="expenses"&&<td style={{padding:"8px 6px"}}>
-                <select value={t.entryMode||"expense"} onChange={e=>{if(e.target.value==="billpay"&&!isPaid){alert("Bill Payment is available in the Paid Version.\n\nUpgrade this client to enable it.");e.target.value=t.entryMode||"expense";return;}handleEntryModeChange(t.id,e.target.value);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:4,padding:"3px 4px",color:t.entryMode==="journal"?"#6958C2":t.entryMode==="billpay"?"#0891b2":"#16a34a",fontSize:10,cursor:"pointer"}}>
+                <select value={t.entryMode||"expense"} onChange={e=>handleEntryModeChange(t.id,e.target.value)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:4,padding:"3px 4px",color:t.entryMode==="journal"?"#6958C2":"#16a34a",fontSize:10,cursor:"pointer"}}>
                   <option value="expense">Expense</option>
                   <option value="journal">Journal</option>
-                  <option value="billpay">{isPaid?"Bill Payment":"Bill Payment 🔒"}</option>
                 </select>
               </td>}
               {/* Vendor (Debit tab only) */}
@@ -3975,8 +3958,8 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>
         </div>)}
 
-        {/* ═══════════════ BILL ENTRY MODE (Paid only) ═══════════════ */}
-        {appMode==="bills"&&isPaid&&(<div style={{display:"flex",flexDirection:"column",gap:20}}>
+        {/* ═══════════════ BILL ENTRY MODE — disabled in this build ═══════════════ */}
+        {false&&appMode==="bills"&&isPaid&&(<div style={{display:"flex",flexDirection:"column",gap:20}}>
           <div>
             <h2 style={{fontSize:22,fontWeight:600,marginBottom:4}}>Bill Entry</h2>
             <p style={{color:"#888888",fontSize:13}}>Upload invoices & bills — AI extracts fields automatically. Export as Zoho Bills import CSV.</p>
@@ -4086,13 +4069,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>
         </div>)}
 
-        {/* Bill Entry locked message for Free users */}
-        {appMode==="bills"&&!isPaid&&(<div style={{textAlign:"center",padding:"80px 20px"}}>
-          <div style={{fontSize:48,marginBottom:16}}>🔒</div>
-          <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Bill Entry — Paid Version Feature</h2>
-          <p style={{color:"#888888",fontSize:13,marginBottom:24,maxWidth:400,margin:"0 auto 24px"}}>Upload invoices and bills with AI-powered OCR extraction. Available in the Paid Version.</p>
-          <button onClick={()=>{if(confirm("Upgrade this client to Paid Version?"))upgradeClient();}} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer"}}>Upgrade to Paid Version</button>
-        </div>)}
+        {/* Bill Entry locked message — disabled in this build */}
         </>)}
       </div>
     </div>
