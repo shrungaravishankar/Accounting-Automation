@@ -2217,20 +2217,30 @@ function App(){
     }
   },[transactions,learnedRules,refDB,chartOfAccounts,activeClientId,activeClientName,bankAccount,editingProjectId,globalRefDB,globalKeywordIndex]);
 
+  // When a saved project is re-opened, only the rows that were originally
+  // classified as Suspense are editable. Everything else has been imported
+  // into Zoho already and must not be touched.
+  const isRowEditable=useCallback((t)=>{
+    if(!editingProjectId||originalSuspenseKeys.size===0) return true;
+    return originalSuspenseKeys.has((t.date||"")+"|"+(t.description||"")+"|"+(t.debit||0)+"|"+(t.credit||0));
+  },[editingProjectId,originalSuspenseKeys]);
+
   const handleLedgerChange=useCallback((id,newLedger)=>{
     setClassifiedTxns(prev=>prev.map(t=>{
       if(t.id!==id)return t;
+      if(!isRowEditable(t)){ alert("Only the suspense entries can be re-classified here. Other ledgers were already imported."); return t; }
       const k=t.description.toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
       setLearnedRules(r=>({...r,[k]:newLedger}));
       setRefDB(db=>addToRefDB(db,t.description,newLedger));
       return{...t,selectedLedger:newLedger,status:"Confirmed"};
     }));
     setCoaDropdownOpen(p=>({...p,[id]:false}));
-  },[]);
+  },[isRowEditable]);
 
   const handleEntryModeChange=useCallback((id,mode)=>{
     setClassifiedTxns(prev=>prev.map(t=>{
       if(t.id!==id)return t;
+      if(!isRowEditable(t)) return t;
       // Save routing preference for this description pattern
       const descKey = t.description.toLowerCase().replace(/[^a-z0-9 ]/g,"").trim();
       if(activeClientId){
@@ -2240,16 +2250,21 @@ function App(){
       }
       return{...t,entryMode:mode};
     }));
-  },[activeClientId]);
+  },[activeClientId,isRowEditable]);
 
   const handleContactChange=useCallback((id,name)=>{
-    setClassifiedTxns(prev=>prev.map(t=>t.id===id?{...t,contactName:name,status:"Confirmed"}:t));
-  },[]);
+    setClassifiedTxns(prev=>prev.map(t=>{
+      if(t.id!==id)return t;
+      if(!isRowEditable(t)) return t;
+      return{...t,contactName:name,status:"Confirmed"};
+    }));
+  },[isRowEditable]);
 
   const confirmSelected=useCallback(()=>{
     if(selectedIds.size===0){alert("Select transactions using checkboxes first.");return;}
     setClassifiedTxns(prev=>prev.map(t=>{
       if(!selectedIds.has(t.id))return t;
+      if(!isRowEditable(t)) return t;
       const isSuspense = (t.selectedLedger||"").toLowerCase().includes("suspense");
       if(t.selectedLedger && !isSuspense) {
         setRefDB(db=>addToRefDB(db,t.description,t.selectedLedger));
@@ -2257,20 +2272,22 @@ function App(){
       return{...t,status:isSuspense?"Suspense":"Confirmed"};
     }));
     setSelectedIds(new Set());
-  },[selectedIds]);
+  },[selectedIds,isRowEditable]);
 
   const unconfirmSelected=useCallback(()=>{
     if(selectedIds.size===0){alert("Select transactions using checkboxes first.");return;}
     setClassifiedTxns(prev=>prev.map(t=>{
       if(!selectedIds.has(t.id))return t;
+      if(!isRowEditable(t)) return t;
       const isSuspense = (t.selectedLedger||"").toLowerCase().includes("suspense");
       return{...t,status:isSuspense?"Suspense":t.confidence>80?"Auto-Assigned":"Suspense"};
     }));
     setSelectedIds(new Set());
-  },[selectedIds]);
+  },[selectedIds,isRowEditable]);
 
   const confirmAll=useCallback(()=>{
     setClassifiedTxns(prev=>prev.map(t=>{
+      if(!isRowEditable(t)) return t;
       const isSuspense = (t.selectedLedger||"").toLowerCase().includes("suspense");
       if(t.selectedLedger && !isSuspense) {
         setRefDB(db=>addToRefDB(db,t.description,t.selectedLedger));
@@ -2278,15 +2295,16 @@ function App(){
       return{...t,status:isSuspense?"Suspense":"Confirmed"};
     }));
     setSelectedIds(new Set());
-  },[]);
+  },[isRowEditable]);
 
   const unconfirmAll=useCallback(()=>{
     setClassifiedTxns(prev=>prev.map(t=>{
+      if(!isRowEditable(t)) return t;
       const isSuspense = (t.selectedLedger||"").toLowerCase().includes("suspense");
       return{...t,status:isSuspense?"Suspense":t.confidence>80?"Auto-Assigned":"Suspense"};
     }));
     setSelectedIds(new Set());
-  },[]);
+  },[isRowEditable]);
 
   const toggleSelect=useCallback((id)=>{
     setSelectedIds(prev=>{const next=new Set(prev);if(next.has(id))next.delete(id);else next.add(id);return next;});
@@ -2574,13 +2592,12 @@ td,th{padding:8px 12px;vertical-align:middle}
     // When re-opening a saved project to clarify its suspense list, offer to
     // export ONLY the freshly-classified rows so the user imports just the
     // delta into Zoho instead of the full statement again.
-    let suspenseOnly=false;
-    if(editingProjectId && originalSuspenseKeys.size>0){
-      suspenseOnly=confirm(
-        "You re-opened this project to clarify suspense entries.\n\n"+
-        "OK = Export ONLY the newly-classified suspense entries (recommended — import just the delta into Zoho).\n"+
-        "Cancel = Export all sheets (full statement)."
-      );
+    // When re-opening a saved project, the user can only re-classify suspense
+    // entries — so the export is ALWAYS suspense-only. Other ledgers haven't
+    // changed, so re-exporting them would be redundant.
+    const suspenseOnly = !!(editingProjectId && originalSuspenseKeys.size > 0);
+    if (suspenseOnly) {
+      alert("Exporting only the newly-classified suspense entries — import this delta into Zoho. Other ledgers were not changed.");
     }
     const keyOf=(date,desc,debit,credit)=>(date||"")+"|"+(desc||"")+"|"+(debit||0)+"|"+(credit||0);
     const filterPairs=(rows)=>{
@@ -2717,13 +2734,15 @@ td,th{padding:8px 12px;vertical-align:middle}
     });
     setEditingProjectId(p.id);
     // Snapshot the suspense rows from the saved project. Next export uses
-    // these keys to offer a "suspense-only" Zoho import after the user
-    // re-classifies based on client clarifications.
+    // these keys to (a) restrict edits to suspense rows only, and (b) export
+    // ONLY the freshly-classified suspense entries (no other ledgers
+    // re-exported — they were already imported into Zoho).
     const sk=new Set();
     (d.suspense||[]).forEach(s=>{ sk.add((s.date||"")+"|"+(s.description||"")+"|"+(s.debit||0)+"|"+(s.credit||0)); });
     setOriginalSuspenseKeys(sk);
     setViewingProject(null);
     setReviewTab("expenses");
+    setFilterStatus("suspense"); // default filter to suspense — the only editable rows
     setStep(4);
   },[]);
 
@@ -3539,6 +3558,11 @@ td,th{padding:8px 12px;vertical-align:middle}
         </div>}
 
         {appMode==="bank"&&step===4&&(<div style={{display:"flex",flexDirection:"column",gap:20}}>
+          {editingProjectId && originalSuspenseKeys.size>0 && (
+            <div style={{background:"rgba(217,119,6,0.08)",border:"1px solid rgba(217,119,6,0.25)",color:"#a16207",fontSize:12,padding:"10px 14px",borderRadius:8}}>
+              ⚠ <strong>Suspense-only mode.</strong> You re-opened this project to clarify suspense entries. Only the rows that were originally Suspense can be re-classified. On export, only those re-classified entries will be downloaded — import the delta into Zoho.
+            </div>
+          )}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12}}>
             {[{label:"Expenses",val:expenseCount,color:"#dc2626",bg:"rgba(220,38,38,0.1)"},{label:"Revenue",val:revenueCount,color:"#16a34a",bg:"rgba(22,163,74,0.1)"},{label:"Auto-Assigned",val:stats.auto,color:"#6958C2",bg:"rgba(105,88,194,0.1)"},{label:"Suspense",val:stats.suspense,color:"#d97706",bg:"rgba(217,119,6,0.1)"},{label:"Confirmed",val:stats.confirmed,color:"#6958C2",bg:"rgba(105,88,194,0.1)"}].map(s=><div key={s.label} style={{background:s.bg,borderRadius:10,padding:"14px 16px",border:"1px solid "+s.color+"22"}}><div style={{fontSize:22,fontWeight:700,color:s.color,fontFamily:"'IBM Plex Mono',monospace"}}>{s.val}</div><div style={{fontSize:11,color:"#888888",marginTop:2}}>{s.label}</div></div>)}
           </div>
