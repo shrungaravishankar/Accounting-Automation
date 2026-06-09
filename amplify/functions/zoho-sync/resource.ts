@@ -16,7 +16,7 @@ export const zohoSync = defineFunction({
   timeoutSeconds: 60,
   resourceGroupName: 'data',
   environment: {
-    ZOHO_CLIENT_ID: '1000.QO9XLUC1QMJH4Q9CTYVYXRV9708DST',
+    ZOHO_CLIENT_ID: '1000.33B2MPKF1NI1OWO736YS1Q7YDJAJBX',
     // Sourced from Amplify Console → App settings → Environment variables.
     ZOHO_CLIENT_SECRET: process.env.ZOHO_CLIENT_SECRET || '',
     ZOHO_REGION: 'com'

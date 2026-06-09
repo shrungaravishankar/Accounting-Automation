@@ -16,7 +16,7 @@ export const zohoOauth = defineFunction({
   timeoutSeconds: 30,
   resourceGroupName: 'data',
   environment: {
-    ZOHO_CLIENT_ID: '1000.QO9XLUC1QMJH4Q9CTYVYXRV9708DST',
+    ZOHO_CLIENT_ID: '1000.33B2MPKF1NI1OWO736YS1Q7YDJAJBX',
     // Set this in Amplify Console → App settings → Environment variables.
     // Read at build/synth time and baked into the Lambda's env. Safer than
     // git but visible to anyone with CloudFormation access — rotate freely.
