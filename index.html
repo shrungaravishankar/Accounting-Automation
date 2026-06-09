@@ -2258,13 +2258,13 @@ function App(){
       setClientData(created.id,'version','free');
       try{localStorage.setItem('autoledger_active_client', created.id);}catch(e){}
 
-      // Best-effort initial sync.
+      // Best-effort initial sync. Sequential — three parallel Lambda calls
+      // each refresh their own access token, which trips Zoho's per-token
+      // rate limit (~30 refreshes/min) and returns 'Access Denied'.
       try {
-        const [coa, vendors, customers] = await Promise.all([
-          window.zohoFetch('chartofaccounts', org.organization_id),
-          window.zohoFetch('vendors', org.organization_id),
-          window.zohoFetch('customers', org.organization_id)
-        ]);
+        const coa = await window.zohoFetch('chartofaccounts', org.organization_id);
+        const vendors = await window.zohoFetch('vendors', org.organization_id);
+        const customers = await window.zohoFetch('customers', org.organization_id);
         if(coa && coa.length){ setChartOfAccounts(coa); setCoaFileName('Zoho: '+org.name); setClientData(created.id,'coa',coa); setClientData(created.id,'coa_name','Zoho: '+org.name); }
         if(vendors && vendors.length){ setVendors(vendors); setVendorFileName('Zoho: '+vendors.length+' vendors'); setClientData(created.id,'vendors',vendors); setClientData(created.id,'vendor_file','Zoho: '+vendors.length+' vendors'); }
         if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers'); }
@@ -2287,11 +2287,10 @@ function App(){
     if(!orgId){ alert('This client is not linked to a Zoho organization. Use "Import from Zoho" when creating it next time.'); return; }
     if(!confirm('Overwrite local Chart of Accounts, Vendors, and Customers with Zoho\'s current data?')) return;
     try {
-      const [coa, vendors, customers] = await Promise.all([
-        window.zohoFetch('chartofaccounts', orgId),
-        window.zohoFetch('vendors', orgId),
-        window.zohoFetch('customers', orgId)
-      ]);
+      // Sequential — see importZohoOrg for rationale.
+      const coa = await window.zohoFetch('chartofaccounts', orgId);
+      const vendors = await window.zohoFetch('vendors', orgId);
+      const customers = await window.zohoFetch('customers', orgId);
       setChartOfAccounts(coa||[]); setCoaFileName('Zoho: '+(c.name||'org')); setClientData(activeClientId,'coa',coa||[]); setClientData(activeClientId,'coa_name','Zoho: '+(c.name||'org'));
       setVendors(vendors||[]); setVendorFileName('Zoho: '+(vendors||[]).length+' vendors'); setClientData(activeClientId,'vendors',vendors||[]); setClientData(activeClientId,'vendor_file','Zoho: '+(vendors||[]).length+' vendors');
       setCustomers(customers||[]); setCustomerFileName('Zoho: '+(customers||[]).length+' customers'); setClientData(activeClientId,'customers',customers||[]); setClientData(activeClientId,'customer_file','Zoho: '+(customers||[]).length+' customers');

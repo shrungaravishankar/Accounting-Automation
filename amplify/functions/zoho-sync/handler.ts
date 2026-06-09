@@ -22,9 +22,20 @@ async function getAccessToken(refreshToken: string, region: string): Promise<str
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString()
   });
-  const j: any = await r.json();
+  const rawText = await r.text();
+  let j: any;
+  try { j = JSON.parse(rawText); }
+  catch (_) {
+    console.error('[zoho-sync] Non-JSON refresh response:', r.status, rawText.slice(0, 500));
+    throw new Error(`Zoho returned a non-JSON refresh response (HTTP ${r.status}): ${rawText.slice(0, 200)}`);
+  }
   if (!r.ok || !j.access_token) {
-    throw new Error('Could not refresh Zoho access token: ' + (j.error || j.error_description || r.statusText));
+    console.error('[zoho-sync] Refresh failed. HTTP', r.status, 'body=', JSON.stringify(j));
+    const msg = j.error || j.error_description || r.statusText;
+    const hint = (msg === 'invalid_code' || msg === 'invalid_grant' || /denied/i.test(msg))
+      ? ' — your refresh token is no longer valid. Click avatar → Connect to Zoho again to re-authorise.'
+      : '';
+    throw new Error('Could not refresh Zoho access token: ' + msg + hint);
   }
   return j.access_token;
 }
