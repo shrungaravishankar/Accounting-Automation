@@ -350,9 +350,9 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
       <h3>Current Users</h3>
       <p class="sub">All people invited to this workspace and their activation status.</p>
       <div id="users-list-container" style="max-height:340px; overflow-y:auto;"></div>
-      <div class="auth-row" style="justify-content:flex-end;">
-        <button class="auth-btn-secondary" id="users-close-btn" style="flex:0 0 auto; min-width:120px;">Close</button>
-        <button class="auth-btn" id="users-refresh-btn" style="flex:0 0 auto; min-width:120px;">Refresh</button>
+      <div class="auth-row">
+        <button class="auth-btn-secondary" id="users-close-btn">Close</button>
+        <button class="auth-btn" id="users-refresh-btn" style="width:auto;">Refresh</button>
       </div>
     </div>
 
@@ -364,16 +364,16 @@ button[title*="Upgrade"], button[title*="Downgrade"] { margin-right:54px !import
         <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Enable team visibility for existing Admins</div>
         <p class="sub" style="margin:0 0 8px 0;">One-shot migration that lets pre-existing Admins see their team's data. <strong>Run this first</strong> — without it, current Admins can't see Users' projects. New Admins invited after this deploy are configured automatically.</p>
         <div id="migrate-status" style="font-size:11px;color:#555555;margin-bottom:8px;"></div>
-        <button class="auth-btn" id="migrate-run-btn" style="flex:0 0 auto; min-width:200px; margin-bottom:14px;">Enable team visibility for Admins</button>
+        <button class="auth-btn" id="migrate-run-btn" style="width:auto; margin-bottom:14px;">Enable team visibility for Admins</button>
 
         <div style="font-size:12px;font-weight:600;color:#1a1a2e;margin-bottom:4px;">Super Admin: Backfill team tags</div>
         <p class="sub" style="margin:0 0 8px 0;">Stamps the <code>team</code> field on historical Projects, Clients, and Export Logs from each row's owner. Required for Admins to see data created before the per-team auth was added. Safe to run more than once.</p>
         <div id="backfill-status" style="font-size:11px;color:#555555;margin-bottom:8px;"></div>
-        <button class="auth-btn" id="backfill-run-btn" style="flex:0 0 auto; min-width:160px;">Run backfill</button>
+        <button class="auth-btn" id="backfill-run-btn" style="width:auto;">Run backfill</button>
       </div>
-      <div class="auth-row" style="justify-content:flex-end;">
-        <button class="auth-btn-secondary" id="unlock-close-btn" style="flex:0 0 auto; min-width:120px;">Close</button>
-        <button class="auth-btn" id="unlock-refresh-btn" style="flex:0 0 auto; min-width:120px;">Refresh</button>
+      <div class="auth-row">
+        <button class="auth-btn-secondary" id="unlock-close-btn">Close</button>
+        <button class="auth-btn" id="unlock-refresh-btn" style="width:auto;">Refresh</button>
       </div>
     </div>
   </div>
