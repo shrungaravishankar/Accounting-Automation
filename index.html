@@ -1837,6 +1837,13 @@ function App(){
   const[newClientVersion,setNewClientVersion]=useState("free");
   // Free-text filter for the landing-page client picker.
   const[clientSearch,setClientSearch]=useState("");
+  // Zoho org-picker modal state. Set when the Admin clicks "Import from Zoho";
+  // populated by the listing fetch; cleared on close or selection.
+  const[zohoPickerOpen,setZohoPickerOpen]=useState(false);
+  const[zohoOrgList,setZohoOrgList]=useState([]);
+  const[zohoPickerSearch,setZohoPickerSearch]=useState("");
+  const[zohoPickerLoading,setZohoPickerLoading]=useState(false);
+  const[zohoImportingOrgId,setZohoImportingOrgId]=useState("");
 
   // Per-session state (not persisted — resets on new upload)
   const[step,setStep]=useState(1);const[transactions,setTransactions]=useState([]);
@@ -2093,13 +2100,19 @@ function App(){
     setNewClientVersion("free");
   }, [newClientVersion]);
 
-  // Pull the list of organizations from the Admin's Zoho account, let them
-  // pick one, and create a Client linked to that org. Auto-syncs CoA + vendors
-  // + customers on success so the new client lands fully populated.
+  // Open the Zoho org picker modal. Fetches the list once, caches it in
+  // state, lets the Admin search + pick. The actual import happens in
+  // importZohoOrg below when they click a row.
   const importClientFromZoho = useCallback(async ()=>{
-    let orgs;
-    try { orgs = await window.zohoFetch('organizations'); }
-    catch(e){
+    setZohoPickerOpen(true);
+    setZohoPickerSearch("");
+    setZohoOrgList([]);
+    setZohoPickerLoading(true);
+    try {
+      const orgs = await window.zohoFetch('organizations');
+      setZohoOrgList(orgs||[]);
+    } catch(e){
+      setZohoPickerOpen(false);
       if(String(e.message||e).includes('Not connected')){
         if(confirm('You need to connect Zoho first. Go to the Connect Zoho menu now?')){
           window.zohoStartOAuth();
@@ -2107,38 +2120,46 @@ function App(){
         return;
       }
       alert('Could not list Zoho organizations: '+(e.message||e));
-      return;
+    } finally {
+      setZohoPickerLoading(false);
     }
-    if(!orgs.length){ alert('No Zoho organizations found under your account.'); return; }
-    const list = orgs.map((o,i)=>(i+1)+'. '+o.name+(o.country?' ('+o.country+')':''));
-    const pickStr = prompt('Pick a Zoho organization by number:\n\n'+list.join('\n'), '1');
-    if(!pickStr) return;
-    const idx = parseInt(pickStr,10)-1;
-    if(isNaN(idx) || idx<0 || idx>=orgs.length){ alert('Invalid selection.'); return; }
-    const org = orgs[idx];
-    let created;
-    try { created = await window.alClientCreate(org.name, org.organization_id); }
-    catch(e){ alert('Could not create client: '+(e.message||e)); return; }
-    const newClient = { id: created.id, name: created.name, version: 'free', zohoOrgId: org.organization_id };
-    setClients(prev=>[...prev, newClient]);
-    setActiveClientId(created.id);
-    setActiveClientName(created.name);
-    setClientVersion('free');
-    setClientData(created.id,'version','free');
-    try{localStorage.setItem('autoledger_active_client', created.id);}catch(e){}
+  },[]);
 
-    // Best-effort initial sync.
+  // Import the chosen Zoho org as a new Client, then auto-sync CoA + vendors
+  // + customers. Called from the picker modal's row click.
+  const importZohoOrg = useCallback(async (org)=>{
+    setZohoImportingOrgId(org.organization_id);
     try {
-      const [coa, vendors, customers] = await Promise.all([
-        window.zohoFetch('chartofaccounts', org.organization_id),
-        window.zohoFetch('vendors', org.organization_id),
-        window.zohoFetch('customers', org.organization_id)
-      ]);
-      if(coa && coa.length){ setChartOfAccounts(coa); setCoaFileName('Zoho: '+org.name); setClientData(created.id,'coa',coa); setClientData(created.id,'coa_name','Zoho: '+org.name); }
-      if(vendors && vendors.length){ setVendors(vendors); setVendorFileName('Zoho: '+vendors.length+' vendors'); setClientData(created.id,'vendors',vendors); setClientData(created.id,'vendor_file','Zoho: '+vendors.length+' vendors'); }
-      if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers'); }
-      alert('Client created from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
-    } catch(e){ alert('Client created but initial sync failed: '+(e.message||e)+'\n\nClick "Sync from Zoho" later to retry.'); }
+      let created;
+      try { created = await window.alClientCreate(org.name, org.organization_id); }
+      catch(e){ alert('Could not create client: '+(e.message||e)); return; }
+      const newClient = { id: created.id, name: created.name, version: 'free', zohoOrgId: org.organization_id };
+      setClients(prev=>[...prev, newClient]);
+      setActiveClientId(created.id);
+      setActiveClientName(created.name);
+      setClientVersion('free');
+      setClientData(created.id,'version','free');
+      try{localStorage.setItem('autoledger_active_client', created.id);}catch(e){}
+
+      // Best-effort initial sync.
+      try {
+        const [coa, vendors, customers] = await Promise.all([
+          window.zohoFetch('chartofaccounts', org.organization_id),
+          window.zohoFetch('vendors', org.organization_id),
+          window.zohoFetch('customers', org.organization_id)
+        ]);
+        if(coa && coa.length){ setChartOfAccounts(coa); setCoaFileName('Zoho: '+org.name); setClientData(created.id,'coa',coa); setClientData(created.id,'coa_name','Zoho: '+org.name); }
+        if(vendors && vendors.length){ setVendors(vendors); setVendorFileName('Zoho: '+vendors.length+' vendors'); setClientData(created.id,'vendors',vendors); setClientData(created.id,'vendor_file','Zoho: '+vendors.length+' vendors'); }
+        if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers'); }
+        setZohoPickerOpen(false);
+        alert('Client imported ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
+      } catch(e){
+        setZohoPickerOpen(false);
+        alert('Client created but initial sync failed: '+(e.message||e)+'\n\nClick "Sync from Zoho" later to retry.');
+      }
+    } finally {
+      setZohoImportingOrgId("");
+    }
   },[]);
 
   // Re-fetch CoA + vendors + customers from Zoho for the currently active
@@ -4229,6 +4250,86 @@ td,th{padding:8px 12px;vertical-align:middle}
 
         {/* Bill Entry locked message — disabled in this build */}
         </>)}
+
+        {/* ═══════════════ ZOHO ORGANIZATION PICKER ═══════════════ */}
+        {zohoPickerOpen && (
+          <div onClick={()=>{if(!zohoImportingOrgId)setZohoPickerOpen(false);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:9999,padding:20}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#ffffff",borderRadius:14,boxShadow:"0 16px 60px rgba(77,63,160,0.25)",maxWidth:620,width:"100%",maxHeight:"82vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+              {/* Header */}
+              <div style={{padding:"20px 24px 12px",borderBottom:"1px solid #e2e2ea"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+                  <div>
+                    <div style={{fontSize:18,fontWeight:700,color:"#1a1a2e"}}>Import client from Zoho</div>
+                    <div style={{fontSize:12,color:"#888888",marginTop:4}}>Pick an organization. Chart of Accounts, Vendors and Customers will sync automatically.</div>
+                  </div>
+                  <button onClick={()=>{if(!zohoImportingOrgId)setZohoPickerOpen(false);}} disabled={!!zohoImportingOrgId} style={{background:"none",border:"none",fontSize:22,color:"#888888",cursor:zohoImportingOrgId?"default":"pointer",padding:0,lineHeight:1}}>×</button>
+                </div>
+                <input
+                  type="text"
+                  value={zohoPickerSearch}
+                  onChange={e=>setZohoPickerSearch(e.target.value)}
+                  placeholder="🔍 Search organizations…"
+                  autoFocus
+                  style={{marginTop:14,width:"100%",background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 14px",color:"#1a1a2e",fontSize:13,outline:"none"}}
+                />
+              </div>
+
+              {/* Body */}
+              <div style={{flex:1,overflowY:"auto",padding:"8px 12px"}}>
+                {zohoPickerLoading ? (
+                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>Loading organizations from Zoho…</div>
+                ) : zohoOrgList.length === 0 ? (
+                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>No organizations found.</div>
+                ) : (
+                  (() => {
+                    const q = zohoPickerSearch.trim().toLowerCase();
+                    const filtered = q ? zohoOrgList.filter(o => (o.name||"").toLowerCase().includes(q) || (o.country||"").toLowerCase().includes(q)) : zohoOrgList;
+                    if (filtered.length === 0) {
+                      return <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>No matches for "{zohoPickerSearch}".</div>;
+                    }
+                    // Mark already-imported orgs.
+                    const importedIds = new Set(clients.map(c=>c.zohoOrgId).filter(Boolean));
+                    return filtered.map(org => {
+                      const isImported = importedIds.has(org.organization_id);
+                      const isImporting = zohoImportingOrgId === org.organization_id;
+                      const disabled = isImported || !!zohoImportingOrgId;
+                      return (
+                        <div key={org.organization_id}
+                          onClick={()=>{ if(!disabled) importZohoOrg(org); }}
+                          style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,padding:"12px 14px",margin:"4px 0",borderRadius:8,border:"1px solid "+(isImported?"#e2e2ea":"#e2e2ea"),background:isImporting?"rgba(105,88,194,0.06)":isImported?"#f8f9fc":"#ffffff",cursor:disabled?"default":"pointer",opacity:isImported?0.6:1,transition:"all 0.15s"}}
+                          onMouseEnter={e=>{ if(!disabled){ e.currentTarget.style.borderColor="#6958C2"; e.currentTarget.style.background="rgba(105,88,194,0.04)"; }}}
+                          onMouseLeave={e=>{ if(!disabled){ e.currentTarget.style.borderColor="#e2e2ea"; e.currentTarget.style.background="#ffffff"; }}}
+                        >
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:13,fontWeight:600,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{org.name}</div>
+                            <div style={{fontSize:11,color:"#888888",marginTop:2}}>
+                              {org.country || ""}{org.currency_code ? " · " + org.currency_code : ""}{org.is_default_org ? " · Default" : ""}
+                            </div>
+                          </div>
+                          <div style={{flex:"0 0 auto"}}>
+                            {isImporting ? (
+                              <span style={{fontSize:11,color:"#6958C2",fontWeight:600}}>Importing…</span>
+                            ) : isImported ? (
+                              <span style={{fontSize:10,color:"#16a34a",fontWeight:600,padding:"4px 10px",border:"1px solid rgba(22,163,74,0.3)",borderRadius:4,background:"rgba(22,163,74,0.06)"}}>✓ Imported</span>
+                            ) : (
+                              <span style={{fontSize:10,color:"#4D3FA0",fontWeight:600,padding:"4px 10px",border:"1px solid #4D3FA0",borderRadius:4}}>Import →</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()
+                )}
+              </div>
+
+              {/* Footer */}
+              <div style={{padding:"12px 24px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:11,color:"#888888"}}>{zohoOrgList.length} organization(s)</div>
+                <button onClick={()=>{if(!zohoImportingOrgId)setZohoPickerOpen(false);}} disabled={!!zohoImportingOrgId} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 18px",color:"#888888",fontSize:12,cursor:zohoImportingOrgId?"default":"pointer"}}>Close</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
