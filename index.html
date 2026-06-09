@@ -1745,9 +1745,11 @@ function App(){
   useEffect(()=>{ (async()=>{
     try {
       const list = await window.alClientList();
-      setClients(list);
+      console.log('[App useEffect] alClientList returned', list && list.length, 'clients', list);
+      window.__clients = list; // for ad-hoc debugging
+      setClients(list || []);
       let savedId = ""; try { savedId = localStorage.getItem("autoledger_active_client")||""; } catch(e){}
-      const c = list.find(x=>x.id===savedId);
+      const c = (list || []).find(x=>x.id===savedId);
       if (c) { setActiveClientName(c.name); setClientVersion(getClientData(c.id,"version","free")); }
       else if (savedId) { setActiveClientId(""); }
     } catch(e) { console.warn("Could not load clients from cloud:", e); }
@@ -2976,6 +2978,8 @@ td,th{padding:8px 12px;vertical-align:middle}
               <h2 style={{fontSize:26,fontWeight:700,letterSpacing:"-0.02em",background:"linear-gradient(135deg,#4D3FA0,#6958C2)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Select or Create a Client</h2>
               <p style={{color:"#888888",fontSize:13,marginTop:6,maxWidth:400}}>Each client has their own Chart of Accounts, bank ledger, reference database, and learned classification rules.</p>
             </div>
+
+            <div style={{fontSize:11,color:"#888888"}}>{clients.length} client(s) loaded for you</div>
 
             {clients.length > 0 && (
               <div style={{width:"100%",maxWidth:720,display:"flex",justifyContent:"center"}}>
