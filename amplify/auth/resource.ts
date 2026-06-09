@@ -27,5 +27,9 @@ export const auth = defineAuth({
     // Members inherit their Team Lead's team-<sub>.
     'custom:team': { dataType: 'String', mutable: true, minLen: 0, maxLen: 80 }
   },
-  groups: ['admin', 'staff']
+  // 'admin' = Super Admin. 'team-lead' = Admin (flat group of all team leads,
+  // each also in their own team-<sub> Cognito group). 'staff' = User. Each
+  // group needs to be declared here so CDK provisions an IAM role for it;
+  // storage and data rules can then reference the group by name.
+  groups: ['admin', 'team-lead', 'staff']
 });
