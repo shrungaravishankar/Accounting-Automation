@@ -14,33 +14,30 @@ export const storage = defineStorage({
       allow.entity('identity').to(['read', 'write', 'delete']),
       // Amplify Gen2 attaches entity-based policies only to the default
       // auth role; users in Cognito groups assume group-specific roles
-      // that lack the rule. Grant each group explicitly so every
-      // authenticated user can read/write their own path. The {entity_id}
-      // template still scopes uploads to the caller's identityId at the
-      // application layer (Project rows + projectSave hardcode it).
-      allow.groups(['admin', 'staff', 'team-lead']).to(['read', 'write', 'delete']),
+      // that lack the rule. Grant the two CDK-managed groups explicitly.
+      // Team-lead Admins are also members of 'staff' (set by invite-user),
+      // so they assume the staff role and pick this rule up automatically.
+      allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
     // Saved-project payloads (transactions + journal entries) as JSON blobs.
     'projects/{entity_id}/*': [
       allow.entity('identity').to(['read', 'write', 'delete']),
       // Amplify Gen2 attaches entity-based policies only to the default
       // auth role; users in Cognito groups assume group-specific roles
-      // that lack the rule. Grant each group explicitly so every
-      // authenticated user can read/write their own path. The {entity_id}
-      // template still scopes uploads to the caller's identityId at the
-      // application layer (Project rows + projectSave hardcode it).
-      allow.groups(['admin', 'staff', 'team-lead']).to(['read', 'write', 'delete']),
+      // that lack the rule. Grant the two CDK-managed groups explicitly.
+      // Team-lead Admins are also members of 'staff' (set by invite-user),
+      // so they assume the staff role and pick this rule up automatically.
+      allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
     // Per-client working config + global reference DB (JSON blobs).
     'config/{entity_id}/*': [
       allow.entity('identity').to(['read', 'write', 'delete']),
       // Amplify Gen2 attaches entity-based policies only to the default
       // auth role; users in Cognito groups assume group-specific roles
-      // that lack the rule. Grant each group explicitly so every
-      // authenticated user can read/write their own path. The {entity_id}
-      // template still scopes uploads to the caller's identityId at the
-      // application layer (Project rows + projectSave hardcode it).
-      allow.groups(['admin', 'staff', 'team-lead']).to(['read', 'write', 'delete']),
+      // that lack the rule. Grant the two CDK-managed groups explicitly.
+      // Team-lead Admins are also members of 'staff' (set by invite-user),
+      // so they assume the staff role and pick this rule up automatically.
+      allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
   }),
 });

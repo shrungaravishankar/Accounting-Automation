@@ -27,9 +27,10 @@ export const auth = defineAuth({
     // Members inherit their Team Lead's team-<sub>.
     'custom:team': { dataType: 'String', mutable: true, minLen: 0, maxLen: 80 }
   },
-  // 'admin' = Super Admin. 'team-lead' = Admin (flat group of all team leads,
-  // each also in their own team-<sub> Cognito group). 'staff' = User. Each
-  // group needs to be declared here so CDK provisions an IAM role for it;
-  // storage and data rules can then reference the group by name.
-  groups: ['admin', 'team-lead', 'staff']
+  // Only CDK-managed groups go here. 'team-lead' is a runtime-only group
+  // created by the invite-user / manage-user Lambdas — it carries no IAM
+  // role (Lambdas authorise off the JWT cognito:groups claim, not the
+  // assumed role), so declaring it here would clash with the existing
+  // runtime group and fail the deploy.
+  groups: ['admin', 'staff']
 });
