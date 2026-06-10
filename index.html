@@ -499,7 +499,7 @@ window.alClientList = async () => {
       const r = await dataClient.queries.listTeamData({ kind: 'clients' });
       const d = __unwrapJson(r.data);
       if (d && !d.error) {
-        return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team }));
+        return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team, createdAt: c.createdAt }));
       }
       console.warn('[alClientList] Lambda returned error, falling back:', d && d.error);
     } catch (e) {
@@ -508,7 +508,7 @@ window.alClientList = async () => {
   }
   const res = await dataClient.models.Client.list({ limit: 500 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
-  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team }));
+  return (res.data || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team, createdAt: c.createdAt }));
 };
 window.alClientCreate = async (name, zohoOrgId) => {
   const u = window.AUTH_USER || {};
@@ -3360,7 +3360,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                       </div>
                     )}
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea",gap:6}}>
-                      <span style={{fontSize:10,color:"#cccccc"}}>Created {new Date(c.created).toLocaleDateString()}</span>
+                      <span style={{fontSize:10,color:"#cccccc"}}>Created {(()=>{ const t=c.createdAt||c.created; return t ? new Date(t).toLocaleDateString() : '—'; })()}</span>
                       <div style={{display:"flex",gap:6}}>
                         {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
                           <span onClick={(e)=>{e.stopPropagation();openAssignDialog(c.id);}} title="Assign Users to this client" style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(77,63,160,0.08)"}}>👥 Assign</span>

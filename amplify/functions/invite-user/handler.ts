@@ -44,7 +44,10 @@ export const handler = async (event: InviteEvent) => {
 
   const callerGroups = event.identity?.groups || [];
   const isAdmin = callerGroups.includes('admin');
-  const callerTeamGroup = callerGroups.find(g => g.startsWith('team-'));
+  // Skip the flat 'team-lead' group — it's a role marker, not a team.
+  // Without this, every User invited by an Admin gets custom:team='team-lead'
+  // instead of the Admin's actual team-<sub>, breaking client assignment.
+  const callerTeamGroup = callerGroups.find(g => g.startsWith('team-') && g !== 'team-lead');
   const isTeamLead = !isAdmin && !!callerTeamGroup;
 
   if (!isAdmin && !isTeamLead) {

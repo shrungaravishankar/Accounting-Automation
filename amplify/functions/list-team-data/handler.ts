@@ -100,23 +100,25 @@ export const handler = async (event: Event) => {
     const visible = isSuperAdmin
       ? items
       : items.filter(r => {
-          if (r.team !== teamGroup) return false;
-          // Extra restriction for Users (staff): clients must be explicitly
-          // assigned to them, or they must own the row. Admins see all rows
-          // in their team without needing to be in assignedTo.
+          // For Users (staff), the filter is purely email-based:
+          //   - clients: must own OR be in assignedTo
+          //   - projects: must own by ownerEmail
+          // We DON'T require r.team === teamGroup for staff, because their
+          // custom:team attribute may be stale or incorrect. The explicit
+          // assignedTo / ownerEmail check is the authoritative source —
+          // and the Admin can only assign Users they can see, so this
+          // can't be used to leak data across teams.
           if (isStaff && kind === 'clients') {
             const owns = (r.ownerEmail || '').toLowerCase() === callerEmail;
             const assignedCsv = (r.assignedTo || '').toLowerCase();
             const assignedTo = assignedCsv.split(',').map((s: string) => s.trim()).filter(Boolean);
             return owns || assignedTo.includes(callerEmail);
           }
-          // For Users listing projects, only return ones they "own" by
-          // ownerEmail (covers inherited projects after a replace-user run
-          // even though the Cognito sub doesn't match anymore).
           if (isStaff && kind === 'projects') {
             return (r.ownerEmail || '').toLowerCase() === callerEmail;
           }
-          return true;
+          // Admins use the team-<sub> match.
+          return r.team === teamGroup;
         });
     return JSON.stringify({ error: null, items: visible });
   } catch (err: any) {
