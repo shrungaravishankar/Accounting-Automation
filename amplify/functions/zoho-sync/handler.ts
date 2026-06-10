@@ -6,7 +6,7 @@ import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 type Event = {
-  arguments: { kind: string; organizationId?: string };
+  arguments: { kind: string; organizationId?: string; payload?: string };
   identity?: { username?: string; sub?: string; claims?: Record<string, any> };
 };
 
@@ -49,6 +49,26 @@ async function zohoGet(path: string, accessToken: string, region: string, params
   const j: any = await r.json();
   if (!r.ok || j.code !== 0) {
     throw new Error('Zoho API ' + path + ' failed: ' + (j.message || r.statusText));
+  }
+  return j;
+}
+
+async function zohoPost(path: string, accessToken: string, region: string, params: Record<string, string>, body: any) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `https://www.zohoapis.${region}/books/v3/${path}${qs ? '?' + qs : ''}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Zoho-oauthtoken ' + accessToken,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+  const j: any = await r.json();
+  if (!r.ok || j.code !== 0) {
+    // Zoho returns its own error code in j.code (0 = success) and j.message
+    // with a human-readable reason. Surface both to the caller.
+    throw new Error((j.message || r.statusText) + (j.code ? ' [zoho code ' + j.code + ']' : ''));
   }
   return j;
 }
@@ -103,10 +123,8 @@ export const handler = async (event: Event) => {
     if (!orgId) return JSON.stringify({ error: 'organizationId is required for kind=' + kind });
 
     if (kind === 'chartofaccounts') {
-      // Paginate — chart of accounts can be 100s of entries.
       const all: any[] = [];
       let page = 1;
-      // Zoho's per_page max is 200 for COA on most accounts.
       while (true) {
         const j = await zohoGet('chartofaccounts', accessToken, region, {
           organization_id: orgId,
@@ -116,12 +134,13 @@ export const handler = async (event: Event) => {
         all.push(...(j.chartofaccounts || []));
         if (!j.page_context || !j.page_context.has_more_page) break;
         page++;
-        if (page > 20) break; // hard cap
+        if (page > 20) break;
       }
       const accounts = all.map((a: any) => ({
         name: a.account_name,
         type: a.account_type || '',
-        code: a.account_code || ''
+        code: a.account_code || '',
+        id: a.account_id  // NEW — needed for push
       }));
       return JSON.stringify({ error: null, items: accounts });
     }
@@ -142,8 +161,66 @@ export const handler = async (event: Event) => {
         page++;
         if (page > 20) break;
       }
-      const names = all.map((c: any) => c.contact_name).filter(Boolean);
-      return JSON.stringify({ error: null, items: names });
+      // Return both names (UI compat) and an id map for push.
+      const names: string[] = [];
+      const idByName: Record<string, string> = {};
+      for (const c of all) {
+        if (c.contact_name && c.contact_id) {
+          names.push(c.contact_name);
+          idByName[c.contact_name] = c.contact_id;
+        }
+      }
+      return JSON.stringify({ error: null, items: names, idByName });
+    }
+
+    // Open invoices for a given org — used to link Payment Received entries
+    // to specific invoices instead of creating unapplied payments.
+    if (kind === 'openInvoices') {
+      const all: any[] = [];
+      let page = 1;
+      while (true) {
+        const j = await zohoGet('invoices', accessToken, region, {
+          organization_id: orgId,
+          status: 'unpaid,partially_paid,overdue,sent',
+          per_page: '200',
+          page: String(page)
+        });
+        all.push(...(j.invoices || []));
+        if (!j.page_context || !j.page_context.has_more_page) break;
+        page++;
+        if (page > 20) break;
+      }
+      const invoices = all
+        .filter((i: any) => Number(i.balance) > 0)
+        .map((i: any) => ({
+          invoice_id: i.invoice_id,
+          invoice_number: i.invoice_number,
+          customer_id: i.customer_id,
+          customer_name: i.customer_name,
+          date: i.date,
+          due_date: i.due_date,
+          total: Number(i.total),
+          balance: Number(i.balance),
+          status: i.status
+        }));
+      return JSON.stringify({ error: null, items: invoices });
+    }
+
+    // Push operations — accept a JSON payload string and POST to Zoho.
+    // Each push returns the Zoho response so the frontend can show the
+    // created resource's id and surface specific errors per entry.
+    if (kind === 'pushExpense' || kind === 'pushJournal' || kind === 'pushPayment') {
+      const payloadStr = event.arguments?.payload || '';
+      let payload: any;
+      try { payload = JSON.parse(payloadStr); }
+      catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      const path = kind === 'pushExpense' ? 'expenses'
+        : kind === 'pushJournal' ? 'journals'
+        : 'customerpayments';
+      const j = await zohoPost(path, accessToken, region, { organization_id: orgId }, payload);
+      // Surface the new resource id where applicable.
+      const resourceId = j.expense?.expense_id || j.journal?.journal_id || j.payment?.payment_id || null;
+      return JSON.stringify({ error: null, success: true, id: resourceId, raw: j });
     }
 
     return JSON.stringify({ error: 'unknown kind: ' + kind });
