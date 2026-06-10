@@ -97,29 +97,49 @@ export const handler = async (event: Event) => {
       items = await scanAll(tableName);
     }
 
+    // Build a set of email-like identifiers for the caller so we tolerate
+    // missing claims.email + case differences.
+    const callerIdentifiers = new Set<string>();
+    if (callerEmail) callerIdentifiers.add(callerEmail);
+    if (event.identity?.username) callerIdentifiers.add(event.identity.username.toLowerCase());
+
+    // Fetch from Cognito as the source of truth for the caller's email
+    // (covers cases where AppSync didn't pass claims.email).
+    if (isStaff && process.env.USER_POOL_ID && event.identity?.username) {
+      try {
+        const u = await cognito.send(new AdminGetUserCommand({
+          UserPoolId: process.env.USER_POOL_ID,
+          Username: event.identity.username
+        }));
+        const e = u.UserAttributes?.find(a => a.Name === 'email')?.Value;
+        if (e) callerIdentifiers.add(e.toLowerCase());
+      } catch (_) {}
+    }
+
+    const idList = Array.from(callerIdentifiers);
+    console.log('[list-team-data] caller identifiers:', JSON.stringify(idList));
+
     const visible = isSuperAdmin
       ? items
       : items.filter(r => {
-          // For Users (staff), the filter is purely email-based:
-          //   - clients: must own OR be in assignedTo
-          //   - projects: must own by ownerEmail
-          // We DON'T require r.team === teamGroup for staff, because their
-          // custom:team attribute may be stale or incorrect. The explicit
-          // assignedTo / ownerEmail check is the authoritative source —
-          // and the Admin can only assign Users they can see, so this
-          // can't be used to leak data across teams.
           if (isStaff && kind === 'clients') {
-            const owns = (r.ownerEmail || '').toLowerCase() === callerEmail;
+            const ownerLower = (r.ownerEmail || '').toLowerCase();
             const assignedCsv = (r.assignedTo || '').toLowerCase();
             const assignedTo = assignedCsv.split(',').map((s: string) => s.trim()).filter(Boolean);
-            return owns || assignedTo.includes(callerEmail);
+            const owns = idList.some(i => i === ownerLower);
+            const isAssigned = idList.some(i => assignedTo.includes(i));
+            const pass = owns || isAssigned;
+            console.log('[list-team-data] client', r.name, 'id', r.id, 'team', r.team, 'ownerEmail', r.ownerEmail, 'assignedTo', r.assignedTo, '-> owns:', owns, 'assigned:', isAssigned, 'pass:', pass);
+            return pass;
           }
           if (isStaff && kind === 'projects') {
-            return (r.ownerEmail || '').toLowerCase() === callerEmail;
+            const ownerLower = (r.ownerEmail || '').toLowerCase();
+            return idList.some(i => i === ownerLower);
           }
           // Admins use the team-<sub> match.
           return r.team === teamGroup;
         });
+    console.log('[list-team-data] visible count:', visible.length, 'of', items.length);
     return JSON.stringify({ error: null, items: visible });
   } catch (err: any) {
     return JSON.stringify({ error: err?.message || 'list-team-data failed', items: [] });
