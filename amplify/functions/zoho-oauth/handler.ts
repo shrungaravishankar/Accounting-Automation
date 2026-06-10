@@ -27,13 +27,6 @@ export const handler = async (event: Event) => {
   const redirectUri = process.env.ZOHO_REDIRECT_URI;
   const tableName = process.env.ZOHOCRED_TABLE_NAME;
 
-  // Log every env var presence so we know exactly which one is missing.
-  console.log('[zoho-oauth env] ZOHO_CLIENT_ID:', clientId ? 'set(' + clientId.length + ')' : 'MISSING');
-  console.log('[zoho-oauth env] ZOHO_CLIENT_SECRET:', clientSecret ? 'set(' + clientSecret.length + ', prefix=' + clientSecret.slice(0, 4) + ')' : 'MISSING');
-  console.log('[zoho-oauth env] ZOHO_REDIRECT_URI:', redirectUri || 'MISSING');
-  console.log('[zoho-oauth env] ZOHOCRED_TABLE_NAME:', tableName || 'MISSING');
-  console.log('[zoho-oauth env] ZOHO_REGION:', region);
-
   const missing: string[] = [];
   if (!clientId) missing.push('ZOHO_CLIENT_ID');
   if (!clientSecret) missing.push('ZOHO_CLIENT_SECRET');
@@ -42,15 +35,6 @@ export const handler = async (event: Event) => {
   if (missing.length) {
     return JSON.stringify({ success: false, message: 'Server misconfiguration — missing: ' + missing.join(', ') });
   }
-
-  // Diagnostic: don't reveal the secret, but tell us if it's actually set
-  // and what shape it has. process.env.ZOHO_CLIENT_SECRET should be a ~42-char
-  // hex string. If it's empty, undefined, or starts with '${' the Amplify
-  // secret reference wasn't resolved at deploy time.
-  const secretFingerprint = clientSecret
-    ? `len=${clientSecret.length}, prefix=${clientSecret.slice(0, 4)}…`
-    : 'MISSING';
-  console.log('[zoho-oauth] redirect_uri=', redirectUri, ' clientId=', clientId, ' region=', region, ' secret=', secretFingerprint);
 
   try {
     // Exchange the auth code for a refresh + access token.

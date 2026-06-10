@@ -313,6 +313,7 @@
     </div>
     <button id="auth-manage-users-btn" class="auth-dd-item auth-hidden" type="button" role="menuitem">Manage Users</button>
     <button id="auth-zoho-connect-btn" class="auth-dd-item auth-hidden" type="button" role="menuitem">🔗 Connect to Zoho</button>
+    <button id="auth-zoho-disconnect-btn" class="auth-dd-item auth-hidden" type="button" role="menuitem">🔌 Disconnect Zoho</button>
     <button id="auth-signout-btn" class="auth-dd-item" type="button" role="menuitem">Sign out</button>
   </div>
 </div>
@@ -489,11 +490,9 @@ function __unwrapJson(d) {
 
 window.alClientList = async () => {
   const u = window.AUTH_USER || {};
-  // Admins AND Users now route through listTeamData. The Lambda filters:
-  //   - Super Admin (admin Cognito group): every row.
-  //   - Admin (team-<sub> Cognito group): every row matching their team.
-  //   - User (staff Cognito group): rows matching their custom:team AND
-  //     where their email is in assignedTo (or they own the row).
+  // Admins AND Users go through listTeamData (server-side scoping).
+  // Super Admin falls through to a direct Client.list (admin Cognito-group
+  // rule lets them read everything).
   if (u.role === 'team-lead' || u.role === 'staff') {
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'clients' });
@@ -501,10 +500,7 @@ window.alClientList = async () => {
       if (d && !d.error) {
         return (d.items || []).map(c => ({ id: c.id, name: c.name, ownerEmail: c.ownerEmail, ownerName: c.ownerName, zohoOrgId: c.zohoOrgId, assignedTo: c.assignedTo, team: c.team, createdAt: c.createdAt }));
       }
-      console.warn('[alClientList] Lambda returned error, falling back:', d && d.error);
-    } catch (e) {
-      console.warn('[alClientList] Lambda call threw, falling back:', e && e.message || e);
-    }
+    } catch (_) { /* fall through to direct list */ }
   }
   const res = await dataClient.models.Client.list({ limit: 500 });
   if (res.errors?.length) throw new Error(res.errors[0].message);
@@ -596,20 +592,13 @@ window.projectSave = async (p) => {
 window.projectList = async (clientId) => {
   const u = window.AUTH_USER || {};
   if (u.role === 'team-lead') {
-    console.log('[projectList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'projects', clientId });
       const d = __unwrapJson(r.data);
-      console.log('[projectList] listTeamData parsed:', d, 'items len:', d && d.items && d.items.length);
       if (d && !d.error) {
         return (d.items || []).sort((a, b) => (b.exportedAt || '').localeCompare(a.exportedAt || ''));
       }
-      console.warn('[projectList] Lambda returned error, falling back to direct list:', d && d.error);
-    } catch (e) {
-      console.warn('[projectList] Lambda call threw, falling back:', e && e.message || e);
-    }
-    // Fallback: direct Project.list (will only return rows the schema allows
-    // — owner-scoped — but that's still more useful than nothing).
+    } catch (_) { /* fall through to direct list */ }
   }
   const res = await dataClient.models.Project.list({
     filter: { clientId: { eq: clientId } },
@@ -696,18 +685,13 @@ window.projectRequestUnlock = async (project, reason) => {
 window.unlockRequestList = async () => {
   const u = window.AUTH_USER || {};
   if (u.role === 'team-lead') {
-    console.log('[unlockRequestList] Admin role=team-lead, team=', u.team, 'calling listTeamData…');
     try {
       const r = await dataClient.queries.listTeamData({ kind: 'unlockRequests' });
       const d = __unwrapJson(r.data);
-      console.log('[unlockRequestList] listTeamData parsed:', d, 'items len:', d && d.items && d.items.length);
       if (d && !d.error) {
         return (d.items || []).sort((a, b) => (b.requestedAt || '').localeCompare(a.requestedAt || ''));
       }
-      console.warn('[unlockRequestList] Lambda returned error, falling back to direct list:', d && d.error);
-    } catch (e) {
-      console.warn('[unlockRequestList] Lambda call threw, falling back:', e && e.message || e);
-    }
+    } catch (_) { /* fall through to direct list */ }
   }
   const res = await dataClient.models.UnlockRequest.list({
     filter: { status: { eq: 'pending' } },
@@ -833,6 +817,21 @@ window.zohoCompleteOAuth = async (code) => {
   return d;
 };
 
+// Disconnect this user from Zoho — deletes their stored refresh token.
+// Owner-scoped: ZohoCredentials.list() only returns the caller's own row
+// thanks to allow.owner() in the schema. Safe even if they're not connected
+// (returns gracefully).
+window.zohoDisconnect = async () => {
+  const res = await dataClient.models.ZohoCredentials.list({ limit: 5 });
+  if (res.errors?.length) throw new Error(res.errors[0].message);
+  const rows = res.data || [];
+  if (rows.length === 0) return { deleted: 0 };
+  for (const r of rows) {
+    await dataClient.models.ZohoCredentials.delete({ id: r.id });
+  }
+  return { deleted: rows.length };
+};
+
 // Generic Zoho-sync helper. kind: 'organizations'|'chartofaccounts'|'vendors'|'customers'.
 // organizationId is required for everything except 'organizations'.
 window.zohoFetch = async (kind, organizationId) => {
@@ -944,17 +943,29 @@ function populateUserMenu() {
   if (u.role === 'admin' || u.role === 'team-lead') {
     $('auth-manage-users-btn').classList.remove('auth-hidden');
     $('auth-zoho-connect-btn').classList.remove('auth-hidden');
+    $('auth-zoho-disconnect-btn').classList.remove('auth-hidden');
   } else {
     $('auth-manage-users-btn').classList.add('auth-hidden');
     $('auth-zoho-connect-btn').classList.add('auth-hidden');
+    $('auth-zoho-disconnect-btn').classList.add('auth-hidden');
   }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const btn = document.getElementById('auth-zoho-connect-btn');
-  if (btn) btn.addEventListener('click', () => {
+  const connectBtn = document.getElementById('auth-zoho-connect-btn');
+  if (connectBtn) connectBtn.addEventListener('click', () => {
     if (!confirm('You will be redirected to Zoho to grant access to your Books data. Continue?')) return;
     window.zohoStartOAuth();
+  });
+  const disconnectBtn = document.getElementById('auth-zoho-disconnect-btn');
+  if (disconnectBtn) disconnectBtn.addEventListener('click', async () => {
+    if (!confirm('Disconnect your Zoho account?\n\nNew imports and sync will stop working until you Connect again. Existing imported clients keep their data.')) return;
+    try {
+      const r = await window.zohoDisconnect();
+      alert(r.deleted ? 'Disconnected from Zoho.' : 'No Zoho connection was active.');
+    } catch (e) {
+      alert('Could not disconnect: ' + (e.message || e));
+    }
   });
 });
 
@@ -1932,8 +1943,6 @@ function App(){
   useEffect(()=>{ (async()=>{
     try {
       const list = await window.alClientList();
-      console.log('[App useEffect] alClientList returned', list && list.length, 'clients', list);
-      window.__clients = list; // for ad-hoc debugging
       setClients(list || []);
       let savedId = ""; try { savedId = localStorage.getItem("autoledger_active_client")||""; } catch(e){}
       const c = (list || []).find(x=>x.id===savedId);
@@ -3324,8 +3333,6 @@ td,th{padding:8px 12px;vertical-align:middle}
               <h2 style={{fontSize:26,fontWeight:700,letterSpacing:"-0.02em",background:"linear-gradient(135deg,#4D3FA0,#6958C2)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Select or Create a Client</h2>
               <p style={{color:"#888888",fontSize:13,marginTop:6,maxWidth:400}}>Each client has their own Chart of Accounts, bank ledger, reference database, and learned classification rules.</p>
             </div>
-
-            <div style={{fontSize:11,color:"#888888"}}>{clients.length} client(s) loaded for you</div>
 
             {clients.length > 0 && (
               <div style={{width:"100%",maxWidth:720,display:"flex",justifyContent:"center"}}>

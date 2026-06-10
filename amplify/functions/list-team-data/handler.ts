@@ -54,14 +54,12 @@ export const handler = async (event: Event) => {
         Username: callerEmail
       }));
       teamFromClaim = u.UserAttributes?.find(a => a.Name === 'custom:team')?.Value || '';
-      console.log('[list-team-data] Fetched custom:team from Cognito for', callerEmail, '->', teamFromClaim);
     } catch (err: any) {
       console.warn('[list-team-data] AdminGetUser failed for', callerEmail, err?.message);
     }
   }
 
   const teamGroup = teamFromGroup || teamFromClaim;
-  console.log('[list-team-data] callerEmail=', callerEmail, 'groups=', JSON.stringify(groups), 'teamGroup=', teamGroup, 'isStaff=', isStaff, 'kind=', event.arguments?.kind);
 
   if (!isSuperAdmin && !teamGroup) {
     return JSON.stringify({ error: 'Not authorized to list team data.', items: [] });
@@ -117,7 +115,6 @@ export const handler = async (event: Event) => {
     }
 
     const idList = Array.from(callerIdentifiers);
-    console.log('[list-team-data] caller identifiers:', JSON.stringify(idList));
 
     const visible = isSuperAdmin
       ? items
@@ -128,9 +125,7 @@ export const handler = async (event: Event) => {
             const assignedTo = assignedCsv.split(',').map((s: string) => s.trim()).filter(Boolean);
             const owns = idList.some(i => i === ownerLower);
             const isAssigned = idList.some(i => assignedTo.includes(i));
-            const pass = owns || isAssigned;
-            console.log('[list-team-data] client', r.name, 'id', r.id, 'team', r.team, 'ownerEmail', r.ownerEmail, 'assignedTo', r.assignedTo, '-> owns:', owns, 'assigned:', isAssigned, 'pass:', pass);
-            return pass;
+            return owns || isAssigned;
           }
           if (isStaff && kind === 'projects') {
             const ownerLower = (r.ownerEmail || '').toLowerCase();
@@ -139,7 +134,6 @@ export const handler = async (event: Event) => {
           // Admins use the team-<sub> match.
           return r.team === teamGroup;
         });
-    console.log('[list-team-data] visible count:', visible.length, 'of', items.length);
     return JSON.stringify({ error: null, items: visible });
   } catch (err: any) {
     return JSON.stringify({ error: err?.message || 'list-team-data failed', items: [] });
