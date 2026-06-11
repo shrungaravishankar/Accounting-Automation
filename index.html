@@ -832,14 +832,31 @@ window.zohoDisconnect = async () => {
   return { deleted: rows.length };
 };
 
-// Generic Zoho-sync helper. kind: 'organizations'|'chartofaccounts'|'vendors'|'customers'.
+// Generic Zoho-sync helper. kind: 'organizations'|'chartofaccounts'|'vendors'|'customers'|'openInvoices'.
 // organizationId is required for everything except 'organizations'.
+// Returns the items array. For vendors/customers the array also carries an
+// `_idByName` property (name → Zoho contact_id) used by Push to Zoho.
 window.zohoFetch = async (kind, organizationId) => {
   const r = await dataClient.queries.zohoFetch({ kind, organizationId });
   const d = __unwrapJson(r.data);
   if (!d) throw new Error('Empty response from Zoho.');
   if (d.error) throw new Error(d.error);
-  return d.items || [];
+  const items = d.items || [];
+  if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
+  return items;
+};
+
+// Push an entry to Zoho. kind: 'pushExpense'|'pushJournal'|'pushPayment'.
+// payload is a plain object that will be JSON-stringified for the Lambda.
+// Returns { id, raw } on success; throws on Zoho error with the message.
+window.zohoPush = async (kind, organizationId, payload) => {
+  const r = await dataClient.mutations.zohoPush({
+    kind, organizationId, payload: JSON.stringify(payload || {})
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response from Zoho push.');
+  if (d.error) throw new Error(d.error);
+  return { id: d.id || null, raw: d.raw || null };
 };
 
 window.projectDelete = async (id, dataPath) => {
@@ -850,7 +867,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -1999,6 +2016,19 @@ function App(){
   const[showAddVendor,setShowAddVendor]=useState(false);const[newVendorName,setNewVendorName]=useState("");
   const[showAddCustomer,setShowAddCustomer]=useState(false);const[newCustomerName,setNewCustomerName]=useState("");
   const[contactDropdownOpen,setContactDropdownOpen]=useState({});const[contactSearch,setContactSearch]=useState({});
+  // Open-invoices cache for the active client's Zoho org. Lazy-loaded the
+  // first time a Payment Received row needs an invoice picker. Indexed by
+  // customer name for quick filtering.
+  const[openInvoices,setOpenInvoices]=useState([]);
+  const[openInvoicesLoading,setOpenInvoicesLoading]=useState(false);
+  const[openInvoicesError,setOpenInvoicesError]=useState("");
+  const[invoicePickerOpen,setInvoicePickerOpen]=useState({});
+  // Push-to-Zoho state — drives Step 6's progress UI + failure modal.
+  const[pushing,setPushing]=useState(false);
+  const[pushProgress,setPushProgress]=useState({done:0,total:0,label:""});
+  const[pushFailures,setPushFailures]=useState([]);
+  const[pushSuccessCount,setPushSuccessCount]=useState(0);
+  const[pushModalOpen,setPushModalOpen]=useState(false);
   const[descGroup,setDescGroup]=useState("");
   const bankInputRef=useRef(null);const coaInputRef=useRef(null);const dropdownRefs=useRef({});const refFileRef=useRef(null);
   const vendorInputRef=useRef(null);const customerInputRef=useRef(null);
@@ -2274,9 +2304,12 @@ function App(){
         const coa = await window.zohoFetch('chartofaccounts', org.organization_id);
         const vendors = await window.zohoFetch('vendors', org.organization_id);
         const customers = await window.zohoFetch('customers', org.organization_id);
-        if(coa && coa.length){ setChartOfAccounts(coa); setCoaFileName('Zoho: '+org.name); setClientData(created.id,'coa',coa); setClientData(created.id,'coa_name','Zoho: '+org.name); }
-        if(vendors && vendors.length){ setVendors(vendors); setVendorFileName('Zoho: '+vendors.length+' vendors'); setClientData(created.id,'vendors',vendors); setClientData(created.id,'vendor_file','Zoho: '+vendors.length+' vendors'); }
-        if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers'); }
+        if(coa && coa.length){ setChartOfAccounts(coa); setCoaFileName('Zoho: '+org.name); setClientData(created.id,'coa',coa); setClientData(created.id,'coa_name','Zoho: '+org.name);
+          const accountIds = {}; coa.forEach(a=>{ if(a && a.name && a.id) accountIds[a.name]=a.id; }); setClientData(created.id,'accountIds',accountIds); }
+        if(vendors && vendors.length){ setVendors(vendors); setVendorFileName('Zoho: '+vendors.length+' vendors'); setClientData(created.id,'vendors',vendors); setClientData(created.id,'vendor_file','Zoho: '+vendors.length+' vendors');
+          if(vendors._idByName) setClientData(created.id,'vendorIds',vendors._idByName); }
+        if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers');
+          if(customers._idByName) setClientData(created.id,'customerIds',customers._idByName); }
         setZohoPickerOpen(false);
         alert('Client imported ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
       } catch(e){
@@ -2301,8 +2334,11 @@ function App(){
       const vendors = await window.zohoFetch('vendors', orgId);
       const customers = await window.zohoFetch('customers', orgId);
       setChartOfAccounts(coa||[]); setCoaFileName('Zoho: '+(c.name||'org')); setClientData(activeClientId,'coa',coa||[]); setClientData(activeClientId,'coa_name','Zoho: '+(c.name||'org'));
+      { const accountIds={}; (coa||[]).forEach(a=>{ if(a && a.name && a.id) accountIds[a.name]=a.id; }); setClientData(activeClientId,'accountIds',accountIds); }
       setVendors(vendors||[]); setVendorFileName('Zoho: '+(vendors||[]).length+' vendors'); setClientData(activeClientId,'vendors',vendors||[]); setClientData(activeClientId,'vendor_file','Zoho: '+(vendors||[]).length+' vendors');
+      if(vendors && vendors._idByName) setClientData(activeClientId,'vendorIds',vendors._idByName);
       setCustomers(customers||[]); setCustomerFileName('Zoho: '+(customers||[]).length+' customers'); setClientData(activeClientId,'customers',customers||[]); setClientData(activeClientId,'customer_file','Zoho: '+(customers||[]).length+' customers');
+      if(customers && customers._idByName) setClientData(activeClientId,'customerIds',customers._idByName);
       alert('Synced from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
     } catch(e){
       if(String(e.message||e).includes('Not connected')){
@@ -2601,9 +2637,35 @@ function App(){
     setClassifiedTxns(prev=>prev.map(t=>{
       if(t.id!==id)return t;
       if(!isRowEditable(t)) return t;
-      return{...t,contactName:name,status:"Confirmed"};
+      // Clear any previously-linked invoice when the customer changes — the
+      // old invoice almost certainly belongs to a different customer.
+      return{...t,contactName:name,invoiceId:"",invoiceNumber:"",status:"Confirmed"};
     }));
   },[isRowEditable]);
+
+  // Lazy-load open invoices for the active client's Zoho org. Called the
+  // first time a revenue row opens the invoice picker. Cached for the rest
+  // of the session — the user can click "Refresh" in the picker to re-fetch.
+  const loadOpenInvoices=useCallback(async(force)=>{
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ setOpenInvoicesError("Client is not linked to a Zoho organization."); return; }
+    if(!force && openInvoices.length>0) return;
+    setOpenInvoicesLoading(true); setOpenInvoicesError("");
+    try {
+      const invs=await window.zohoFetch('openInvoices', orgId);
+      setOpenInvoices(invs||[]);
+    } catch(e){ setOpenInvoicesError(e.message||String(e)); }
+    finally { setOpenInvoicesLoading(false); }
+  },[activeClientId,clients,openInvoices.length]);
+
+  const handleInvoiceChange=useCallback((id,invoice)=>{
+    setClassifiedTxns(prev=>prev.map(t=>{
+      if(t.id!==id) return t;
+      if(!invoice) return {...t,invoiceId:"",invoiceNumber:""};
+      return {...t,invoiceId:invoice.invoice_id,invoiceNumber:invoice.invoice_number};
+    }));
+  },[]);
 
   const confirmSelected=useCallback(()=>{
     if(selectedIds.size===0){alert("Select transactions using checkboxes first.");return;}
@@ -2767,7 +2829,7 @@ function App(){
       if(txn.credit>0){
         if(txn.contactName){
           // Customer selected → Payment Received (Zoho format)
-          paymentReceived.push({date:txn.date,customerName:txn.contactName,amount:txn.credit,paymentMode:"Bank Transfer",description:n,depositTo:bankAccount,reference:""});
+          paymentReceived.push({date:txn.date,customerName:txn.contactName,amount:txn.credit,paymentMode:"Bank Transfer",description:n,depositTo:bankAccount,reference:"",invoiceId:txn.invoiceId||"",invoiceNumber:txn.invoiceNumber||""});
         } else {
           // No customer → revenue journal
           const revenueAcct=txn.selectedLedger;
@@ -2878,6 +2940,145 @@ function App(){
     const pr=(journalEntries&&journalEntries.revenue)||[];
     if(pr.length>0) downloadFile(buildPaymentReceivedCSV(pr),prefix()+"_payment_received.csv");
   },[journalEntries,currency]);
+
+  // ===== Push to Zoho =====
+  // Zoho API expects ISO date YYYY-MM-DD. Input rows store DD/MM/YYYY (or
+  // DD-MM-YYYY). Convert defensively; if we can't parse, return original.
+  const toApiDate=(d)=>{
+    if(!d) return "";
+    const s=(d+"").replace(/\//g,"-").trim();
+    const m=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+    if(m){ const pad=(n)=>n.length<2?"0"+n:n; return m[3]+"-"+pad(m[2])+"-"+pad(m[1]); }
+    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    return s;
+  };
+
+  // Sequentially push all built entries to Zoho Books. Sequential because each
+  // Zoho-sync Lambda call refreshes its own access token, and Zoho rate-limits
+  // refresh-token calls aggressively (~30/min). One-at-a-time keeps us safe.
+  const pushToZoho=useCallback(async ()=>{
+    if(pushing) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization. Use 'Import from Zoho' on the client first."); return; }
+    const accountIds=getClientData(activeClientId,'accountIds',{})||{};
+    const vendorIds=getClientData(activeClientId,'vendorIds',{})||{};
+    const customerIds=getClientData(activeClientId,'customerIds',{})||{};
+    const bankId=accountIds[bankAccount];
+    if(!bankId){
+      alert("Could not find Zoho account_id for bank '"+bankAccount+"'.\n\nClick 'Sync from Zoho' on this client to refresh the Chart of Accounts and try again.");
+      return;
+    }
+
+    const je=journalEntries||{};
+    const exp=je.expenses||[];
+    const jnl=je.journals||[];
+    const bs=je.bsItems||[];
+    const pr=je.revenue||[];
+    const totalUnits=exp.length + Math.floor(jnl.length/2) + Math.floor(bs.length/2) + pr.length;
+    if(totalUnits===0){ alert("Nothing to push."); return; }
+
+    if(!confirm("Push "+totalUnits+" entr"+(totalUnits===1?"y":"ies")+" to Zoho Books for "+(c.name||"this client")+"?\n\nFailed rows can be retried from the report.")) return;
+
+    setPushing(true);
+    setPushFailures([]);
+    setPushSuccessCount(0);
+    setPushProgress({done:0,total:totalUnits,label:"Starting…"});
+    setPushModalOpen(true);
+
+    const failures=[];
+    let success=0;
+    let done=0;
+    const bump=(label)=>{ done++; setPushProgress({done,total:totalUnits,label}); };
+    const recordFailure=(kind,row,err)=>{
+      failures.push({kind,row,reason:err && (err.message||String(err)) || "Unknown error"});
+    };
+
+    // 1) Expenses
+    for(let i=0;i<exp.length;i++){
+      const r=exp[i];
+      const label="Expense "+(i+1)+"/"+exp.length+": "+(r.vendor||r.account||"");
+      setPushProgress({done,total:totalUnits,label});
+      const acctId=accountIds[r.account];
+      const payload={
+        account_id: acctId,
+        paid_through_account_id: bankId,
+        date: toApiDate(r.date),
+        amount: Number(r.amount)||0,
+        currency_code: currency,
+        description: r.description||"",
+      };
+      if(r.vendor){ const vid=vendorIds[r.vendor]; if(vid) payload.vendor_id=vid; else payload.vendor_name=r.vendor; }
+      if(!acctId){ recordFailure("expense",r,new Error("No Zoho account_id for ledger '"+r.account+"'. Sync CoA and retry.")); bump(label); continue; }
+      try{ await window.zohoPush('pushExpense',orgId,payload); success++; }
+      catch(e){ recordFailure("expense",r,e); }
+      bump(label);
+    }
+
+    // 2) Journals (entries come in debit/credit pairs)
+    const pushPaired=async (entries,kindLabel,failKind)=>{
+      const pairCount=Math.floor(entries.length/2);
+      for(let p=0;p<pairCount;p++){
+        const e1=entries[p*2], e2=entries[p*2+1];
+        const label=kindLabel+" "+(p+1)+"/"+pairCount;
+        setPushProgress({done,total:totalUnits,label});
+        const buildLine=(e)=>{
+          const acctId=accountIds[e.account];
+          return acctId ? { account_id: acctId, debit_or_credit: e.debit>0?'debit':'credit', amount: Number(e.debit||e.credit)||0, description: e.narration||"" } : null;
+        };
+        const l1=buildLine(e1), l2=e2?buildLine(e2):null;
+        if(!l1 || (e2 && !l2)){
+          const missing=[];
+          if(!l1) missing.push(e1.account);
+          if(e2 && !l2) missing.push(e2.account);
+          recordFailure(failKind,{date:e1.date,accounts:[e1.account,e2&&e2.account].filter(Boolean).join(" / ")}, new Error("No Zoho account_id for: "+missing.join(", ")+". Sync CoA and retry."));
+          bump(label); continue;
+        }
+        const payload={
+          journal_date: toApiDate(e1.date),
+          reference_number: "",
+          notes: e1.narration||"",
+          line_items: e2 ? [l1,l2] : [l1],
+          currency_code: currency
+        };
+        try{ await window.zohoPush('pushJournal',orgId,payload); success++; }
+        catch(e){ recordFailure(failKind,{date:e1.date,accounts:e1.account+(e2?(" / "+e2.account):"")},e); }
+        bump(label);
+      }
+    };
+    await pushPaired(jnl,"Journal","journal");
+    await pushPaired(bs,"BS item","bsItem");
+
+    // 3) Payments Received
+    for(let i=0;i<pr.length;i++){
+      const r=pr[i];
+      const label="Payment "+(i+1)+"/"+pr.length+": "+(r.customerName||"");
+      setPushProgress({done,total:totalUnits,label});
+      const custId=customerIds[r.customerName];
+      const depositId=accountIds[r.depositTo]||bankId;
+      if(!custId){ recordFailure("payment",r,new Error("No Zoho customer_id for '"+r.customerName+"'. Sync customers and retry.")); bump(label); continue; }
+      const payload={
+        customer_id: custId,
+        payment_mode: r.paymentMode||"Bank Transfer",
+        amount: Number(r.amount)||0,
+        date: toApiDate(r.date),
+        reference_number: r.reference||"",
+        description: r.description||"",
+        deposit_to_account_id: depositId
+      };
+      if(r.invoiceId){
+        payload.invoices=[{ invoice_id: r.invoiceId, amount_applied: Number(r.amount)||0 }];
+      }
+      try{ await window.zohoPush('pushPayment',orgId,payload); success++; }
+      catch(e){ recordFailure("payment",r,e); }
+      bump(label);
+    }
+
+    setPushSuccessCount(success);
+    setPushFailures(failures);
+    setPushing(false);
+    setPushProgress({done:totalUnits,total:totalUnits,label:"Done"});
+  },[pushing,clients,activeClientId,bankAccount,journalEntries,currency]);
 
   // Build Suspense Clarification Sheet — formatted for client
   // Build Suspense Clarification Sheet — formatted HTML table exported as .xls
@@ -4083,8 +4284,40 @@ td,th{padding:8px 12px;vertical-align:middle}
               {/* Ledger dropdown — shows "Payment Received" when customer selected in Credit tab */}
               <td style={{padding:"8px 12px",minWidth:260,position:"relative"}} ref={el=>dropdownRefs.current[t.id]=el}>
                 {(reviewTab==="revenue"&&t.contactName) ? (
-                  <div style={{background:"rgba(22,163,74,0.05)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:6,padding:"8px 12px",color:"#16a34a",fontSize:12,minHeight:36,display:"flex",alignItems:"center",gap:6}}>
-                    <span style={{fontSize:11}}>💰</span> Payment Received → {t.contactName}
+                  <div>
+                    <div style={{background:"rgba(22,163,74,0.05)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:6,padding:"6px 10px",color:"#16a34a",fontSize:12,display:"flex",alignItems:"center",gap:6}}>
+                      <span style={{fontSize:11}}>💰</span> Payment Received → {t.contactName}
+                    </div>
+                    {/* Invoice picker — link this payment to a specific open invoice */}
+                    <div style={{marginTop:4,position:"relative"}}>
+                      <div onClick={()=>{ setInvoicePickerOpen(p=>({...p,[t.id]:!p[t.id]})); loadOpenInvoices(false); }}
+                        style={{background:"#f8f9fc",border:"1px solid "+(t.invoiceId?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",color:t.invoiceId?"#16a34a":"#777777"}}>
+                        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.invoiceId?("📎 "+t.invoiceNumber):"Link invoice (or leave unapplied)"}</span>
+                        <span style={{color:"#777777",marginLeft:4}}>▾</span>
+                      </div>
+                      {invoicePickerOpen[t.id]&&<div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:120,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:280,overflow:"hidden",display:"flex",flexDirection:"column",marginTop:2}}>
+                        <div style={{padding:"6px 10px",fontSize:10,color:"#777777",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>Open invoices for {t.contactName}</span>
+                          <span onClick={(e)=>{e.stopPropagation();loadOpenInvoices(true);}} style={{color:"#6958C2",cursor:"pointer",fontWeight:600}}>↻ Refresh</span>
+                        </div>
+                        {openInvoicesLoading&&<div style={{padding:"10px",fontSize:11,color:"#777777"}}>Loading…</div>}
+                        {openInvoicesError&&<div style={{padding:"10px",fontSize:11,color:"#dc2626"}}>{openInvoicesError}</div>}
+                        {!openInvoicesLoading&&!openInvoicesError&&<div style={{overflowY:"auto",maxHeight:220}}>
+                          <div onClick={()=>{handleInvoiceChange(t.id,null);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}} style={{padding:"7px 10px",fontSize:11,cursor:"pointer",color:"#777777",borderBottom:"1px solid #f8f9fc"}}>— Unapplied (no invoice) —</div>
+                          {(()=>{ const list = openInvoices.filter(inv => (inv.customer_name||"").toLowerCase() === (t.contactName||"").toLowerCase());
+                            if(list.length===0) return <div style={{padding:"10px",fontSize:11,color:"#777777"}}>No open invoices for this customer.</div>;
+                            return list.map(inv=><div key={inv.invoice_id} onClick={()=>{handleInvoiceChange(t.id,inv);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}}
+                              style={{padding:"7px 10px",fontSize:11,cursor:"pointer",background:inv.invoice_id===t.invoiceId?"rgba(22,163,74,0.08)":"transparent",borderBottom:"1px solid #f8f9fc"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                                <span style={{fontWeight:600,color:"#1a1a2e"}}>{inv.invoice_number}</span>
+                                <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#16a34a"}}>{fmt(inv.balance)}</span>
+                              </div>
+                              <div style={{fontSize:9,color:"#777777",marginTop:2}}>{inv.date} · {inv.status}{inv.due_date?(" · due "+inv.due_date):""}</div>
+                            </div>);
+                          })()}
+                        </div>}
+                      </div>}
+                    </div>
                   </div>
                 ) : (
                 <><div onClick={()=>{setCoaDropdownOpen(p=>({...p,[t.id]:!p[t.id]}));setHighlightIdx(0);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:36}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.selectedLedger}</span><span style={{color:"#777777",marginLeft:6}}>▾</span></div>
@@ -4319,12 +4552,81 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{fontSize:11,color:"#888888"}}>{Math.floor(((journalEntries.journals||[]).length+(journalEntries.revenue||[]).length)/2)} entries</div>
             </div>
           </div>
+          <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:14}}>
+            <button onClick={pushToZoho} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Pushing…":"Push to Zoho"}</button>
+          </div>
           <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>
             <button onClick={()=>{setStep(1);setTransactions([]);setClassifiedTxns([]);setJournalEntries({expenses:[],journals:[],revenue:[]});setBankFileName("");setParseError("");}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 24px",color:"#1a1a2e",fontSize:13,fontWeight:500,cursor:"pointer"}}>Process New Statement</button>
             <button onClick={exportExpenses} style={{background:"#ffffff",border:"1px solid rgba(22,163,74,0.3)",borderRadius:8,padding:"10px 20px",color:"#16a34a",fontSize:12,fontWeight:600,cursor:"pointer"}}>Re-download Expenses</button>
             <button onClick={exportJournals} style={{background:"#ffffff",border:"1px solid rgba(105,88,194,0.3)",borderRadius:8,padding:"10px 20px",color:"#6958C2",fontSize:12,fontWeight:600,cursor:"pointer"}}>Re-download Journals</button>
+            <button onClick={exportBSItems} style={{background:"#ffffff",border:"1px solid rgba(8,145,178,0.3)",borderRadius:8,padding:"10px 20px",color:"#0891b2",fontSize:12,fontWeight:600,cursor:"pointer"}}>Re-download BS Items</button>
+            <button onClick={exportPaymentReceived} style={{background:"#ffffff",border:"1px solid rgba(22,163,74,0.3)",borderRadius:8,padding:"10px 20px",color:"#16a34a",fontSize:12,fontWeight:600,cursor:"pointer"}}>Re-download Payments</button>
           </div>
+          <p style={{fontSize:11,color:"#888888",marginTop:14}}>CSV downloads remain available as a fallback. The Push button posts directly to Zoho Books via API.</p>
         </div>)}
+
+        {/* ═══════════════ Push to Zoho — progress + failure modal ═══════════════ */}
+        {pushModalOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div style={{background:"#ffffff",borderRadius:12,maxWidth:720,width:"100%",maxHeight:"90vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"18px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <h3 style={{fontSize:16,fontWeight:700,color:"#1a1a2e"}}>⚡ Push to Zoho — {pushing?"in progress":(pushFailures.length===0?"complete":"completed with errors")}</h3>
+              {!pushing&&<button onClick={()=>setPushModalOpen(false)} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>}
+            </div>
+            <div style={{padding:"18px 22px",overflowY:"auto",flex:1}}>
+              <div style={{marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"#555555",marginBottom:6}}>
+                  <span>{pushProgress.label||"…"}</span>
+                  <span style={{fontFamily:"'IBM Plex Mono',monospace"}}>{pushProgress.done} / {pushProgress.total}</span>
+                </div>
+                <div style={{height:8,background:"#f0f0f4",borderRadius:4,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:(pushProgress.total>0?(pushProgress.done/pushProgress.total*100):0)+"%",background:pushFailures.length>0&&!pushing?"linear-gradient(90deg,#16a34a,#d97706)":"linear-gradient(90deg,#16a34a,#15803d)",transition:"width 0.2s"}} />
+                </div>
+              </div>
+              {!pushing&&<div style={{display:"flex",gap:10,marginBottom:14}}>
+                <div style={{flex:1,background:"rgba(22,163,74,0.08)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:8,padding:"10px 14px"}}>
+                  <div style={{fontSize:22,fontWeight:700,color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{pushSuccessCount}</div>
+                  <div style={{fontSize:11,color:"#888888"}}>Pushed successfully</div>
+                </div>
+                <div style={{flex:1,background:pushFailures.length>0?"rgba(220,38,38,0.08)":"rgba(0,0,0,0.03)",border:"1px solid "+(pushFailures.length>0?"rgba(220,38,38,0.2)":"#e2e2ea"),borderRadius:8,padding:"10px 14px"}}>
+                  <div style={{fontSize:22,fontWeight:700,color:pushFailures.length>0?"#dc2626":"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>{pushFailures.length}</div>
+                  <div style={{fontSize:11,color:"#888888"}}>Failed</div>
+                </div>
+              </div>}
+              {pushFailures.length>0&&<div>
+                <div style={{fontSize:12,fontWeight:600,color:"#dc2626",marginBottom:8}}>Failed rows — fix the underlying issue in Zoho (inactive account, missing customer, etc.) then re-push:</div>
+                <div style={{border:"1px solid rgba(220,38,38,0.2)",borderRadius:8,overflow:"hidden"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                    <thead><tr style={{background:"rgba(220,38,38,0.06)"}}>
+                      <th style={{padding:"8px 10px",textAlign:"left",color:"#dc2626",fontWeight:600,borderBottom:"1px solid rgba(220,38,38,0.2)"}}>Type</th>
+                      <th style={{padding:"8px 10px",textAlign:"left",color:"#dc2626",fontWeight:600,borderBottom:"1px solid rgba(220,38,38,0.2)"}}>Row</th>
+                      <th style={{padding:"8px 10px",textAlign:"left",color:"#dc2626",fontWeight:600,borderBottom:"1px solid rgba(220,38,38,0.2)"}}>Reason</th>
+                    </tr></thead>
+                    <tbody>{pushFailures.map((f,i)=>{
+                      const r=f.row||{};
+                      const desc = r.vendor||r.customerName||r.accounts||r.account||r.description||"";
+                      const amt = r.amount!=null?r.amount:(r.debit||r.credit||"");
+                      return <tr key={i} style={{borderBottom:"1px solid #f8f9fc"}}>
+                        <td style={{padding:"7px 10px",color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>{f.kind}</td>
+                        <td style={{padding:"7px 10px",color:"#1a1a2e"}}>
+                          <div style={{fontWeight:600}}>{desc||"(no label)"}</div>
+                          <div style={{fontSize:9,color:"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{r.date||""} {amt?(currency+" "+amt):""}</div>
+                        </td>
+                        <td style={{padding:"7px 10px",color:"#dc2626",fontSize:10}}>{f.reason}</td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                </div>
+              </div>}
+              {!pushing&&pushFailures.length===0&&pushSuccessCount>0&&<div style={{padding:14,background:"rgba(22,163,74,0.06)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:8,color:"#16a34a",fontSize:13,textAlign:"center"}}>
+                ✓ All {pushSuccessCount} entries pushed to Zoho Books successfully.
+              </div>}
+            </div>
+            {!pushing&&<div style={{padding:"14px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"flex-end",gap:10}}>
+              {pushFailures.length>0&&<button onClick={()=>{ setPushModalOpen(false); pushToZoho(); }} style={{background:"#ffffff",border:"1px solid rgba(105,88,194,0.3)",borderRadius:8,padding:"8px 18px",color:"#6958C2",fontSize:12,fontWeight:600,cursor:"pointer"}}>Retry full push</button>}
+              <button onClick={()=>setPushModalOpen(false)} style={{background:"#6958C2",color:"#ffffff",border:"none",borderRadius:8,padding:"8px 20px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Close</button>
+            </div>}
+          </div>
+        </div>}
 
         {/* ═══════════════ BILL ENTRY MODE — disabled in this build ═══════════════ */}
         {false&&appMode==="bills"&&isPaid&&(<div style={{display:"flex",flexDirection:"column",gap:20}}>
