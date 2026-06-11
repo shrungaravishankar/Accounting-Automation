@@ -11,6 +11,7 @@ import { decideUnlockRequest } from './functions/decide-unlock-request/resource'
 import { zohoOauth } from './functions/zoho-oauth/resource';
 import { zohoSync } from './functions/zoho-sync/resource';
 import { replaceUser } from './functions/replace-user/resource';
+import { invoiceOcr } from './functions/invoice-ocr/resource';
 
 const backend = defineBackend({
   auth,
@@ -23,7 +24,8 @@ const backend = defineBackend({
   decideUnlockRequest,
   zohoOauth,
   zohoSync,
-  replaceUser
+  replaceUser,
+  invoiceOcr
 });
 
 const userPool = backend.auth.resources.userPool;
@@ -168,5 +170,17 @@ backend.replaceUser.resources.lambda.addToRolePolicy(
       clientTable.tableArn, clientTable.tableArn + '/index/*',
       projectTable.tableArn, projectTable.tableArn + '/index/*'
     ]
+  })
+);
+
+// ---- invoice-ocr: AWS Textract AnalyzeExpense (synchronous, in-line bytes) ----
+// AnalyzeExpense lets us hand Textract a base64-encoded invoice and get back
+// structured fields (vendor, customer, totals, VAT, line items). The action
+// is resource-less, so "*" is the standard policy.
+backend.invoiceOcr.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['textract:AnalyzeExpense'],
+    resources: ['*']
   })
 );

@@ -7,6 +7,7 @@ import { decideUnlockRequest } from '../functions/decide-unlock-request/resource
 import { zohoOauth } from '../functions/zoho-oauth/resource';
 import { zohoSync } from '../functions/zoho-sync/resource';
 import { replaceUser } from '../functions/replace-user/resource';
+import { invoiceOcr } from '../functions/invoice-ocr/resource';
 /**
  * AppSync GraphQL schema for BCL AutoLedger.
  *
@@ -304,6 +305,22 @@ const schema = a.schema({
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
     .handler(a.handler.function(zohoSync)),
+
+  /**
+   * Invoice OCR via AWS Textract AnalyzeExpense. Frontend sends a
+   * base64-encoded PDF or image and receives structured fields
+   * (vendor, customer, dates, totals, VAT, line items) to pre-fill
+   * the manual invoice creation modal.
+   */
+  invoiceOcr: a
+    .mutation()
+    .arguments({
+      fileBase64: a.string().required(),
+      mimeType: a.string()
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(invoiceOcr)),
 
   /**
    * Replace a User or Admin with a new email. Inherits their client
