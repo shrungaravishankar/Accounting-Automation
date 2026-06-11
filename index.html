@@ -2961,13 +2961,69 @@ function App(){
     const c=clients.find(x=>x.id===activeClientId);
     const orgId=c && c.zohoOrgId;
     if(!orgId){ alert("This client is not linked to a Zoho organization. Use 'Import from Zoho' on the client first."); return; }
-    const accountIds=getClientData(activeClientId,'accountIds',{})||{};
+    let accountIds=getClientData(activeClientId,'accountIds',{})||{};
     const vendorIds=getClientData(activeClientId,'vendorIds',{})||{};
     const customerIds=getClientData(activeClientId,'customerIds',{})||{};
-    const bankId=accountIds[bankAccount];
+
+    // Self-healing CoA refresh: if the per-client config doesn't have an
+    // accountIds map (e.g. the client was synced before the Push feature
+    // shipped), pull a fresh CoA from Zoho right now and rebuild it. Avoids
+    // forcing the user back to the client menu to re-sync.
+    let bankTypeAccts = [];
+    const refreshAccountIds = async () => {
+      try {
+        const coa = await window.zohoFetch('chartofaccounts', orgId);
+        const ids = {};
+        (coa||[]).forEach(a => { if(a && a.name && a.id) ids[a.name] = a.id; });
+        accountIds = ids;
+        setClientData(activeClientId,'accountIds',ids);
+        setChartOfAccounts(coa||[]);
+        bankTypeAccts = (coa||[]).filter(a => /bank|cash/i.test(a.type||''));
+        return coa||[];
+      } catch(e) {
+        alert("Could not refresh Chart of Accounts from Zoho: " + (e.message||e));
+        return null;
+      }
+    };
+
+    if(!accountIds || Object.keys(accountIds).length === 0){
+      const coa = await refreshAccountIds();
+      if(!coa) return;
+    }
+
+    let bankId = accountIds[bankAccount];
+
+    // Bank not matched — either the field is still the placeholder, or the
+    // user typed a name that doesn't exist in Zoho. Offer a picker built
+    // from Zoho's actual Bank/Cash-typed accounts.
     if(!bankId){
-      alert("Could not find Zoho account_id for bank '"+bankAccount+"'.\n\nClick 'Sync from Zoho' on this client to refresh the Chart of Accounts and try again.");
-      return;
+      if(bankTypeAccts.length === 0){
+        const coa = chartOfAccounts || [];
+        bankTypeAccts = coa.filter(a => /bank|cash/i.test(a.type||''));
+        if(bankTypeAccts.length === 0){
+          // Try one more refresh in case the in-memory CoA is stale.
+          const fresh = await refreshAccountIds();
+          if(fresh) bankTypeAccts = fresh.filter(a => /bank|cash/i.test(a.type||''));
+        }
+      }
+      if(bankTypeAccts.length === 0){
+        alert("This Zoho organization has no Bank or Cash type accounts. Create one in Zoho Books first, then click Sync from Zoho.");
+        return;
+      }
+      const list = bankTypeAccts.map((a,i) => (i+1)+". "+a.name+"  ["+(a.type||'')+"]").join("\n");
+      const pick = prompt(
+        "Bank/Cash account for this client (currently: \""+bankAccount+"\") doesn't match any Zoho account.\n\n" +
+        "Pick one by number:\n\n" + list,
+        "1"
+      );
+      if(!pick) return;
+      const idx = parseInt(pick, 10) - 1;
+      if(isNaN(idx) || idx < 0 || idx >= bankTypeAccts.length){ alert("Invalid selection."); return; }
+      const picked = bankTypeAccts[idx];
+      setBankAccount(picked.name);
+      setClientData(activeClientId,'bank',picked.name);
+      bankId = picked.id || accountIds[picked.name];
+      if(!bankId){ alert("Could not resolve account_id for '"+picked.name+"'. Try Sync from Zoho."); return; }
     }
 
     const je=journalEntries||{};
@@ -3078,7 +3134,7 @@ function App(){
     setPushFailures(failures);
     setPushing(false);
     setPushProgress({done:totalUnits,total:totalUnits,label:"Done"});
-  },[pushing,clients,activeClientId,bankAccount,journalEntries,currency]);
+  },[pushing,clients,activeClientId,bankAccount,journalEntries,currency,chartOfAccounts]);
 
   // Build Suspense Clarification Sheet — formatted for client
   // Build Suspense Clarification Sheet — formatted HTML table exported as .xls
