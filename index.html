@@ -2110,7 +2110,13 @@ function App(){
   const[dupCheckOpen,setDupCheckOpen]=useState(false);
   const[dupCheckMatches,setDupCheckMatches]=useState([]); // [{group, index, label, date, description, existing:{...}}]
   const[dupCheckPushArgs,setDupCheckPushArgs]=useState(null); // staged args for resuming push
-  // Sidebar (steps + Zoho API usage panel + per-client breakdown).
+  // Top-level navigation. Workflow is one of several views; dashboard is
+  // the landing page after sign-in. Switching clients lands on the client
+  // detail page (tabs), not directly into the workflow.
+  const[view,setView]=useState(()=>{ try { return localStorage.getItem("al_view")||"dashboard"; } catch(_){ return "dashboard"; } });
+  const[clientDetailTab,setClientDetailTab]=useState("projects");
+  useEffect(()=>{ try { localStorage.setItem("al_view",view); } catch(_){} },[view]);
+  // Sidebar (nav items + Zoho API usage panel + per-client breakdown).
   const[sidebarOpen,setSidebarOpen]=useState(()=>{ try { return localStorage.getItem("al_sidebar_open")!=="0"; } catch(_){ return true; } });
   const[apiCounts,setApiCounts]=useState(()=>{ try { return JSON.parse(localStorage.getItem('al_apiCalls_v1')||'{}'); } catch(_){ return {}; } });
   const[apiUsage,setApiUsage]=useState(()=>window.__zohoApiUsage||{remaining:null,limit:null,reset:null});
@@ -2347,6 +2353,7 @@ function App(){
     setShowNewClient(false);
     setNewClientName("");
     setNewClientVersion("free");
+    setView("clientDetail"); setClientDetailTab("projects");
   }, [newClientVersion]);
 
   // Open the Zoho org picker modal. Fetches the list once, caches it in
@@ -2490,7 +2497,7 @@ function App(){
     }
   },[assignClientId, assignSelected]);
 
-  const switchClient = useCallback((id)=>{
+  const switchClient = useCallback((id, opts)=>{
     const c = clients.find(c=>c.id===id);
     if (!c) return;
     setActiveClientId(id);
@@ -2498,7 +2505,18 @@ function App(){
     setClientVersion(c.version || getClientData(id, "version", "free"));
     setAppMode("bank");
     localStorage.setItem("autoledger_active_client", id);
+    if (!(opts && opts.keepView)) { setView("clientDetail"); setClientDetailTab("projects"); }
   }, [clients]);
+  // Start a fresh bank-statement workflow for the active client. Resets the
+  // workflow state and jumps into the Upload step.
+  const startNewStatement = useCallback(()=>{
+    setStep(1);
+    setTransactions([]); setClassifiedTxns([]);
+    setJournalEntries({expenses:[],journals:[],revenue:[],bsItems:[],suspense:[]});
+    setBankFileName(""); setParseError("");
+    setEditingProjectId("");
+    setView("workflow");
+  },[]);
 
   const upgradeClient = useCallback(()=>{
     if(!activeClientId)return;
@@ -3891,46 +3909,59 @@ td,th{padding:8px 12px;vertical-align:middle}
           <button onClick={()=>setSidebarOpen(o=>!o)} title={sidebarOpen?"Collapse":"Expand"} style={{background:"transparent",border:"none",cursor:"pointer",color:"#777777",fontSize:14,padding:"2px 6px",borderRadius:4}}>{sidebarOpen?"‹":"›"}</button>
         </div>
 
-        {/* Steps (mirrors top bar, vertical) */}
-        {appMode==="bank" && <div style={{padding:sidebarOpen?"8px 10px":"8px 4px",display:"flex",flexDirection:"column",gap:4}}>
-          {STEPS.map(s=>{
-            const reachable = s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0));
-            const active=step===s.id, done=step>s.id;
-            return <div key={s.id} onClick={()=>{ if(reachable) setStep(s.id); }} title={s.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:reachable?"pointer":"default",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":done?"#16a34a":"#777777",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
-              <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{s.icon}</span>
-              {sidebarOpen && <span>{s.label}</span>}
-              {sidebarOpen && active && <span style={{marginLeft:"auto",fontSize:9,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{s.id}/6</span>}
-            </div>;
-          })}
+        {/* Primary navigation */}
+        <div style={{padding:sidebarOpen?"8px 10px":"8px 4px",display:"flex",flexDirection:"column",gap:4}}>
+          {(()=>{
+            const role=window.AUTH_USER&&window.AUTH_USER.role;
+            const isAdmin=["admin","team-lead"].includes(role);
+            const NAV=[
+              {key:"dashboard",label:"Home",icon:"🏠"},
+              {key:"clients",label:"Clients",icon:"👥",count:clients.length},
+            ];
+            if(isAdmin) NAV.push({key:"admin",label:"Admin",icon:"👮"});
+            return NAV.map(n=>{
+              const active = view===n.key || (n.key==="clients" && view==="clientDetail");
+              return <div key={n.key} onClick={()=>{ setView(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
+                {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
+                {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
+              </div>;
+            });
+          })()}
+        </div>
+
+        {/* Recent clients (inline pickers under Clients) */}
+        {sidebarOpen && clients.length>0 && <div style={{padding:"4px 14px 8px 14px"}}>
+          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:6}}>Recent</div>
+          <div style={{display:"flex",flexDirection:"column",gap:2,maxHeight:180,overflowY:"auto"}}>
+            {clients.slice(0,8).map(c=>(
+              <div key={c.id} onClick={()=>switchClient(c.id)} title={c.name} style={{padding:"5px 8px",borderRadius:4,cursor:"pointer",fontSize:11,color:c.id===activeClientId?"#4D3FA0":"#555555",background:c.id===activeClientId?"rgba(77,63,160,0.08)":"transparent",fontWeight:c.id===activeClientId?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
+            ))}
+          </div>
         </div>}
 
-        {/* Zoho API usage panel */}
-        {sidebarOpen && <div style={{marginTop:"auto",borderTop:"1px solid #f0f0f4",padding:"12px 14px",fontSize:11}}>
-          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase",marginBottom:8}}>Zoho API today</div>
-          {apiUsage && apiUsage.remaining!=null ? (
-            <div style={{padding:"8px 10px",background:Number(apiUsage.remaining)<100?"rgba(220,38,38,0.08)":"rgba(105,88,194,0.08)",border:"1px solid "+(Number(apiUsage.remaining)<100?"rgba(220,38,38,0.25)":"rgba(105,88,194,0.2)"),borderRadius:8,marginBottom:10,color:Number(apiUsage.remaining)<100?"#dc2626":"#4D3FA0"}} title={apiUsage.reset?"Resets at "+new Date(Number(apiUsage.reset)*1000).toLocaleString():""}>
-              <div style={{fontSize:18,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.1}}>{apiUsage.remaining}{apiUsage.limit?(<span style={{fontSize:11,color:"#888888"}}> / {apiUsage.limit}</span>):null}</div>
-              <div style={{fontSize:10,color:"#888888",marginTop:2}}>calls remaining</div>
-            </div>
-          ) : (
-            <div style={{padding:"8px 10px",background:"#f8f9fc",border:"1px dashed #e2e2ea",borderRadius:8,marginBottom:10,color:"#999999",fontSize:10}}>No Zoho calls yet this session.</div>
-          )}
-          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span>By client (today)</span>
-            {Object.keys(apiCounts||{}).length>0 && <span onClick={()=>{ if(confirm("Reset local per-client API call counters?")) window.alResetApiCounts(); }} style={{fontSize:9,fontWeight:600,color:"#dc2626",cursor:"pointer",letterSpacing:0,textTransform:"none"}}>Reset</span>}
+        {/* Workflow steps — only when inside the workflow view */}
+        {view==="workflow" && sidebarOpen && <div style={{padding:"8px 10px",borderTop:"1px solid #f0f0f4",marginTop:6}}>
+          <div onClick={()=>setView("clientDetail")} style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",marginBottom:6,fontWeight:600}}>‹ Back to {activeClientName||"client"}</div>
+          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:6}}>Workflow</div>
+          <div style={{display:"flex",flexDirection:"column",gap:2}}>
+            {STEPS.map(s=>{
+              const reachable = s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0));
+              const active=step===s.id, done=step>s.id;
+              return <div key={s.id} onClick={()=>{ if(reachable) setStep(s.id); }} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",borderRadius:4,cursor:reachable?"pointer":"default",fontSize:11,color:active?"#4D3FA0":done?"#16a34a":"#999999",background:active?"rgba(77,63,160,0.08)":"transparent",fontWeight:active?600:400}}>
+                <span style={{fontSize:12,minWidth:16,textAlign:"center"}}>{s.icon}</span>
+                <span style={{flex:1}}>{s.label}</span>
+                {active && <span style={{fontSize:9,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{s.id}/6</span>}
+              </div>;
+            })}
           </div>
-          {apiCountsList.length===0 ? (
-            <div style={{fontSize:10,color:"#999999",padding:"4px 0"}}>No client activity yet.</div>
-          ) : (
-            <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:200,overflowY:"auto"}}>
-              {apiCountsList.slice(0,12).map(r=>(
-                <div key={r.cid} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"4px 6px",borderRadius:4,background:r.cid===activeClientId?"rgba(77,63,160,0.08)":"transparent",fontSize:10}} title={"Total all-time: "+r.total}>
-                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:r.cid===activeClientId?"#4D3FA0":"#1a1a2e",fontWeight:r.cid===activeClientId?600:400}}>{r.name||"—"}</span>
-                  <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#777777",flexShrink:0}}>{r.today}</span>
-                </div>
-              ))}
-            </div>
-          )}
+        </div>}
+
+        {/* Compact API-remaining badge at the bottom — full breakdown lives on the Dashboard */}
+        {sidebarOpen && apiUsage && apiUsage.remaining!=null && <div onClick={()=>setView("dashboard")} title="Open Dashboard for full API + per-client breakdown" style={{marginTop:"auto",margin:"auto 12px 12px",padding:"10px 12px",borderRadius:8,cursor:"pointer",background:Number(apiUsage.remaining)<100?"rgba(220,38,38,0.08)":"rgba(105,88,194,0.06)",border:"1px solid "+(Number(apiUsage.remaining)<100?"rgba(220,38,38,0.25)":"rgba(105,88,194,0.2)"),color:Number(apiUsage.remaining)<100?"#dc2626":"#4D3FA0"}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",marginBottom:4,opacity:0.8}}>Zoho API today</div>
+          <div style={{fontSize:16,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace"}}>{apiUsage.remaining}{apiUsage.limit?(<span style={{fontSize:11,opacity:0.6}}> / {apiUsage.limit}</span>):null}</div>
+          <div style={{fontSize:9,marginTop:2,opacity:0.7}}>calls remaining · view dashboard →</div>
         </div>}
       </aside>
 
@@ -3941,24 +3972,212 @@ td,th{padding:8px 12px;vertical-align:middle}
           <div style={{width:1,height:28,background:"#e2e2ea"}} />
           <div><div style={{fontSize:14,fontWeight:600,letterSpacing:"-0.01em",color:"#4D3FA0"}}>AutoLedger</div><div style={{fontSize:10,color:"#888888"}}>Accounting Automation</div></div>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-          {/* Step nav (only in bank mode) */}
-          {appMode==="bank"&&<>
-          <button onClick={()=>{if(step>1)setStep(step-1);}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"6px 10px",color:step>1?"#6958C2":"#e2e2ea",fontSize:14,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
-          {STEPS.map(s=><div key={s.id} onClick={()=>{if(s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0)))setStep(s.id);}} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:6,fontSize:12,fontWeight:500,background:step===s.id?"rgba(77,63,160,0.25)":"transparent",color:step===s.id?"#6958C2":step>s.id?"#16a34a":"#777777",border:step===s.id?"1px solid rgba(77,63,160,0.5)":"1px solid transparent",cursor:s.id<=step?"pointer":"default",transition:"all 0.2s",whiteSpace:"nowrap"}}><span>{s.icon}</span> {s.label}</div>)}
-          <button onClick={()=>{if(step<6){
-            if(step===1&&transactions.length>0)setStep(2);
-            else if(step===2)setStep(4);
-            else if(step>=2&&step<6)setStep(step+1);
-          }}} disabled={step>=6||(step===1&&transactions.length===0)} style={{background:"none",border:"1px solid "+((step<6&&!(step===1&&transactions.length===0))?"#e2e2ea":"transparent"),borderRadius:6,padding:"6px 10px",color:(step<6&&!(step===1&&transactions.length===0))?"#6958C2":"#e2e2ea",fontSize:14,cursor:(step<6&&!(step===1&&transactions.length===0))?"pointer":"default",lineHeight:1,fontWeight:700}}>›</button>
-          </>}
+        {/* Breadcrumb (always) + workflow step nav (only when inside workflow) */}
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",flex:1,marginLeft:18,marginRight:60}}>
+          <div style={{fontSize:13,color:"#666666",display:"flex",alignItems:"center",gap:6}}>
+            {view==="dashboard" && <span style={{color:"#1a1a2e",fontWeight:600}}>Home</span>}
+            {view==="clients" && <span style={{color:"#1a1a2e",fontWeight:600}}>Clients</span>}
+            {view==="clientDetail" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>{activeClientName||"—"}</span></>}
+            {view==="workflow" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span onClick={()=>setView("clientDetail")} style={{cursor:"pointer",color:"#6958C2"}}>{activeClientName||"—"}</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>New Statement</span></>}
+            {view==="admin" && <span style={{color:"#1a1a2e",fontWeight:600}}>Admin</span>}
+          </div>
+          {view==="workflow"&&appMode==="bank"&&<div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
+            <button onClick={()=>{if(step>1)setStep(step-1);}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:step>1?"#6958C2":"#e2e2ea",fontSize:13,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
+            {STEPS.map(s=><div key={s.id} onClick={()=>{if(s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0)))setStep(s.id);}} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:5,fontSize:11,fontWeight:500,background:step===s.id?"rgba(77,63,160,0.2)":"transparent",color:step===s.id?"#6958C2":step>s.id?"#16a34a":"#999999",border:step===s.id?"1px solid rgba(77,63,160,0.4)":"1px solid transparent",cursor:s.id<=step?"pointer":"default",whiteSpace:"nowrap"}}><span>{s.icon}</span>{s.label}</div>)}
+            <button onClick={()=>{if(step<6){ if(step===1&&transactions.length>0)setStep(2); else if(step===2)setStep(4); else if(step>=2&&step<6)setStep(step+1); }}} disabled={step>=6||(step===1&&transactions.length===0)} style={{background:"none",border:"1px solid "+((step<6&&!(step===1&&transactions.length===0))?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:(step<6&&!(step===1&&transactions.length===0))?"#6958C2":"#e2e2ea",fontSize:13,cursor:(step<6&&!(step===1&&transactions.length===0))?"pointer":"default",lineHeight:1,fontWeight:700}}>›</button>
+          </div>}
+          {apiUsage && apiUsage.remaining!=null && view!=="workflow" && <div title={"Zoho API calls remaining today" + (apiUsage.reset?" — resets at "+new Date(Number(apiUsage.reset)*1000).toLocaleTimeString():"")} style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:12,background:Number(apiUsage.remaining)<100?"rgba(220,38,38,0.08)":"rgba(105,88,194,0.08)",border:"1px solid "+(Number(apiUsage.remaining)<100?"rgba(220,38,38,0.25)":"rgba(105,88,194,0.2)"),fontSize:11,fontWeight:600,color:Number(apiUsage.remaining)<100?"#dc2626":"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ {apiUsage.remaining}{apiUsage.limit?(" / "+apiUsage.limit):""}</div>}
         </div>
       </div>
 
       <div style={{maxWidth:1400,margin:"0 auto",padding:"24px 28px"}}>
 
+        {/* ═════════════════ DASHBOARD VIEW ═════════════════ */}
+        {view==="dashboard" && (()=>{
+          const totalClients = clients.length;
+          const totalProjects = Object.values(projectLog||{}).reduce((s,arr)=>s+(arr?.length||0),0);
+          const todayKey = new Date().toISOString().slice(0,10);
+          const callsToday = Object.values(apiCounts||{}).reduce((s,r)=>s+((r.byDay&&r.byDay[todayKey])||0),0);
+          // Most-recent projects across all clients
+          const allProjects = [];
+          for(const cid of Object.keys(projectLog||{})){ for(const p of (projectLog[cid]||[])){ allProjects.push({...p,clientId:cid,clientName:(clients.find(c=>c.id===cid)?.name)||"—"}); } }
+          allProjects.sort((a,b)=>{ const ad=new Date(a.exportedAt||a.date||0).getTime(), bd=new Date(b.exportedAt||b.date||0).getTime(); return bd-ad; });
+          const recent = allProjects.slice(0,8);
+          const KPI = ({label,val,color,bg,icon})=>(
+            <div style={{background:bg,border:"1px solid "+color+"33",borderRadius:12,padding:"18px 22px",flex:"1 1 200px",minWidth:200}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <div>
+                  <div style={{fontSize:32,fontWeight:700,color,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.05}}>{val}</div>
+                  <div style={{fontSize:11,color:"#666666",marginTop:6,letterSpacing:"0.02em"}}>{label}</div>
+                </div>
+                <div style={{fontSize:24,opacity:0.5}}>{icon}</div>
+              </div>
+            </div>
+          );
+          return <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:24,gap:14,flexWrap:"wrap"}}>
+              <div>
+                <h1 style={{fontSize:28,fontWeight:700,letterSpacing:"-0.02em",background:"linear-gradient(135deg,#4D3FA0,#6958C2)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:4}}>Welcome back{window.AUTH_USER&&window.AUTH_USER.name?", "+window.AUTH_USER.name.split(' ')[0]:""}</h1>
+                <p style={{color:"#888888",fontSize:13}}>Quick view of activity across your clients.</p>
+              </div>
+              <button onClick={()=>setView("clients")} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:600,cursor:"pointer",boxShadow:"0 2px 12px rgba(77,63,160,0.25)"}}>Go to Clients →</button>
+            </div>
+            <div style={{display:"flex",gap:16,flexWrap:"wrap",marginBottom:24}}>
+              <KPI label="Clients" val={totalClients} color="#4D3FA0" bg="rgba(105,88,194,0.06)" icon="👥" />
+              <KPI label="Projects (all-time)" val={totalProjects} color="#0891b2" bg="rgba(8,145,178,0.06)" icon="📁" />
+              <KPI label="Zoho API calls today" val={callsToday} color="#16a34a" bg="rgba(22,163,74,0.06)" icon="⚡" />
+              <KPI label="Calls remaining" val={apiUsage&&apiUsage.remaining!=null?apiUsage.remaining:"—"} color={apiUsage&&Number(apiUsage.remaining)<100?"#dc2626":"#d97706"} bg={apiUsage&&Number(apiUsage.remaining)<100?"rgba(220,38,38,0.06)":"rgba(217,119,6,0.06)"} icon="🪫" />
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:18}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em"}}>Recent projects</h3>
+                  {recent.length>0 && <span style={{fontSize:11,color:"#888888"}}>across {new Set(recent.map(p=>p.clientId)).size} client{new Set(recent.map(p=>p.clientId)).size===1?"":"s"}</span>}
+                </div>
+                {recent.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"30px 10px",textAlign:"center"}}>No projects yet. Pick a client and process a statement to see it here.</div> : (
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {recent.map(p=>(
+                      <div key={p.id||p.clientId+(p.name||p.exportedAt)} onClick={()=>{ switchClient(p.clientId); }} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",border:"1px solid #f0f0f4",borderRadius:8,cursor:"pointer",gap:10}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||"Project"}</div>
+                          <div style={{fontSize:10,color:"#888888",marginTop:2}}>{p.clientName}{p.period?(" · "+p.period):""}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:10,color:"#888888",fontFamily:"'IBM Plex Mono',monospace"}}>{p.exportedAt?new Date(p.exportedAt).toLocaleDateString():""}</div>
+                          {p.txnCount!=null && <div style={{fontSize:9,color:"#4D3FA0"}}>{p.txnCount} txns</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:18}}>
+                <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em",marginBottom:12}}>Top clients by activity today</h3>
+                {apiCountsList.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"24px 10px",textAlign:"center"}}>No Zoho calls today.</div> : (
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {apiCountsList.slice(0,8).map(r=>(
+                      <div key={r.cid} onClick={()=>{ if(r.cid && r.cid!=='__unassigned__') switchClient(r.cid); }} style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",border:"1px solid #f0f0f4",borderRadius:6,cursor:r.cid!=='__unassigned__'?"pointer":"default",fontSize:11}}>
+                        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#1a1a2e"}}>{r.name||"—"}</span>
+                        <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#4D3FA0",fontWeight:600}}>{r.today}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>;
+        })()}
+
+        {/* ═════════════════ CLIENT DETAIL VIEW (tabs) ═════════════════ */}
+        {view==="clientDetail" && activeClientId && (()=>{
+          const c=clients.find(x=>x.id===activeClientId);
+          if(!c){ return <div style={{padding:24,color:"#888888"}}>Client not found. <span onClick={()=>setView("clients")} style={{color:"#4D3FA0",cursor:"pointer"}}>Back to Clients</span></div>; }
+          const projects = projectLog[activeClientId] || [];
+          const role=window.AUTH_USER&&window.AUTH_USER.role;
+          const isAdmin=["admin","team-lead"].includes(role);
+          const TABS = [
+            {key:"projects", label:"Projects", icon:"📁", count: projects.length},
+            {key:"masterData", label:"Master Data", icon:"📚"},
+            {key:"settings", label:"Settings", icon:"⚙"},
+            {key:"activity", label:"Activity", icon:"📊"},
+          ];
+          return <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16,gap:14,flexWrap:"wrap"}}>
+              <div>
+                <div style={{fontSize:11,color:"#6958C2",cursor:"pointer",marginBottom:4}} onClick={()=>setView("clients")}>‹ All Clients</div>
+                <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e"}}>{c.name}</h1>
+                <div style={{display:"flex",gap:8,marginTop:6,flexWrap:"wrap"}}>
+                  {c.zohoOrgId && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>🔗 Zoho linked</span>}
+                  {getClientData(c.id,"bank","")&&getClientData(c.id,"bank","")!=="Bank Account" && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(105,88,194,0.08)",color:"#4D3FA0",border:"1px solid rgba(105,88,194,0.2)"}}>{getClientData(c.id,"bank","")}</span>}
+                  {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length>0 && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(8,145,178,0.08)",color:"#0891b2",border:"1px solid rgba(8,145,178,0.2)"}}>👥 {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length} assigned</span>}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button onClick={startNewStatement} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 12px rgba(22,163,74,0.25)"}}>+ New Bank Statement</button>
+                {c.zohoOrgId && isAdmin && <button onClick={syncFromZoho} title="Refresh Chart of Accounts / Vendors / Customers from Zoho" style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"10px 16px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:0,marginBottom:18,borderBottom:"1px solid #e2e2ea"}}>
+              {TABS.map(t=>(
+                <div key={t.key} onClick={()=>setClientDetailTab(t.key)} style={{padding:"10px 18px",fontSize:12,fontWeight:600,cursor:"pointer",borderBottom:"2px solid "+(clientDetailTab===t.key?"#4D3FA0":"transparent"),color:clientDetailTab===t.key?"#4D3FA0":"#777777",display:"flex",alignItems:"center",gap:6}}>
+                  <span>{t.icon}</span> {t.label}{t.count!=null&&" ("+t.count+")"}
+                </div>
+              ))}
+            </div>
+            {clientDetailTab==="projects" && (
+              projects.length===0 ? <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888888"}}>
+                <div style={{fontSize:32,marginBottom:8}}>📁</div>
+                <div style={{fontSize:13,marginBottom:4}}>No projects yet for {c.name}.</div>
+                <div style={{fontSize:11}}>Click <strong style={{color:"#16a34a"}}>+ New Bank Statement</strong> to process the first one.</div>
+              </div> : <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead><tr style={{background:"#f8f9fc"}}>
+                    {["Name","Bank","Period","Transactions","Exported","Status"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>{projects.map(p=>(
+                    <tr key={p.id} onClick={()=>{ setViewingProject(p); setStep(1); setView("workflow"); }} style={{borderBottom:"1px solid #f8f9fc",cursor:"pointer"}}>
+                      <td style={{padding:"10px 14px",color:"#1a1a2e",fontWeight:500}}>{p.name||"—"}</td>
+                      <td style={{padding:"10px 14px",color:"#777777"}}>{p.bankName||""}</td>
+                      <td style={{padding:"10px 14px",color:"#777777"}}>{p.period||""}</td>
+                      <td style={{padding:"10px 14px",fontFamily:"'IBM Plex Mono',monospace",color:"#4D3FA0"}}>{p.txnCount||0}</td>
+                      <td style={{padding:"10px 14px",color:"#777777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{p.exportedAt?new Date(p.exportedAt).toLocaleString():"—"}</td>
+                      <td style={{padding:"10px 14px"}}>{p.locked?<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)",color:"#dc2626"}}>🔒 Locked</span>:<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a"}}>Open</span>}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+            {clientDetailTab==="masterData" && <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+                <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Chart of Accounts</div>
+                <div style={{fontSize:24,fontWeight:700,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{chartOfAccounts.length}</div>
+                <div style={{fontSize:10,color:"#888888",marginTop:4}}>{coaFileName||"—"}</div>
+              </div>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+                <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Vendors</div>
+                <div style={{fontSize:24,fontWeight:700,color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace"}}>{vendors.length}</div>
+                <div style={{fontSize:10,color:"#888888",marginTop:4}}>{vendorFileName||"—"}</div>
+              </div>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+                <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Customers</div>
+                <div style={{fontSize:24,fontWeight:700,color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{customers.length}</div>
+                <div style={{fontSize:10,color:"#888888",marginTop:4}}>{customerFileName||"—"}</div>
+              </div>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+                <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Learned References</div>
+                <div style={{fontSize:24,fontWeight:700,color:"#d97706",fontFamily:"'IBM Plex Mono',monospace"}}>{Object.keys(refDB).length}</div>
+                <div style={{fontSize:10,color:"#888888",marginTop:4}}>per-client mappings</div>
+              </div>
+            </div>}
+            {clientDetailTab==="settings" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:20,display:"flex",flexDirection:"column",gap:14}}>
+              <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Zoho organization</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.zohoOrgId||<span style={{color:"#999999"}}>Not linked</span>}</div></div>
+              <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Bank ledger</div><div style={{fontSize:13,color:"#1a1a2e"}}>{getClientData(c.id,"bank","Not set")}</div></div>
+              <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Created by</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.ownerName||c.ownerEmail||"—"}</div></div>
+              <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Assigned to</div><div style={{fontSize:13,color:"#1a1a2e"}}>{(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).join(", ")||"—"}</div></div>
+              {isAdmin && <div style={{display:"flex",gap:8,paddingTop:8,borderTop:"1px solid #f0f0f4",marginTop:4,flexWrap:"wrap"}}>
+                <button onClick={()=>openAssignDialog(c.id)} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 12px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer"}}>👥 Assign Users</button>
+                <button onClick={()=>renameClient(c.id)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 12px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>✏ Rename</button>
+                <button onClick={()=>deleteClient(c.id)} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"6px 12px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>🗑 Delete Client</button>
+              </div>}
+            </div>}
+            {clientDetailTab==="activity" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+              <div style={{fontSize:13,color:"#888888"}}>Activity log will appear here as the client accumulates exports, pushes, and reverts. (Pulled from ExportLog — coming next.)</div>
+              {(()=>{ const cnt = apiCounts && apiCounts[c.id]; if(!cnt) return null; return <div style={{marginTop:14,padding:14,background:"#f8f9fc",borderRadius:8,fontSize:12}}><strong>Zoho API calls:</strong> {cnt.total} total · last action: <code style={{fontFamily:"'IBM Plex Mono',monospace"}}>{cnt.lastKind||"—"}</code>{cnt.lastAt?(" · "+new Date(cnt.lastAt).toLocaleString()):""}</div>; })()}
+            </div>}
+          </div>;
+        })()}
+
+        {/* ═════════════════ ADMIN VIEW (placeholder) ═════════════════ */}
+        {view==="admin" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:24}}>
+          <h2 style={{fontSize:18,fontWeight:700,color:"#1a1a2e",marginBottom:8}}>Admin</h2>
+          <p style={{color:"#888888",fontSize:13,marginBottom:14}}>Team management, audit logs, and platform-wide settings will live here.</p>
+          <p style={{color:"#999999",fontSize:12}}>Use the avatar menu in the top right for now to invite users / connect Zoho.</p>
+        </div>}
+
+        {/* ═════════════════ CLIENTS LIST / WORKFLOW ═════════════════ */}
+        {(view==="clients" || view==="workflow") && <>
         {/* ── CLIENT SELECTOR ── */}
-        {!activeClientId ? (
+        {view==="clients" ? (
           <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",gap:28}}>
             <div style={{textAlign:"center"}}>
               <img src={BCL_LOGO} alt="BCL" style={{height:64,objectFit:"contain",marginBottom:16}} />
@@ -5282,6 +5501,7 @@ td,th{padding:8px 12px;vertical-align:middle}
 
         {/* Bill Entry locked message — disabled in this build */}
         </>)}
+        </>}
 
         {/* ═══════════════ ASSIGN USERS DIALOG ═══════════════ */}
         {assignDialogOpen && (
