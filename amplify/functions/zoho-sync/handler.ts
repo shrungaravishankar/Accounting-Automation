@@ -240,6 +240,23 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: null, items: invoices, apiUsage: lastApiUsage });
     }
 
+    // Taxes configured in this Zoho org. UAE orgs typically expose
+    // "Standard Rate" (5%), "Zero Rated" (0%), "Exempt" (0%), and
+    // "Out of Scope" (0%). Returned as { id, name, percentage, type }
+    // so the frontend can map a row to the correct tax based on the
+    // chosen sales account / supply type.
+    if (kind === 'taxes') {
+      const j = await zohoGet('settings/taxes', accessToken, region, { organization_id: orgId });
+      const taxes = (j.taxes || []).map((t: any) => ({
+        id: t.tax_id,
+        name: t.tax_name,
+        percentage: Number(t.tax_percentage || 0),
+        type: t.tax_type || '',
+        specifier: t.tax_specifier || ''
+      }));
+      return JSON.stringify({ error: null, items: taxes, apiUsage: lastApiUsage });
+    }
+
     // Recent entries — fetch expenses, journals, and customer payments
     // for a date range so the frontend can check for duplicates BEFORE
     // pushing. params = JSON string with optional fromDate / toDate
@@ -309,6 +326,68 @@ export const handler = async (event: Event) => {
     // Push operations — accept a JSON payload string and POST to Zoho.
     // Each push returns the Zoho response so the frontend can show the
     // created resource's id and surface specific errors per entry.
+    // Create a customer (contact_type=customer). payload = { name, email?,
+    // mobile?, gst_treatment?, trn? }. Used by the Revenue flow when a
+    // bank-statement row references a customer that doesn't exist yet in
+    // Zoho. UAE-specific: VAT/TRN goes onto the contact via tax_treatment
+    // = 'vat_registered' / 'vat_not_registered' and trn field.
+    if (kind === 'createCustomer') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      if (!p.contact_name) return JSON.stringify({ error: 'contact_name is required' });
+      const body: any = {
+        contact_name: p.contact_name,
+        contact_type: 'customer',
+        currency_code: p.currency_code || 'AED'
+      };
+      if (p.email) body.email = p.email;
+      if (p.phone) body.phone = p.phone;
+      if (p.trn) {
+        body.tax_treatment = 'vat_registered';
+        body.tax_reg_no = p.trn;
+      } else {
+        body.tax_treatment = p.tax_treatment || 'vat_not_registered';
+      }
+      if (p.country_code) body.country_code = p.country_code;
+      const j = await zohoPost('contacts', accessToken, region, { organization_id: orgId }, body);
+      const contact = j.contact || {};
+      return JSON.stringify({
+        error: null,
+        success: true,
+        id: contact.contact_id || null,
+        name: contact.contact_name || p.contact_name,
+        raw: j,
+        apiUsage: lastApiUsage
+      });
+    }
+
+    // Create an invoice. payload is the Zoho-Books invoice body
+    // (customer_id, date, due_date, line_items[], notes, terms,
+    // currency_code, gst_treatment, tax_treatment, place_of_supply, ...).
+    // UAE-specific: tax_treatment must be set (vat_registered /
+    // vat_not_registered / non_gcc / dz_vat_registered etc) and each
+    // line_item carries a tax_id from /settings/taxes.
+    if (kind === 'createInvoice') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      if (!p.customer_id) return JSON.stringify({ error: 'customer_id is required' });
+      if (!Array.isArray(p.line_items) || p.line_items.length === 0) return JSON.stringify({ error: 'at least one line_item is required' });
+      const j = await zohoPost('invoices', accessToken, region, { organization_id: orgId }, p);
+      const inv = j.invoice || {};
+      return JSON.stringify({
+        error: null,
+        success: true,
+        id: inv.invoice_id || null,
+        invoice_number: inv.invoice_number || '',
+        balance: Number(inv.balance || 0),
+        total: Number(inv.total || 0),
+        raw: j,
+        apiUsage: lastApiUsage
+      });
+    }
+
     if (kind === 'pushExpense' || kind === 'pushJournal' || kind === 'pushPayment') {
       const payloadStr = event.arguments?.payload || '';
       let payload: any;

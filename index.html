@@ -907,6 +907,34 @@ window.zohoPush = async (kind, organizationId, payload) => {
   return { id: d.id || null, raw: d.raw || null };
 };
 
+// Create a customer in Zoho Books. data = { contact_name, email?, phone?, trn?, tax_treatment? }.
+window.zohoCreateCustomer = async (organizationId, data) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('createCustomer');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'createCustomer', organizationId, payload: JSON.stringify(data || {})
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response.');
+  __recordApiUsage(d.apiUsage);
+  if (d.error) throw new Error(d.error);
+  return { id: d.id, name: d.name, raw: d.raw };
+};
+
+// Create an invoice in Zoho Books. body is the Zoho-shaped invoice
+// payload (customer_id + line_items at minimum). Returns the created
+// invoice_id and number on success.
+window.zohoCreateInvoice = async (organizationId, body) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('createInvoice');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'createInvoice', organizationId, payload: JSON.stringify(body || {})
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response.');
+  __recordApiUsage(d.apiUsage);
+  if (d.error) throw new Error(d.error);
+  return { id: d.id, invoice_number: d.invoice_number, balance: d.balance, total: d.total, raw: d.raw };
+};
+
 // Delete a previously-pushed entry. kind: 'deleteExpense'|'deleteJournal'|'deletePayment'.
 window.zohoDelete = async (kind, organizationId, resourceId) => {
   window.__alIncrementApiCount && window.__alIncrementApiCount(kind);
@@ -2059,9 +2087,10 @@ function App(){
     finally { setAdminUsersLoading(false); }
   },[]);
   useEffect(()=>{ if(view==="admin" && adminUsers.length===0 && !adminUsersLoading && !adminUsersError) loadAdminUsers(); },[view,adminUsers.length,adminUsersLoading,adminUsersError,loadAdminUsers]);
-  // Learn-from-Zoho state.
+  // Learn-from-Zoho state. Result is keyed by clientId so switching
+  // clients doesn't show a stale message from the previous one.
   const[learningFromZoho,setLearningFromZoho]=useState(false);
-  const[learnFromZohoResult,setLearnFromZohoResult]=useState(null); // { added, skipped, scanned }
+  const[learnFromZohoResultByClient,setLearnFromZohoResultByClient]=useState({});
   const[assignSelected,setAssignSelected]=useState(new Set());
   const[assignLoading,setAssignLoading]=useState(false);
   const[assignSaving,setAssignSaving]=useState(false);
@@ -2101,6 +2130,19 @@ function App(){
   const[openInvoicesLoading,setOpenInvoicesLoading]=useState(false);
   const[openInvoicesError,setOpenInvoicesError]=useState("");
   const[invoicePickerOpen,setInvoicePickerOpen]=useState({});
+  // UAE tax list from Zoho /settings/taxes — lazy-loaded once per session.
+  const[zohoTaxes,setZohoTaxes]=useState([]);
+  const[zohoTaxesLoading,setZohoTaxesLoading]=useState(false);
+  // Create-invoice modal state. txnRow is the bank-statement row we're
+  // creating the invoice for. Form state mirrors the Zoho invoice body.
+  const[invoiceCreatorOpen,setInvoiceCreatorOpen]=useState(false);
+  const[invoiceCreatorRow,setInvoiceCreatorRow]=useState(null);
+  const[invoiceCreatorForm,setInvoiceCreatorForm]=useState(null);
+  const[invoiceCreatorSubmitting,setInvoiceCreatorSubmitting]=useState(false);
+  const[invoiceCreatorError,setInvoiceCreatorError]=useState("");
+  // "Advance from customer" picker — when the user wants to treat the
+  // payment as unapplied/advance instead of linking to an invoice.
+  const[advancePickerOpen,setAdvancePickerOpen]=useState({});
   // Push-to-Zoho state — drives Step 6's progress UI + failure modal.
   const[pushing,setPushing]=useState(false);
   const[pushProgress,setPushProgress]=useState({done:0,total:0,label:""});
@@ -2553,7 +2595,7 @@ function App(){
       }
       setRefDB(next);
       setClientData(activeClientId,'refdb',next);
-      setLearnFromZohoResult({ added, skipped, scanned: expenses.length });
+      setLearnFromZohoResultByClient(prev=>({...prev,[activeClientId]:{ added, skipped, scanned: expenses.length, at: Date.now() }}));
     } catch(e){
       alert("Could not learn from Zoho: "+(e.message||e));
     } finally {
@@ -2827,10 +2869,155 @@ function App(){
   const handleInvoiceChange=useCallback((id,invoice)=>{
     setClassifiedTxns(prev=>prev.map(t=>{
       if(t.id!==id) return t;
-      if(!invoice) return {...t,invoiceId:"",invoiceNumber:""};
-      return {...t,invoiceId:invoice.invoice_id,invoiceNumber:invoice.invoice_number};
+      if(!invoice) return {...t,invoiceId:"",invoiceNumber:"",revenueMode:""};
+      return {...t,invoiceId:invoice.invoice_id,invoiceNumber:invoice.invoice_number,revenueMode:"linked"};
     }));
   },[]);
+
+  // Mark a revenue row as "advance/unapplied" against a chosen ledger.
+  // No invoice gets created; the push will produce a customer payment
+  // and the unapplied amount sits as an advance against the customer.
+  const handleAdvanceChoose=useCallback((id,ledgerName)=>{
+    setClassifiedTxns(prev=>prev.map(t=>{
+      if(t.id!==id) return t;
+      return {...t, invoiceId:"", invoiceNumber:"", revenueMode:"advance", advanceLedger: ledgerName||""};
+    }));
+  },[]);
+
+  // Lazy-load the org's Zoho tax list (used by the invoice-creator UI).
+  const loadZohoTaxes=useCallback(async ()=>{
+    if(zohoTaxes.length>0 || zohoTaxesLoading) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId) return;
+    setZohoTaxesLoading(true);
+    try { const tx = await window.zohoFetch('taxes', orgId); setZohoTaxes(tx||[]); }
+    catch(e){ console.warn('taxes load failed:', e.message||e); }
+    finally { setZohoTaxesLoading(false); }
+  },[activeClientId,clients,zohoTaxes.length,zohoTaxesLoading]);
+
+  // Pick sensible defaults for a UAE sales line from this client's CoA.
+  // Order of preference: a "Sales – Taxable Supply" / "5% VAT" account,
+  // then any account whose name contains "Sales", then any Income/Revenue
+  // type account.
+  const defaultSalesAccount = useMemo(()=>{
+    const coa = chartOfAccounts || [];
+    const byType = (t) => coa.filter(a => (a.type||'').toLowerCase().includes(t));
+    const tax = coa.find(a => /5%|standard\s*rat|taxable/i.test(a.name||''));
+    if(tax) return tax;
+    const sales = coa.find(a => /sales|service revenue/i.test(a.name||''));
+    if(sales) return sales;
+    return byType('income')[0] || byType('revenue')[0] || coa[0] || null;
+  },[chartOfAccounts]);
+
+  // Open the invoice-creator modal pre-filled from a revenue row.
+  const openInvoiceCreator=useCallback((txn)=>{
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
+    if(!txn.contactName){ alert("Pick a customer for this row before creating an invoice."); return; }
+    loadZohoTaxes();
+    const customerIds = getClientData(activeClientId,'customerIds',{}) || {};
+    const customerId = customerIds[txn.contactName] || "";
+    const amount = Number(txn.credit||0);
+    const isoDate = (()=>{ const s=(txn.date||'').replace(/\//g,'-').trim(); const m=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/); if(m){ const pad=(n)=>n.length<2?"0"+n:n; return m[3]+'-'+pad(m[2])+'-'+pad(m[1]); } return s; })();
+    setInvoiceCreatorRow(txn);
+    setInvoiceCreatorForm({
+      customerId,
+      customerName: txn.contactName,
+      customerTrn: "",
+      needsCustomerCreate: !customerId,
+      invoiceNumber: "",
+      date: isoDate || new Date().toISOString().slice(0,10),
+      dueDate: isoDate || new Date().toISOString().slice(0,10),
+      lineDescription: txn.description||"",
+      accountId: defaultSalesAccount?.id || "",
+      accountName: defaultSalesAccount?.name || "",
+      rate: amount,
+      vatPercent: 5, // UAE standard-rate default
+      taxId: "",
+      notes: ""
+    });
+    setInvoiceCreatorError("");
+    setInvoiceCreatorOpen(true);
+  },[clients,activeClientId,defaultSalesAccount,loadZohoTaxes]);
+
+  // Submit the invoice creator. Creates the customer if needed, then the
+  // invoice, then links the new invoice_id back onto the bank row so the
+  // eventual Push to Zoho will apply this payment against the new invoice.
+  const submitInvoiceCreator=useCallback(async ()=>{
+    if(!invoiceCreatorForm || invoiceCreatorSubmitting) return;
+    const f = invoiceCreatorForm;
+    const row = invoiceCreatorRow;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ setInvoiceCreatorError("Client is not linked to Zoho."); return; }
+    if(!f.customerName.trim()){ setInvoiceCreatorError("Customer name required."); return; }
+    if(!f.accountId){ setInvoiceCreatorError("Pick a sales account."); return; }
+    if(!(Number(f.rate)>0)){ setInvoiceCreatorError("Amount must be greater than 0."); return; }
+
+    setInvoiceCreatorSubmitting(true);
+    setInvoiceCreatorError("");
+    try {
+      // 1) Create customer if we don't have a Zoho id yet.
+      let customerId = f.customerId;
+      if(!customerId){
+        const res = await window.zohoCreateCustomer(orgId, {
+          contact_name: f.customerName.trim(),
+          trn: f.customerTrn ? f.customerTrn.trim() : undefined,
+          country_code: 'AE',
+          currency_code: 'AED'
+        });
+        customerId = res.id;
+        // Persist into per-client config so future runs see it.
+        const cur = getClientData(activeClientId,'customerIds',{}) || {};
+        cur[res.name||f.customerName.trim()] = customerId;
+        setClientData(activeClientId,'customerIds',cur);
+        // And drop into local customers list for the dropdowns.
+        setCustomers(prev => prev.includes(f.customerName.trim()) ? prev : [...prev, f.customerName.trim()]);
+      }
+      // 2) Resolve the tax id. Either the user picked one explicitly, or
+      //    we map by VAT % against the loaded tax list (Zoho UAE returns
+      //    "Standard Rate" = 5%, "Zero Rated" = 0%, etc).
+      let taxId = f.taxId;
+      const vat = Number(f.vatPercent || 0);
+      if(!taxId){
+        const match = (zohoTaxes||[]).find(t => Number(t.percentage) === vat);
+        if(match) taxId = match.id;
+      }
+      // 3) Build the Zoho invoice body. UAE-specific fields included.
+      const line = {
+        name: f.lineDescription || "Sales",
+        description: f.lineDescription || "",
+        account_id: f.accountId,
+        rate: Number(f.rate),
+        quantity: 1
+      };
+      if(taxId) line.tax_id = taxId;
+      else if(vat>0) line.tax_percentage = vat;
+      const body = {
+        customer_id: customerId,
+        date: f.date,
+        due_date: f.dueDate || f.date,
+        tax_treatment: f.customerTrn ? 'vat_registered' : 'vat_not_registered',
+        place_of_supply: 'AE',
+        line_items: [line],
+        notes: f.notes || ""
+      };
+      if(f.invoiceNumber && f.invoiceNumber.trim()) body.invoice_number = f.invoiceNumber.trim();
+      // 4) Create the invoice and link it onto the bank row.
+      const res = await window.zohoCreateInvoice(orgId, body);
+      handleInvoiceChange(row.id, { invoice_id: res.id, invoice_number: res.invoice_number || f.invoiceNumber || '' });
+      // 5) Close the modal.
+      setInvoiceCreatorOpen(false);
+      setInvoiceCreatorRow(null);
+      setInvoiceCreatorForm(null);
+    } catch(e){
+      setInvoiceCreatorError(e.message || String(e));
+    } finally {
+      setInvoiceCreatorSubmitting(false);
+    }
+  },[invoiceCreatorForm,invoiceCreatorRow,invoiceCreatorSubmitting,clients,activeClientId,zohoTaxes,handleInvoiceChange]);
 
   const confirmSelected=useCallback(()=>{
     if(selectedIds.size===0){alert("Select transactions using checkboxes first.");return;}
@@ -4012,11 +4199,13 @@ td,th{padding:8px 12px;vertical-align:middle}
           })()}
         </div>
 
-        {/* My clients (filtered to assigned for staff, all for admin) */}
-        {sidebarOpen && clients.length>0 && <div style={{padding:"6px 14px 4px 14px"}}>
+        {/* My clients — quick switcher. Hidden on the Clients page (the main
+            panel already shows the full list; no point duplicating). When on
+            Clients we show an Insights panel instead. */}
+        {sidebarOpen && clients.length>0 && view!=="clients" && <div style={{padding:"6px 14px 4px 14px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
             <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase"}}>
-              {window.AUTH_USER && window.AUTH_USER.role==='staff' ? 'My clients' : 'Clients'}
+              {window.AUTH_USER && window.AUTH_USER.role==='staff' ? 'My clients' : 'Quick switch'}
             </div>
             <div style={{fontSize:9,color:"#999999",fontFamily:"'IBM Plex Mono',monospace"}}>{clients.length}</div>
           </div>
@@ -4028,6 +4217,26 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {projCount>0 && <span style={{fontSize:9,color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>{projCount}</span>}
               </div>;
             })}
+          </div>
+        </div>}
+
+        {/* On the Clients page, swap the list for at-a-glance insights so the
+            sidebar adds something the main panel doesn't already show. */}
+        {sidebarOpen && view==="clients" && <div style={{padding:"6px 14px 4px 14px"}}>
+          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:6}}>Insights</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6,fontSize:11}}>
+            <div style={{padding:"7px 10px",background:"#f8f9fc",borderRadius:6,border:"1px solid #f0f0f4"}}>
+              <div style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Zoho-linked</div>
+              <div style={{fontSize:14,fontWeight:700,color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{clients.filter(c=>c.zohoOrgId).length}<span style={{fontSize:10,color:"#888888"}}> / {clients.length}</span></div>
+            </div>
+            <div style={{padding:"7px 10px",background:"#f8f9fc",borderRadius:6,border:"1px solid #f0f0f4"}}>
+              <div style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>With projects</div>
+              <div style={{fontSize:14,fontWeight:700,color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace"}}>{clients.filter(c=>(projectLog[c.id]||[]).length>0).length}</div>
+            </div>
+            <div style={{padding:"7px 10px",background:"#f8f9fc",borderRadius:6,border:"1px solid #f0f0f4"}}>
+              <div style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Needs assigning</div>
+              <div style={{fontSize:14,fontWeight:700,color:clients.filter(c=>!(c.assignedTo||"").trim()).length>0?"#d97706":"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{clients.filter(c=>!(c.assignedTo||"").trim()).length}</div>
+            </div>
           </div>
         </div>}
 
@@ -4096,7 +4305,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             {STEPS.map(s=><div key={s.id} onClick={()=>{if(s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0)))setStep(s.id);}} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:5,fontSize:11,fontWeight:500,background:step===s.id?"rgba(77,63,160,0.2)":"transparent",color:step===s.id?"#6958C2":step>s.id?"#16a34a":"#999999",border:step===s.id?"1px solid rgba(77,63,160,0.4)":"1px solid transparent",cursor:s.id<=step?"pointer":"default",whiteSpace:"nowrap"}}><span>{s.icon}</span>{s.label}</div>)}
             <button onClick={()=>{if(step<6){ if(step===1&&transactions.length>0)setStep(2); else if(step===2)setStep(4); else if(step>=2&&step<6)setStep(step+1); }}} disabled={step>=6||(step===1&&transactions.length===0)} style={{background:"none",border:"1px solid "+((step<6&&!(step===1&&transactions.length===0))?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:(step<6&&!(step===1&&transactions.length===0))?"#6958C2":"#e2e2ea",fontSize:13,cursor:(step<6&&!(step===1&&transactions.length===0))?"pointer":"default",lineHeight:1,fontWeight:700}}>›</button>
           </div>}
-          {apiUsage && apiUsage.remaining!=null && view!=="workflow" && <div title={"Zoho API calls remaining today" + (apiUsage.reset?" — resets at "+new Date(Number(apiUsage.reset)*1000).toLocaleTimeString():"")} style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:12,background:Number(apiUsage.remaining)<100?"rgba(220,38,38,0.08)":"rgba(105,88,194,0.08)",border:"1px solid "+(Number(apiUsage.remaining)<100?"rgba(220,38,38,0.25)":"rgba(105,88,194,0.2)"),fontSize:11,fontWeight:600,color:Number(apiUsage.remaining)<100?"#dc2626":"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ {apiUsage.remaining}{apiUsage.limit?(" / "+apiUsage.limit):""}</div>}
+          {apiUsage && apiUsage.remaining!=null && <div title={"Zoho API calls remaining today" + (apiUsage.reset?" — resets at "+new Date(Number(apiUsage.reset)*1000).toLocaleTimeString():"")} style={{marginLeft:"auto",display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",borderRadius:12,background:Number(apiUsage.remaining)<100?"rgba(220,38,38,0.08)":"rgba(105,88,194,0.08)",border:"1px solid "+(Number(apiUsage.remaining)<100?"rgba(220,38,38,0.25)":"rgba(105,88,194,0.2)"),fontSize:11,fontWeight:600,color:Number(apiUsage.remaining)<100?"#dc2626":"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ {apiUsage.remaining}{apiUsage.limit?(" / "+apiUsage.limit):""}</div>}
         </div>
       </div>
 
@@ -4243,7 +4452,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{flex:1,minWidth:240}}>
                 <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:4}}>🤖 Auto-learn from past Zoho activity</div>
                 <div style={{fontSize:11,color:"#666666",lineHeight:1.5}}>Scan up to 2 years of this client's <strong>expenses</strong> in Zoho Books and seed the classifier's <strong>description → ledger</strong> mappings. The more history, the more rows auto-assigned next time you upload a bank statement.</div>
-                {learnFromZohoResult && <div style={{marginTop:8,padding:"6px 10px",background:"#ffffff",borderRadius:6,fontSize:11,color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>✓ Learned <strong>{learnFromZohoResult.added}</strong> new mapping{learnFromZohoResult.added===1?'':'s'} from <strong>{learnFromZohoResult.scanned}</strong> Zoho expense{learnFromZohoResult.scanned===1?'':'s'} ({learnFromZohoResult.skipped} skipped — missing description or account).</div>}
+                {(()=>{ const r = learnFromZohoResultByClient[activeClientId]; return r ? <div style={{marginTop:8,padding:"6px 10px",background:"#ffffff",borderRadius:6,fontSize:11,color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>✓ Learned <strong>{r.added}</strong> new mapping{r.added===1?'':'s'} from <strong>{r.scanned}</strong> Zoho expense{r.scanned===1?'':'s'} ({r.skipped} skipped — missing description or account).</div> : null; })()}
               </div>
               <button onClick={learnFromZoho} disabled={learningFromZoho} style={{background:learningFromZoho?"#cccccc":"linear-gradient(135deg,#4D3FA0,#6958C2)",color:"#fff",border:"none",borderRadius:8,padding:"10px 18px",fontSize:12,fontWeight:700,cursor:learningFromZoho?"default":"pointer",whiteSpace:"nowrap",boxShadow:"0 2px 12px rgba(77,63,160,0.2)"}}>{learningFromZoho?"Scanning…":"🤖 Learn from Zoho"}</button>
             </div>}
@@ -4593,67 +4802,6 @@ td,th{padding:8px 12px;vertical-align:middle}
               )
             )}
 
-            {/* ── GLOBAL BASE DATA — LEARN FROM ZOHO ── */}
-            <div style={{width:"100%",maxWidth:720,borderTop:"1px solid #e2e2ea",paddingTop:24,marginTop:8}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-                <div>
-                  <div style={{fontSize:15,fontWeight:600,color:"#4D3FA0"}}>Global Base Data — Auto-Classification Intelligence</div>
-                  <div style={{fontSize:11,color:"#888888",marginTop:2}}>Import past accounted data so AutoLedger learns how to classify transactions across all clients</div>
-                </div>
-                {globalRefCount > 0 && <span style={{fontSize:11,padding:"3px 10px",borderRadius:6,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)",fontWeight:600}}>{globalRefCount} mappings learned</span>}
-              </div>
-
-              <input ref={globalRefInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleGlobalBaseUpload} style={{display:"none"}} />
-
-              {/* Single upload + sample template */}
-              <div style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:10,padding:16,marginBottom:14}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12,marginBottom:12}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={{fontSize:18}}>📊</span>
-                    <div>
-                      <div style={{fontSize:13,fontWeight:600,color:"#4D3FA0"}}>Upload Classification Data</div>
-                      <div style={{fontSize:10,color:"#888888"}}>CSV or Excel with Description + Ledger columns</div>
-                    </div>
-                  </div>
-                  <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>globalRefInputRef.current&&globalRefInputRef.current.click()} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:6,padding:"8px 18px",fontSize:11,fontWeight:600,cursor:"pointer"}}>📤 Upload File</button>
-                    <button onClick={()=>{
-                      const sample="Description,Ledger\nEtisalat Monthly Plan,Telephone Expense\nDEWA Electricity Bill,Utilities Expense\nWPS Salary Transfer - January,Salary Expense\nAmazon Web Services,Software Expense\nOffice Rent Payment,Rent Expense\nBank Service Charges,Bank Charges\nGoogle Ads Campaign,Marketing Expense\nUber Business Travel,Travel Expense\nLegal Consulting Fees,Professional Fees\nStripe Payout - Invoice,Sales Revenue\nClient Payment - Al Futtaim,Accounts Receivable\nVAT Payment FTA,VAT Payable\n";
-                      const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([sample],{type:"text/csv"}));a.download="autoledger_sample_template.csv";a.click();
-                    }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 14px",color:"#0891b2",fontSize:10,fontWeight:600,cursor:"pointer"}}>⬇ Download Sample Template</button>
-                  </div>
-                </div>
-                <div style={{fontSize:10,color:"#777777",lineHeight:1.7,padding:"10px 12px",background:"#ffffff",borderRadius:6,border:"1px solid #f5f5fa"}}>
-                  <strong style={{color:"#666666"}}>Accepted formats:</strong> Any CSV/Excel with these columns (auto-detected):<br/>
-                  <span style={{color:"#888888"}}>• <strong style={{color:"#1a1a2e"}}>Description</strong> (or Narration / Payee / Particulars)</span><br/>
-                  <span style={{color:"#888888"}}>• <strong style={{color:"#1a1a2e"}}>Ledger</strong> (or Account Name / Category / Categorized To)</span><br/>
-                  <span style={{color:"#777777"}}>Works with: Zoho Bank Transaction exports, Zoho Journal Reports, Tally exports, or any custom CSV.</span>
-                </div>
-              </div>
-
-              {/* Status and actions */}
-              {globalRefCount > 0 && (
-                <div style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:10,padding:14}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{fontSize:14}}>🧠</span>
-                      <span style={{fontSize:13,fontWeight:600,color:"#16a34a"}}>{globalRefCount} classification patterns learned</span>
-                    </div>
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>globalRefInputRef.current&&globalRefInputRef.current.click()} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"5px 12px",color:"#6958C2",fontSize:10,cursor:"pointer"}}>+ Add More</button>
-                      <button onClick={clearGlobalRefDB} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"5px 12px",color:"#dc2626",fontSize:10,cursor:"pointer"}}>Clear All</button>
-                    </div>
-                  </div>
-                  <div style={{fontSize:10,color:"#777777"}}>These patterns are used across all clients. Upload more files to improve accuracy. Each upload merges with existing data — duplicates are counted, not duplicated.</div>
-                </div>
-              )}
-
-              {globalRefCount === 0 && (
-                <div style={{fontSize:11,color:"#777777",marginTop:4,padding:"10px 14px",background:"rgba(105,88,194,0.05)",borderRadius:8,border:"1px solid rgba(105,88,194,0.1)"}}>
-                  <strong style={{color:"#666666"}}>How it works:</strong> Upload your past accounted bank transactions (from Zoho or any accounting software). AutoLedger learns which descriptions map to which ledgers and uses this knowledge to auto-classify new transactions for every client. The more data you feed, the smarter it gets.
-                </div>
-              )}
-            </div>
           </div>
         ) : (<>
 
@@ -5279,34 +5427,59 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{background:"rgba(22,163,74,0.05)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:6,padding:"6px 10px",color:"#16a34a",fontSize:12,display:"flex",alignItems:"center",gap:6}}>
                       <span style={{fontSize:11}}>💰</span> Payment Received → {t.contactName}
                     </div>
-                    {/* Invoice picker — link this payment to a specific open invoice */}
+                    {/* Revenue framework picker — three branches:
+                        1. Apply to an existing open invoice (linked)
+                        2. Create a new invoice in Zoho (then linked)
+                        3. Treat as advance from customer (no invoice; chosen ledger) */}
                     <div style={{marginTop:4,position:"relative"}}>
                       <div onClick={()=>{ setInvoicePickerOpen(p=>({...p,[t.id]:!p[t.id]})); loadOpenInvoices(false); }}
-                        style={{background:"#f8f9fc",border:"1px solid "+(t.invoiceId?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",color:t.invoiceId?"#16a34a":"#777777"}}>
-                        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.invoiceId?("📎 "+t.invoiceNumber):"Link invoice (or leave unapplied)"}</span>
+                        style={{background:"#f8f9fc",border:"1px solid "+(t.invoiceId?"rgba(22,163,74,0.4)":t.revenueMode==="advance"?"rgba(217,119,6,0.4)":"#e2e2ea"),borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",color:t.invoiceId?"#16a34a":t.revenueMode==="advance"?"#d97706":"#777777"}}>
+                        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                          {t.invoiceId ? ("📎 "+t.invoiceNumber)
+                            : t.revenueMode==="advance" ? ("⏳ Advance → "+(t.advanceLedger||"(pick ledger)"))
+                            : "Pick: invoice · advance · new invoice"}
+                        </span>
                         <span style={{color:"#777777",marginLeft:4}}>▾</span>
                       </div>
-                      {invoicePickerOpen[t.id]&&<div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:120,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:280,overflow:"hidden",display:"flex",flexDirection:"column",marginTop:2}}>
-                        <div style={{padding:"6px 10px",fontSize:10,color:"#777777",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                          <span>Open invoices for {t.contactName}</span>
-                          <span onClick={(e)=>{e.stopPropagation();loadOpenInvoices(true);}} style={{color:"#6958C2",cursor:"pointer",fontWeight:600}}>↻ Refresh</span>
+                      {invoicePickerOpen[t.id]&&<div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:120,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:340,overflow:"hidden",display:"flex",flexDirection:"column",marginTop:2}}>
+                        {/* Open invoices section */}
+                        <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#4D3FA0",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>1 · Apply to open invoice</span>
+                          <span onClick={(e)=>{e.stopPropagation();loadOpenInvoices(true);}} style={{color:"#6958C2",cursor:"pointer",fontSize:9}}>↻ Refresh</span>
                         </div>
-                        {openInvoicesLoading&&<div style={{padding:"10px",fontSize:11,color:"#777777"}}>Loading…</div>}
-                        {openInvoicesError&&<div style={{padding:"10px",fontSize:11,color:"#dc2626"}}>{openInvoicesError}</div>}
-                        {!openInvoicesLoading&&!openInvoicesError&&<div style={{overflowY:"auto",maxHeight:220}}>
-                          <div onClick={()=>{handleInvoiceChange(t.id,null);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}} style={{padding:"7px 10px",fontSize:11,cursor:"pointer",color:"#777777",borderBottom:"1px solid #f8f9fc"}}>— Unapplied (no invoice) —</div>
-                          {(()=>{ const list = openInvoices.filter(inv => (inv.customer_name||"").toLowerCase() === (t.contactName||"").toLowerCase());
-                            if(list.length===0) return <div style={{padding:"10px",fontSize:11,color:"#777777"}}>No open invoices for this customer.</div>;
-                            return list.map(inv=><div key={inv.invoice_id} onClick={()=>{handleInvoiceChange(t.id,inv);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}}
-                              style={{padding:"7px 10px",fontSize:11,cursor:"pointer",background:inv.invoice_id===t.invoiceId?"rgba(22,163,74,0.08)":"transparent",borderBottom:"1px solid #f8f9fc"}}>
-                              <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
-                                <span style={{fontWeight:600,color:"#1a1a2e"}}>{inv.invoice_number}</span>
-                                <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#16a34a"}}>{fmt(inv.balance)}</span>
-                              </div>
-                              <div style={{fontSize:9,color:"#777777",marginTop:2}}>{inv.date} · {inv.status}{inv.due_date?(" · due "+inv.due_date):""}</div>
-                            </div>);
-                          })()}
-                        </div>}
+                        {openInvoicesLoading&&<div style={{padding:"8px 10px",fontSize:11,color:"#777777"}}>Loading invoices…</div>}
+                        {openInvoicesError&&<div style={{padding:"8px 10px",fontSize:11,color:"#dc2626"}}>{openInvoicesError}</div>}
+                        {!openInvoicesLoading&&!openInvoicesError&&(()=>{
+                          const list = openInvoices.filter(inv => (inv.customer_name||"").toLowerCase() === (t.contactName||"").toLowerCase());
+                          if(list.length===0) return <div style={{padding:"8px 10px",fontSize:10,color:"#999999"}}>No open invoices for {t.contactName}.</div>;
+                          return <div style={{maxHeight:140,overflowY:"auto"}}>{list.map(inv=><div key={inv.invoice_id} onClick={()=>{handleInvoiceChange(t.id,inv);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}}
+                            style={{padding:"6px 10px",fontSize:11,cursor:"pointer",background:inv.invoice_id===t.invoiceId?"rgba(22,163,74,0.08)":"transparent",borderBottom:"1px solid #f8f9fc"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                              <span style={{fontWeight:600,color:"#1a1a2e"}}>{inv.invoice_number}</span>
+                              <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#16a34a"}}>{fmt(inv.balance)}</span>
+                            </div>
+                            <div style={{fontSize:9,color:"#777777",marginTop:2}}>{inv.date} · {inv.status}{inv.due_date?(" · due "+inv.due_date):""}</div>
+                          </div>)}</div>;
+                        })()}
+                        {/* Create-new-invoice action */}
+                        <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#4D3FA0",borderTop:"1px solid #f0f0f4",borderBottom:"1px solid #f0f0f4",marginTop:2}}>2 · Invoice not in Zoho yet?</div>
+                        <div onClick={()=>{ setInvoicePickerOpen(p=>({...p,[t.id]:false})); openInvoiceCreator(t); }}
+                          style={{padding:"8px 10px",fontSize:11,cursor:"pointer",color:"#4D3FA0",background:"rgba(105,88,194,0.04)",fontWeight:600}}>
+                          ➕ Create invoice in Zoho from this row…
+                          <div style={{fontSize:9,color:"#777777",marginTop:2,fontWeight:400}}>Builds a UAE-compliant invoice (5% VAT-aware) and links it back to this payment.</div>
+                        </div>
+                        {/* Advance / unapplied */}
+                        <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#d97706",borderTop:"1px solid #f0f0f4",borderBottom:"1px solid #f0f0f4",marginTop:2}}>3 · No invoice — advance from customer</div>
+                        <div style={{padding:"6px 10px"}}>
+                          <div style={{fontSize:10,color:"#777777",marginBottom:5}}>Pick a ledger to park this advance. Push will still create a Payment Received against {t.contactName}, but unapplied — your accountant can apply it later.</div>
+                          <select value={t.advanceLedger||""} onChange={(e)=>handleAdvanceChoose(t.id,e.target.value)} onClick={(e)=>e.stopPropagation()} style={{width:"100%",background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"5px 8px",fontSize:11,color:"#1a1a2e"}}>
+                            <option value="">— Choose ledger —</option>
+                            {(()=>{ const coa=chartOfAccounts||[]; const liab = coa.filter(a => /advance|unearned|customer\s*deposit|received\s*in\s*advance/i.test(a.name||'')); const rest = coa.filter(a => !liab.includes(a)); return [...liab, ...rest].map(a=><option key={a.name} value={a.name}>{a.name}{a.type?(" — "+a.type):""}</option>); })()}
+                          </select>
+                          <div style={{display:"flex",justifyContent:"flex-end",marginTop:6}}>
+                            <span onClick={()=>{handleAdvanceChoose(t.id,"");handleInvoiceChange(t.id,null);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}} style={{fontSize:10,color:"#888888",cursor:"pointer"}}>Clear selection</span>
+                          </div>
+                        </div>
                       </div>}
                     </div>
                   </div>
@@ -5728,6 +5901,119 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
           </div>
         </div>}
+
+        {/* ═══════════════ Invoice creator modal (UAE-aware) ═══════════════ */}
+        {invoiceCreatorOpen && invoiceCreatorForm && (()=>{
+          const f = invoiceCreatorForm;
+          const set = (patch)=>setInvoiceCreatorForm(prev=>({...prev,...patch}));
+          const coa = chartOfAccounts || [];
+          // Sales-like accounts first.
+          const sortedAccts = [...coa].sort((a,b)=>{
+            const sa = /sales|service revenue|income|5%|standard\s*rat|taxable/i.test(a.name||'') ? 0 : 1;
+            const sb = /sales|service revenue|income|5%|standard\s*rat|taxable/i.test(b.name||'') ? 0 : 1;
+            if(sa!==sb) return sa-sb;
+            return (a.name||'').localeCompare(b.name||'');
+          });
+          const lineTotal = Number(f.rate||0);
+          const vatAmount = lineTotal * Number(f.vatPercent||0) / 100;
+          const grandTotal = lineTotal + vatAmount;
+          return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+            <div style={{background:"#ffffff",borderRadius:12,maxWidth:720,width:"100%",maxHeight:"90vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+              <div style={{padding:"18px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(105,88,194,0.04)"}}>
+                <div>
+                  <h3 style={{fontSize:15,fontWeight:700,color:"#1a1a2e"}}>Create invoice in Zoho — {f.customerName}</h3>
+                  <div style={{fontSize:11,color:"#888888",marginTop:2}}>UAE Books · AED · VAT applied per line item</div>
+                </div>
+                <button onClick={()=>{ if(!invoiceCreatorSubmitting) setInvoiceCreatorOpen(false); }} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
+              </div>
+              <div style={{padding:"18px 22px",overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:14}}>
+
+                {/* Customer */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Customer{f.needsCustomerCreate&&<span style={{color:"#d97706",marginLeft:6}}>↗ will be created in Zoho</span>}</label>
+                    <input type="text" value={f.customerName} onChange={(e)=>set({customerName:e.target.value})} placeholder="Customer name" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Customer TRN (optional)</label>
+                    <input type="text" value={f.customerTrn} onChange={(e)=>set({customerTrn:e.target.value})} placeholder="15-digit VAT TRN" style={{width:"100%",padding:"8px 10px",border:"1px solid "+(f.customerTrn?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
+                    <div style={{fontSize:9,color:"#888888",marginTop:3}}>Setting a TRN switches tax_treatment to <code>vat_registered</code>.</div>
+                  </div>
+                </div>
+
+                {/* Dates + invoice number */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Invoice date</label>
+                    <input type="date" value={f.date} onChange={(e)=>set({date:e.target.value, dueDate:f.dueDate<e.target.value?e.target.value:f.dueDate})} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Due date</label>
+                    <input type="date" value={f.dueDate} onChange={(e)=>set({dueDate:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Invoice # (optional)</label>
+                    <input type="text" value={f.invoiceNumber} onChange={(e)=>set({invoiceNumber:e.target.value})} placeholder="auto" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
+                  </div>
+                </div>
+
+                {/* Line item */}
+                <div style={{padding:14,background:"#f8f9fc",borderRadius:8,border:"1px solid #f0f0f4"}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",letterSpacing:"0.04em",textTransform:"uppercase",marginBottom:8}}>Line item</div>
+                  <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:10}}>
+                    <div>
+                      <label style={{fontSize:10,color:"#888888"}}>Description</label>
+                      <input type="text" value={f.lineDescription} onChange={(e)=>set({lineDescription:e.target.value})} placeholder="e.g. Consulting fee – March 2026" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                    </div>
+                    <div>
+                      <label style={{fontSize:10,color:"#888888"}}>Amount (AED, excl. VAT)</label>
+                      <input type="number" step="0.01" value={f.rate} onChange={(e)=>set({rate:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:10,marginTop:10}}>
+                    <div>
+                      <label style={{fontSize:10,color:"#888888"}}>Sales account (from Chart of Accounts)</label>
+                      <select value={f.accountId} onChange={(e)=>{ const opt=sortedAccts.find(a=>a.id===e.target.value); set({accountId:e.target.value,accountName:opt?.name||""}); }} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}}>
+                        <option value="">— Choose account —</option>
+                        {sortedAccts.map(a=><option key={a.id||a.name} value={a.id||""}>{a.name}{a.type?(" — "+a.type):""}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{fontSize:10,color:"#888888"}}>VAT %</label>
+                      <select value={f.vatPercent} onChange={(e)=>{ const v=Number(e.target.value); const match=(zohoTaxes||[]).find(t=>Number(t.percentage)===v); set({vatPercent:v,taxId:match?match.id:""}); }} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}}>
+                        <option value="5">5% — Standard Rate</option>
+                        <option value="0">0% — Zero Rated / Exempt</option>
+                      </select>
+                      <div style={{fontSize:9,color:"#888888",marginTop:3}}>{zohoTaxesLoading?"Loading taxes…":zohoTaxes.length>0?("Matched: "+(zohoTaxes.find(t=>Number(t.percentage)===Number(f.vatPercent))?.name||"none")):"Tax list will fetch on submit."}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Totals */}
+                <div style={{padding:"10px 14px",background:"rgba(22,163,74,0.04)",border:"1px solid rgba(22,163,74,0.18)",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,color:"#555555",flexWrap:"wrap",gap:8}}>
+                  <span>Subtotal: <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(lineTotal)}</strong></span>
+                  <span>VAT ({f.vatPercent}%): <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(vatAmount)}</strong></span>
+                  <span style={{fontSize:13}}>Total: <strong style={{color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(grandTotal)}</strong></span>
+                </div>
+
+                {/* Notes */}
+                <div>
+                  <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Notes (optional)</label>
+                  <textarea value={f.notes} onChange={(e)=>set({notes:e.target.value})} rows={2} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,resize:"vertical",fontFamily:"inherit"}} placeholder="Anything to show on the printed invoice…" />
+                </div>
+
+                {invoiceCreatorError && <div style={{padding:"10px 12px",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.25)",borderRadius:6,color:"#dc2626",fontSize:12}}>{invoiceCreatorError}</div>}
+              </div>
+              <div style={{padding:"14px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                <div style={{fontSize:10,color:"#888888"}}>This will {f.needsCustomerCreate?"create the customer and the invoice in Zoho.":"create only the invoice in Zoho."} Reverting is possible from the push report.</div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setInvoiceCreatorOpen(false)} disabled={invoiceCreatorSubmitting} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"8px 16px",color:"#1a1a2e",fontSize:12,fontWeight:600,cursor:invoiceCreatorSubmitting?"default":"pointer"}}>Cancel</button>
+                  <button onClick={submitInvoiceCreator} disabled={invoiceCreatorSubmitting} style={{background:invoiceCreatorSubmitting?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:12,fontWeight:700,cursor:invoiceCreatorSubmitting?"default":"pointer"}}>{invoiceCreatorSubmitting?"Creating…":"Create invoice"}</button>
+                </div>
+              </div>
+            </div>
+          </div>;
+        })()}
 
         {/* ═══════════════ BILL ENTRY MODE — disabled in this build ═══════════════ */}
         {false&&appMode==="bills"&&isPaid&&(<div style={{display:"flex",flexDirection:"column",gap:20}}>
