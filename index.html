@@ -2048,6 +2048,20 @@ function App(){
   const[assignDialogOpen,setAssignDialogOpen]=useState(false);
   const[assignClientId,setAssignClientId]=useState("");
   const[assignAvailableUsers,setAssignAvailableUsers]=useState([]); // [{email,name}]
+  // Admin page: team roster.
+  const[adminUsers,setAdminUsers]=useState([]);
+  const[adminUsersLoading,setAdminUsersLoading]=useState(false);
+  const[adminUsersError,setAdminUsersError]=useState("");
+  const loadAdminUsers = useCallback(async ()=>{
+    setAdminUsersLoading(true); setAdminUsersError("");
+    try { const u = await window.alListUsers(); setAdminUsers(u||[]); }
+    catch(e){ setAdminUsersError(e.message||String(e)); }
+    finally { setAdminUsersLoading(false); }
+  },[]);
+  useEffect(()=>{ if(view==="admin" && adminUsers.length===0 && !adminUsersLoading && !adminUsersError) loadAdminUsers(); },[view,adminUsers.length,adminUsersLoading,adminUsersError,loadAdminUsers]);
+  // Learn-from-Zoho state.
+  const[learningFromZoho,setLearningFromZoho]=useState(false);
+  const[learnFromZohoResult,setLearnFromZohoResult]=useState(null); // { added, skipped, scanned }
   const[assignSelected,setAssignSelected]=useState(new Set());
   const[assignLoading,setAssignLoading]=useState(false);
   const[assignSaving,setAssignSaving]=useState(false);
@@ -2507,6 +2521,46 @@ function App(){
     localStorage.setItem("autoledger_active_client", id);
     if (!(opts && opts.keepView)) { setView("clientDetail"); setClientDetailTab("projects"); }
   }, [clients]);
+  // Pull a wide window of past Zoho expenses for the active client and seed
+  // this client's per-description → ledger refDB from them. Skips entries
+  // that are missing a description or account. Idempotent — re-running just
+  // bumps the use-count on existing mappings.
+  const learnFromZoho = useCallback(async ()=>{
+    if(learningFromZoho) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
+    if(!confirm("Scan this client's recent Zoho expenses and learn the description → ledger mappings?\n\nThis pulls up to 2 years of expenses. It will not modify any data in Zoho — only AutoLedger's local classifier.")) return;
+
+    setLearningFromZoho(true);
+    setLearnFromZohoResult(null);
+    try {
+      const today = new Date();
+      const past = new Date(today.getTime() - 730*86400000);
+      const fromDate = past.toISOString().slice(0,10);
+      const toDate = today.toISOString().slice(0,10);
+      const res = await window.zohoFetch('recentEntries', orgId, { fromDate, toDate });
+      const expenses = (res && res.expenses) || [];
+      let added=0, skipped=0;
+      // Build the next refDB off the current state so a single setRefDB at
+      // the end avoids stale-closure issues for many calls in a row.
+      let next = { ...refDB };
+      for(const e of expenses){
+        if(!e.description || !e.account){ skipped++; continue; }
+        const beforeSize = Object.keys(next).length;
+        next = addToRefDB(next, e.description, e.account);
+        if(Object.keys(next).length > beforeSize) added++;
+      }
+      setRefDB(next);
+      setClientData(activeClientId,'refdb',next);
+      setLearnFromZohoResult({ added, skipped, scanned: expenses.length });
+    } catch(e){
+      alert("Could not learn from Zoho: "+(e.message||e));
+    } finally {
+      setLearningFromZoho(false);
+    }
+  },[learningFromZoho,clients,activeClientId,refDB]);
+
   // Start a fresh bank-statement workflow for the active client. Resets the
   // workflow state and jumps into the Upload step.
   const startNewStatement = useCallback(()=>{
@@ -4183,7 +4237,17 @@ td,th{padding:8px 12px;vertical-align:middle}
                 </table>
               </div>
             )}
-            {clientDetailTab==="masterData" && <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
+            {clientDetailTab==="masterData" && <>
+            {/* Learn-from-Zoho banner */}
+            {c.zohoOrgId && <div style={{background:"linear-gradient(135deg,rgba(105,88,194,0.06),rgba(8,145,178,0.06))",border:"1px solid rgba(105,88,194,0.25)",borderRadius:12,padding:"16px 20px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+              <div style={{flex:1,minWidth:240}}>
+                <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:4}}>🤖 Auto-learn from past Zoho activity</div>
+                <div style={{fontSize:11,color:"#666666",lineHeight:1.5}}>Scan up to 2 years of this client's <strong>expenses</strong> in Zoho Books and seed the classifier's <strong>description → ledger</strong> mappings. The more history, the more rows auto-assigned next time you upload a bank statement.</div>
+                {learnFromZohoResult && <div style={{marginTop:8,padding:"6px 10px",background:"#ffffff",borderRadius:6,fontSize:11,color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>✓ Learned <strong>{learnFromZohoResult.added}</strong> new mapping{learnFromZohoResult.added===1?'':'s'} from <strong>{learnFromZohoResult.scanned}</strong> Zoho expense{learnFromZohoResult.scanned===1?'':'s'} ({learnFromZohoResult.skipped} skipped — missing description or account).</div>}
+              </div>
+              <button onClick={learnFromZoho} disabled={learningFromZoho} style={{background:learningFromZoho?"#cccccc":"linear-gradient(135deg,#4D3FA0,#6958C2)",color:"#fff",border:"none",borderRadius:8,padding:"10px 18px",fontSize:12,fontWeight:700,cursor:learningFromZoho?"default":"pointer",whiteSpace:"nowrap",boxShadow:"0 2px 12px rgba(77,63,160,0.2)"}}>{learningFromZoho?"Scanning…":"🤖 Learn from Zoho"}</button>
+            </div>}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:14}}>
               <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
                 <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Chart of Accounts</div>
                 <div style={{fontSize:24,fontWeight:700,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{chartOfAccounts.length}</div>
@@ -4204,7 +4268,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <div style={{fontSize:24,fontWeight:700,color:"#d97706",fontFamily:"'IBM Plex Mono',monospace"}}>{Object.keys(refDB).length}</div>
                 <div style={{fontSize:10,color:"#888888",marginTop:4}}>per-client mappings</div>
               </div>
-            </div>}
+            </div>
+            </>}
             {clientDetailTab==="settings" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:20,display:"flex",flexDirection:"column",gap:14}}>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Zoho organization</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.zohoOrgId||<span style={{color:"#999999"}}>Not linked</span>}</div></div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Bank ledger</div><div style={{fontSize:13,color:"#1a1a2e"}}>{getClientData(c.id,"bank","Not set")}</div></div>
@@ -4318,12 +4383,137 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>;
         })()}
 
-        {/* ═════════════════ ADMIN VIEW (placeholder) ═════════════════ */}
-        {view==="admin" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:24}}>
-          <h2 style={{fontSize:18,fontWeight:700,color:"#1a1a2e",marginBottom:8}}>Admin</h2>
-          <p style={{color:"#888888",fontSize:13,marginBottom:14}}>Team management, audit logs, and platform-wide settings will live here.</p>
-          <p style={{color:"#999999",fontSize:12}}>Use the avatar menu in the top right for now to invite users / connect Zoho.</p>
-        </div>}
+        {/* ═════════════════ ADMIN VIEW ═════════════════ */}
+        {view==="admin" && (()=>{
+          // Match users → the clients they're assigned to (assignedTo is a
+          // comma-separated CSV of lowercased emails on each Client row).
+          const clientsByEmail = new Map();
+          for(const c of clients||[]){
+            const emails=(c.assignedTo||"").split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+            for(const em of emails){ if(!clientsByEmail.has(em)) clientsByEmail.set(em,[]); clientsByEmail.get(em).push(c); }
+          }
+          const sortedUsers = [...(adminUsers||[])].sort((a,b)=>{
+            const order = (r)=> r==='admin'?0 : r==='team-lead'?1 : 2;
+            const ar=order(a.role), br=order(b.role); if(ar!==br) return ar-br;
+            return (a.name||a.email||'').localeCompare(b.name||b.email||'');
+          });
+          const roleBadge = (r)=>{
+            const cfg = r==='admin' ? {label:'Super Admin',color:'#7c2d12',bg:'rgba(217,119,6,0.1)',br:'rgba(217,119,6,0.3)'}
+              : r==='team-lead' ? {label:'Admin',color:'#4D3FA0',bg:'rgba(105,88,194,0.1)',br:'rgba(105,88,194,0.3)'}
+              : {label:'User',color:'#0891b2',bg:'rgba(8,145,178,0.08)',br:'rgba(8,145,178,0.25)'};
+            return <span style={{fontSize:10,padding:"3px 8px",borderRadius:4,background:cfg.bg,color:cfg.color,border:"1px solid "+cfg.br,fontWeight:600}}>{cfg.label}</span>;
+          };
+          return <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
+              <div>
+                <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Admin</h1>
+                <p style={{color:"#888888",fontSize:12}}>Team members visible to you and the clients each one is assigned to.</p>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button onClick={()=>loadAdminUsers()} disabled={adminUsersLoading} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"8px 14px",color:"#1a1a2e",fontSize:12,fontWeight:600,cursor:adminUsersLoading?"default":"pointer"}}>{adminUsersLoading?"Refreshing…":"↻ Refresh"}</button>
+                <button onClick={()=>{ const btn=document.getElementById('auth-invite-btn'); if(btn) btn.click(); else alert('Invite users from the avatar menu.'); }} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>+ Invite User</button>
+              </div>
+            </div>
+
+            {/* KPI strip */}
+            <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:18}}>
+              {[
+                {label:"Team members",val:sortedUsers.length,color:"#4D3FA0",bg:"rgba(105,88,194,0.06)",icon:"👥"},
+                {label:"Admins",val:sortedUsers.filter(u=>u.role==='team-lead'||u.role==='admin').length,color:"#7c2d12",bg:"rgba(217,119,6,0.06)",icon:"🛡"},
+                {label:"Users (staff)",val:sortedUsers.filter(u=>u.role==='staff').length,color:"#0891b2",bg:"rgba(8,145,178,0.06)",icon:"👤"},
+                {label:"Clients",val:clients.length,color:"#16a34a",bg:"rgba(22,163,74,0.06)",icon:"🏢"},
+              ].map(k=>(
+                <div key={k.label} style={{flex:"1 1 180px",minWidth:180,background:k.bg,border:"1px solid "+k.color+"33",borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontSize:24,fontWeight:700,color:k.color,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.05}}>{k.val}</div>
+                    <div style={{fontSize:11,color:"#666666",marginTop:5}}>{k.label}</div>
+                  </div>
+                  <div style={{fontSize:20,opacity:0.5}}>{k.icon}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Users table */}
+            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:0,overflow:"hidden",marginBottom:18}}>
+              <div style={{padding:"14px 18px",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em"}}>Team members &amp; assignments</h3>
+                <span style={{fontSize:11,color:"#888888"}}>{sortedUsers.length} {sortedUsers.length===1?"user":"users"}</span>
+              </div>
+              {adminUsersError && <div style={{padding:"12px 18px",fontSize:12,color:"#dc2626",background:"rgba(220,38,38,0.04)",borderBottom:"1px solid rgba(220,38,38,0.15)"}}>{adminUsersError}</div>}
+              {adminUsersLoading && sortedUsers.length===0 ? <div style={{padding:"30px",textAlign:"center",fontSize:12,color:"#888888"}}>Loading team…</div>
+              : sortedUsers.length===0 ? <div style={{padding:"30px",textAlign:"center",fontSize:12,color:"#888888"}}>No team members yet. Click <strong>+ Invite User</strong> to add the first one.</div>
+              : <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead><tr style={{background:"#f8f9fc"}}>
+                    {["User","Role","Team","Status","Assigned clients"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11,whiteSpace:"nowrap"}}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>{sortedUsers.map(u=>{
+                    const em=(u.email||'').toLowerCase();
+                    const assigned = u.role==='admin' ? clients : (clientsByEmail.get(em) || []);
+                    const initials = ((u.name||u.email||'?').trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase());
+                    return <tr key={em||u.username||u.name} style={{borderBottom:"1px solid #f8f9fc"}}>
+                      <td style={{padding:"12px 14px"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10}}>
+                          <div style={{width:30,height:30,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:600,flexShrink:0}}>{initials}</div>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{u.name||u.email||'—'}</div>
+                            <div style={{fontSize:10,color:"#888888"}}>{u.email||''}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}>{roleBadge(u.role)}</td>
+                      <td style={{padding:"12px 14px",fontSize:11,color:"#777777",fontFamily:"'IBM Plex Mono',monospace",maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={u.team||''}>{u.team||'—'}</td>
+                      <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}>
+                        {u.enabled===false ? <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)",color:"#dc2626"}}>Disabled</span>
+                         : u.status==='UNCONFIRMED' || u.status==='FORCE_CHANGE_PASSWORD' ? <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(217,119,6,0.1)",color:"#d97706"}}>Pending</span>
+                         : <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a"}}>Active</span>}
+                      </td>
+                      <td style={{padding:"12px 14px"}}>
+                        {u.role==='admin' ? <span style={{fontSize:10,color:"#7c2d12",fontStyle:"italic"}}>(sees all clients)</span>
+                          : assigned.length===0 ? <span style={{fontSize:10,color:"#999999"}}>— no assignments —</span>
+                          : <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                            {assigned.slice(0,5).map(c=>(
+                              <span key={c.id} onClick={()=>switchClient(c.id)} style={{fontSize:10,padding:"3px 8px",borderRadius:4,background:"rgba(105,88,194,0.08)",color:"#4D3FA0",border:"1px solid rgba(105,88,194,0.2)",cursor:"pointer",fontWeight:500}}>{c.name}</span>
+                            ))}
+                            {assigned.length>5 && <span style={{fontSize:10,color:"#777777",padding:"3px 4px"}}>+{assigned.length-5} more</span>}
+                          </div>}
+                      </td>
+                    </tr>;
+                  })}</tbody>
+                </table></div>}
+            </div>
+
+            {/* Clients & their assignees */}
+            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:0,overflow:"hidden"}}>
+              <div style={{padding:"14px 18px",borderBottom:"1px solid #f0f0f4"}}>
+                <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em"}}>Clients &amp; who can see them</h3>
+              </div>
+              {clients.length===0 ? <div style={{padding:"30px",textAlign:"center",fontSize:12,color:"#888888"}}>No clients yet.</div>
+              : <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead><tr style={{background:"#f8f9fc"}}>
+                    {["Client","Zoho","Owner","Assigned users","Projects"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11,whiteSpace:"nowrap"}}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>{clients.map(c=>{
+                    const assigned=(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean);
+                    return <tr key={c.id} style={{borderBottom:"1px solid #f8f9fc",cursor:"pointer"}} onClick={()=>switchClient(c.id)}>
+                      <td style={{padding:"12px 14px",fontWeight:600,color:"#1a1a2e"}}>{c.name}</td>
+                      <td style={{padding:"12px 14px"}}>{c.zohoOrgId ? <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a"}}>Linked</span> : <span style={{fontSize:10,color:"#999999"}}>—</span>}</td>
+                      <td style={{padding:"12px 14px",fontSize:11,color:"#777777"}}>{c.ownerName||c.ownerEmail||"—"}</td>
+                      <td style={{padding:"12px 14px"}}>
+                        {assigned.length===0 ? <span style={{fontSize:10,color:"#999999"}}>(only owner)</span>
+                          : <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                            {assigned.slice(0,4).map(em=>(
+                              <span key={em} style={{fontSize:10,padding:"3px 8px",borderRadius:4,background:"rgba(8,145,178,0.06)",color:"#0891b2",border:"1px solid rgba(8,145,178,0.2)"}}>{em}</span>
+                            ))}
+                            {assigned.length>4 && <span style={{fontSize:10,color:"#777777"}}>+{assigned.length-4}</span>}
+                          </div>}
+                      </td>
+                      <td style={{padding:"12px 14px",fontFamily:"'IBM Plex Mono',monospace",color:"#4D3FA0"}}>{(projectLog[c.id]||[]).length}</td>
+                    </tr>;
+                  })}</tbody>
+                </table></div>}
+            </div>
+          </div>;
+        })()}
 
         {/* ═════════════════ CLIENTS LIST / WORKFLOW ═════════════════ */}
         {(view==="clients" || view==="workflow") && <>
