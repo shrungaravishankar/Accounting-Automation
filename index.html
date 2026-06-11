@@ -3890,6 +3890,18 @@ td,th{padding:8px 12px;vertical-align:middle}
   const stats=useMemo(()=>({total:classifiedTxns.length,auto:classifiedTxns.filter(t=>t.status==="Auto-Assigned").length,suspense:classifiedTxns.filter(t=>t.status==="Suspense").length,confirmed:classifiedTxns.filter(t=>t.status==="Confirmed").length,totalDebit:classifiedTxns.reduce((s,t)=>s+t.debit,0),totalCredit:classifiedTxns.reduce((s,t)=>s+t.credit,0)}),[classifiedTxns]);
   const typeBadge=fileType==="pdf"?{text:"Parsed",bg:"rgba(105,88,194,0.15)",color:"#6958C2",border:"rgba(105,88,194,0.2)"}:fileType==="xlsx"?{text:"Excel Parsed",bg:"rgba(22,163,74,0.1)",color:"#16a34a",border:"rgba(22,163,74,0.2)"}:{text:"CSV",bg:"rgba(105,88,194,0.1)",color:"#6958C2",border:"rgba(105,88,194,0.2)"};
 
+  // Recent projects across all visible clients, newest first. Used by both
+  // the Dashboard and the sidebar.
+  const recentProjectsAll = useMemo(()=>{
+    const out = [];
+    for(const cid of Object.keys(projectLog||{})){
+      const cn = (clients.find(c=>c.id===cid)?.name) || "—";
+      for(const p of (projectLog[cid]||[])) out.push({...p, clientId:cid, clientName:cn});
+    }
+    out.sort((a,b)=>{ const ad=new Date(a.exportedAt||a.date||0).getTime(), bd=new Date(b.exportedAt||b.date||0).getTime(); return bd-ad; });
+    return out;
+  },[projectLog,clients]);
+
   // Per-client API usage list, sorted by today's count desc.
   const apiCountsList = useMemo(()=>{
     const today = new Date().toISOString().slice(0,10);
@@ -3904,10 +3916,25 @@ td,th{padding:8px 12px;vertical-align:middle}
 
       {/* ═══════════════ Left sidebar — steps + API usage ═══════════════ */}
       <aside style={{position:"fixed",top:0,left:0,bottom:0,width:SIDEBAR_W,background:"linear-gradient(180deg,#ffffff,#f5f3fc)",borderRight:"1px solid #e2e2ea",display:"flex",flexDirection:"column",zIndex:50,transition:"width 0.2s",overflow:"hidden"}}>
-        <div style={{padding:sidebarOpen?"14px 14px 8px 14px":"14px 6px",display:"flex",alignItems:"center",justifyContent:sidebarOpen?"space-between":"center",borderBottom:"1px solid #f0f0f4"}}>
-          {sidebarOpen && <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase"}}>Workflow</span>}
+        {/* Logo + collapse */}
+        <div style={{padding:sidebarOpen?"12px 14px":"12px 6px",display:"flex",alignItems:"center",justifyContent:sidebarOpen?"space-between":"center",borderBottom:"1px solid #f0f0f4"}}>
+          {sidebarOpen && <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase"}}>Navigation</span>}
           <button onClick={()=>setSidebarOpen(o=>!o)} title={sidebarOpen?"Collapse":"Expand"} style={{background:"transparent",border:"none",cursor:"pointer",color:"#777777",fontSize:14,padding:"2px 6px",borderRadius:4}}>{sidebarOpen?"‹":"›"}</button>
         </div>
+
+        {/* Signed-in user card */}
+        {sidebarOpen && window.AUTH_USER && <div style={{padding:"10px 14px",borderBottom:"1px solid #f0f0f4",display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:34,height:34,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:600,flexShrink:0,letterSpacing:"0.5px"}}>
+            {((window.AUTH_USER.name||window.AUTH_USER.email||'?').trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase())}
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{window.AUTH_USER.name||window.AUTH_USER.email}</div>
+            <div style={{fontSize:9,color:"#777777",marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {window.AUTH_USER.role==='admin' ? '🛡 Super Admin' : window.AUTH_USER.role==='team-lead' ? '👮 Admin' : '👤 User'}
+              {window.AUTH_USER.team ? ' · '+window.AUTH_USER.team : ''}
+            </div>
+          </div>
+        </div>}
 
         {/* Primary navigation */}
         <div style={{padding:sidebarOpen?"8px 10px":"8px 4px",display:"flex",flexDirection:"column",gap:4}}>
@@ -3917,6 +3944,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             const NAV=[
               {key:"dashboard",label:"Home",icon:"🏠"},
               {key:"clients",label:"Clients",icon:"👥",count:clients.length},
+              {key:"guide",label:"Guide",icon:"📖"},
             ];
             if(isAdmin) NAV.push({key:"admin",label:"Admin",icon:"👮"});
             return NAV.map(n=>{
@@ -3930,12 +3958,39 @@ td,th{padding:8px 12px;vertical-align:middle}
           })()}
         </div>
 
-        {/* Recent clients (inline pickers under Clients) */}
-        {sidebarOpen && clients.length>0 && <div style={{padding:"4px 14px 8px 14px"}}>
-          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:6}}>Recent</div>
-          <div style={{display:"flex",flexDirection:"column",gap:2,maxHeight:180,overflowY:"auto"}}>
-            {clients.slice(0,8).map(c=>(
-              <div key={c.id} onClick={()=>switchClient(c.id)} title={c.name} style={{padding:"5px 8px",borderRadius:4,cursor:"pointer",fontSize:11,color:c.id===activeClientId?"#4D3FA0":"#555555",background:c.id===activeClientId?"rgba(77,63,160,0.08)":"transparent",fontWeight:c.id===activeClientId?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
+        {/* My clients (filtered to assigned for staff, all for admin) */}
+        {sidebarOpen && clients.length>0 && <div style={{padding:"6px 14px 4px 14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase"}}>
+              {window.AUTH_USER && window.AUTH_USER.role==='staff' ? 'My clients' : 'Clients'}
+            </div>
+            <div style={{fontSize:9,color:"#999999",fontFamily:"'IBM Plex Mono',monospace"}}>{clients.length}</div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:1,maxHeight:160,overflowY:"auto"}}>
+            {clients.slice(0,10).map(c=>{
+              const projCount=(projectLog[c.id]||[]).length;
+              return <div key={c.id} onClick={()=>switchClient(c.id)} title={c.name+(projCount?' — '+projCount+' project(s)':'')} style={{padding:"5px 8px",borderRadius:4,cursor:"pointer",fontSize:11,color:c.id===activeClientId?"#4D3FA0":"#555555",background:c.id===activeClientId?"rgba(77,63,160,0.08)":"transparent",fontWeight:c.id===activeClientId?600:400,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+                <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{c.name}</span>
+                {projCount>0 && <span style={{fontSize:9,color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>{projCount}</span>}
+              </div>;
+            })}
+          </div>
+        </div>}
+
+        {/* Recent projects across clients */}
+        {sidebarOpen && recentProjectsAll.length>0 && <div style={{padding:"6px 14px 4px 14px",borderTop:"1px solid #f0f0f4",marginTop:4}}>
+          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:6}}>Recent projects</div>
+          <div style={{display:"flex",flexDirection:"column",gap:2,maxHeight:200,overflowY:"auto"}}>
+            {recentProjectsAll.slice(0,6).map(p=>(
+              <div key={p.id||(p.clientId+(p.name||'')+(p.exportedAt||''))} onClick={()=>{ switchClient(p.clientId,{keepView:true}); setViewingProject(p); setStep(1); setView("workflow"); }} title={(p.name||'Project')+' · '+(p.clientName||'')+(p.locked?' · locked':'')} style={{padding:"5px 8px",borderRadius:4,cursor:"pointer",fontSize:11,color:"#1a1a2e",background:"transparent"}}>
+                <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>
+                  {p.locked && <span style={{color:"#dc2626",marginRight:4}}>🔒</span>}
+                  {p.name||'Project'}
+                </div>
+                <div style={{fontSize:9,color:"#888888",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {p.clientName}{p.exportedAt?(' · '+new Date(p.exportedAt).toLocaleDateString()):''}
+                </div>
+              </div>
             ))}
           </div>
         </div>}
@@ -3979,6 +4034,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             {view==="clients" && <span style={{color:"#1a1a2e",fontWeight:600}}>Clients</span>}
             {view==="clientDetail" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>{activeClientName||"—"}</span></>}
             {view==="workflow" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span onClick={()=>setView("clientDetail")} style={{cursor:"pointer",color:"#6958C2"}}>{activeClientName||"—"}</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>New Statement</span></>}
+            {view==="guide" && <span style={{color:"#1a1a2e",fontWeight:600}}>Guide</span>}
             {view==="admin" && <span style={{color:"#1a1a2e",fontWeight:600}}>Admin</span>}
           </div>
           {view==="workflow"&&appMode==="bank"&&<div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
@@ -4164,6 +4220,101 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{fontSize:13,color:"#888888"}}>Activity log will appear here as the client accumulates exports, pushes, and reverts. (Pulled from ExportLog — coming next.)</div>
               {(()=>{ const cnt = apiCounts && apiCounts[c.id]; if(!cnt) return null; return <div style={{marginTop:14,padding:14,background:"#f8f9fc",borderRadius:8,fontSize:12}}><strong>Zoho API calls:</strong> {cnt.total} total · last action: <code style={{fontFamily:"'IBM Plex Mono',monospace"}}>{cnt.lastKind||"—"}</code>{cnt.lastAt?(" · "+new Date(cnt.lastAt).toLocaleString()):""}</div>; })()}
             </div>}
+          </div>;
+        })()}
+
+        {/* ═════════════════ GUIDE VIEW ═════════════════ */}
+        {view==="guide" && (()=>{
+          const Phase = ({num,title,subtitle,color,bg,children})=>(
+            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"22px 24px",marginBottom:14}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:14,marginBottom:14}}>
+                <div style={{flexShrink:0,width:36,height:36,borderRadius:"50%",background:bg,border:"1px solid "+color+"40",color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace"}}>{num}</div>
+                <div>
+                  <div style={{fontSize:16,fontWeight:700,color:"#1a1a2e"}}>{title}</div>
+                  {subtitle && <div style={{fontSize:11,color:"#888888",marginTop:2}}>{subtitle}</div>}
+                </div>
+              </div>
+              <div style={{paddingLeft:50}}>{children}</div>
+            </div>
+          );
+          const Step = ({icon,title,desc,extra,tone})=>(
+            <div style={{display:"flex",gap:12,padding:"12px 14px",borderRadius:8,marginBottom:8,background:tone==='tip'?"rgba(105,88,194,0.04)":tone==='warn'?"rgba(217,119,6,0.05)":"#f8f9fc",border:"1px solid "+(tone==='tip'?"rgba(105,88,194,0.15)":tone==='warn'?"rgba(217,119,6,0.2)":"#f0f0f4")}}>
+              <div style={{fontSize:18,flexShrink:0}}>{icon}</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",marginBottom:3}}>{title}</div>
+                <div style={{fontSize:11,color:"#555555",lineHeight:1.6}}>{desc}</div>
+                {extra && <div style={{fontSize:10,color:"#888888",marginTop:5,padding:"5px 8px",background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:4,fontFamily:"'IBM Plex Mono',monospace"}}>{extra}</div>}
+              </div>
+            </div>
+          );
+          return <div style={{maxWidth:920,margin:"0 auto"}}>
+            <div style={{marginBottom:24}}>
+              <h1 style={{fontSize:28,fontWeight:700,letterSpacing:"-0.02em",background:"linear-gradient(135deg,#4D3FA0,#6958C2)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:6}}>📖 How to complete a project</h1>
+              <p style={{color:"#666666",fontSize:13,lineHeight:1.6}}>
+                AutoLedger takes a bank statement and turns it into Zoho Books entries with the right ledgers, vendors, customers, and invoice links. Here is the end-to-end flow — bookmark this page and share it with anyone new on the team.
+              </p>
+              <div style={{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"}}>
+                <span style={{fontSize:10,padding:"4px 10px",borderRadius:14,background:"rgba(77,63,160,0.08)",color:"#4D3FA0",fontWeight:600,border:"1px solid rgba(77,63,160,0.2)"}}>Phase 1 · Setup</span>
+                <span style={{fontSize:10,padding:"4px 10px",borderRadius:14,background:"rgba(8,145,178,0.08)",color:"#0891b2",fontWeight:600,border:"1px solid rgba(8,145,178,0.2)"}}>Phase 2 · Process</span>
+                <span style={{fontSize:10,padding:"4px 10px",borderRadius:14,background:"rgba(22,163,74,0.08)",color:"#16a34a",fontWeight:600,border:"1px solid rgba(22,163,74,0.2)"}}>Phase 3 · Push &amp; close</span>
+              </div>
+            </div>
+
+            <Phase num="1" title="One-time setup" subtitle="Connect Zoho, then bring in your client" color="#4D3FA0" bg="rgba(105,88,194,0.08)">
+              <Step icon="🔗" title="Connect to Zoho Books"
+                desc="Click the avatar (top right) → Connect to Zoho. You will be sent to Zoho's consent screen; approve, and AutoLedger stores a refresh token tied to your account. You only do this once. If a refresh ever fails, the error will say so and you can reconnect from the same menu." />
+              <Step icon="🏢" title="Import (or create) a client"
+                desc="Sidebar → Clients → Import from Zoho. Pick the Zoho organisation you want to work on. AutoLedger creates the client, pulls Chart of Accounts, vendors, and customers, and saves the ID maps you'll need for Push later."
+                extra="Manual clients are also supported: Clients → + New Client. You then upload a CoA CSV manually." />
+              <Step icon="👥" title="(Admins) assign team members to clients"
+                desc="On the client card, click Assign — pick the staff users who should see this client. They will see only their assigned clients on their next sign-in." tone="tip" />
+            </Phase>
+
+            <Phase num="2" title="Process a bank statement" subtitle="Workflow steps 1–5 inside a client" color="#0891b2" bg="rgba(8,145,178,0.08)">
+              <Step icon="📥" title="Step 1 · Upload"
+                desc="Open the client → click + New Bank Statement. Drop your bank statement CSV/XLSX. The bank ledger should already be picked up from Zoho — if not, set it now (you'll see a warning otherwise)." />
+              <Step icon="⚙️" title="Step 2 · Parse"
+                desc="AutoLedger reads each row, normalises dates and amounts, and shows a sample so you can sanity-check column mapping before continuing." />
+              <Step icon="🤖" title="Step 3 · Classify"
+                desc="The classifier looks up every description against (a) this client's learned references, (b) global base data, and (c) the imported Chart of Accounts. High-confidence rows are Auto-Assigned. Anything unclear becomes Suspense." />
+              <Step icon="✓" title="Step 4 · Review"
+                desc="The most important screen. Two tabs: Debit (expenses) and Credit (revenue)."
+                extra="• Debit rows: confirm the ledger; pick a vendor if you want Zoho to attach it to a Bill/Expense. Use Entry Mode = Journal for inter-account moves.
+• Credit rows with a Customer selected become Payment Received entries. The invoice picker right below lets you link the payment to a specific open invoice in Zoho (or leave Unapplied).
+• Tick suspense rows and use 'Confirm Selected' once you've assigned a ledger." />
+              <Step icon="📋" title="Step 5 · Preview"
+                desc="See the final paired journal lines, P&L expenses, BS items, and Payments Received before anything leaves your browser. Cross-check totals." />
+            </Phase>
+
+            <Phase num="3" title="Push to Zoho &amp; finish" subtitle="Step 6 — Done" color="#16a34a" bg="rgba(22,163,74,0.08)">
+              <Step icon="⚡" title="Click Push to Zoho"
+                desc="AutoLedger first scans Zoho for entries in the same date range and matches them against your batch by (date + description). If duplicates exist, a confirmation modal lists every match side-by-side. You then choose: Skip duplicates & push, Push anyway, or Cancel."
+                tone="tip" />
+              <Step icon="📊" title="Watch the progress modal"
+                desc="Pushes are sequential to respect Zoho's per-token rate limit. The bar shows the current entry; failures are collected separately with Zoho's exact error message (e.g. 'Account is inactive [zoho code 1004']) so you know which row to fix." />
+              <Step icon="↶" title="Revert if something is wrong"
+                desc="The same modal lists every successfully-pushed entry with its Zoho ID and a Revert button. Need to undo many at once? Tick the checkboxes and use 'Revert selected (N)'. Reverting deletes the entry from Zoho and clears the link so a follow-up Push will re-create only that row." />
+              <Step icon="💾" title="CSV exports remain available"
+                desc="If you ever prefer the import-via-CSV route, the four Re-download buttons (Expenses, Journals, BS Items, Payments) are still on Step 6." />
+              <Step icon="🔒" title="Lock the project when done"
+                desc="From the client's Projects tab, open a finished project and click Lock. Locked projects are read-only — Users have to request an Admin unlock to edit them again. Keeps closed periods safe." tone="tip" />
+            </Phase>
+
+            <div style={{background:"linear-gradient(135deg,#fef3c7,#fef9eb)",border:"1px solid #f59e0b",borderRadius:12,padding:"18px 22px",marginTop:6}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#92400e",marginBottom:10,display:"flex",alignItems:"center",gap:8}}><span>⚠️</span><span>Common pitfalls</span></div>
+              <ul style={{margin:0,paddingLeft:18,color:"#7c2d12",fontSize:12,lineHeight:1.9}}>
+                <li><strong>Bank ledger mismatch:</strong> if the bank name in Step 1 doesn't match a Zoho account, Push will offer a picker. Fix it once and it's saved per-client.</li>
+                <li><strong>Inactive ledger in Zoho:</strong> Zoho will reject the push with code 1004. Re-activate the account in Zoho Books, then retry the failed rows.</li>
+                <li><strong>Missing vendor/customer ID:</strong> if a name doesn't exist in Zoho yet, the push falls back to vendor_name (Zoho auto-creates it) — but for customer payments you must have the customer in Zoho first.</li>
+                <li><strong>Date format:</strong> Zoho's API needs YYYY-MM-DD. AutoLedger auto-converts DD/MM/YYYY, but check Step 5 if dates look off.</li>
+                <li><strong>Daily API quota:</strong> the ⚡ chip in the top bar (and on the Dashboard) shows calls remaining. Free Zoho Books = 1,000/day per organisation. Sequential pushing avoids hitting it accidentally.</li>
+              </ul>
+            </div>
+
+            <div style={{marginTop:24,display:"flex",gap:10,justifyContent:"center",flexWrap:"wrap"}}>
+              <button onClick={()=>setView("clients")} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:600,cursor:"pointer",boxShadow:"0 2px 12px rgba(77,63,160,0.25)"}}>Go to Clients →</button>
+              <button onClick={()=>setView("dashboard")} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:600,cursor:"pointer",color:"#1a1a2e"}}>Back to Home</button>
+            </div>
           </div>;
         })()}
 
