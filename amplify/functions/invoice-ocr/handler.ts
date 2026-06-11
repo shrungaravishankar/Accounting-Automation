@@ -1,5 +1,7 @@
 declare const process: { env: Record<string, string | undefined> };
-declare const Buffer: any;
+declare const Buffer: {
+  from(input: string, encoding: string): Uint8Array;
+};
 
 import {
   TextractClient,
@@ -122,7 +124,7 @@ function extractLineItems(doc: ExpenseDocument | undefined): Array<{ description
  * Decode the base64 payload. Frontend may send a data-URL ("data:image/png;base64,xxx")
  * or just the base64 chunk; handle both. Cap at 10 MB to stay under Textract's sync limit.
  */
-function decodeBase64(b64: string): Buffer {
+function decodeBase64(b64: string): Uint8Array {
   const idx = b64.indexOf(',');
   const raw = idx >= 0 && b64.slice(0, idx).startsWith('data:') ? b64.slice(idx + 1) : b64;
   const buf = Buffer.from(raw, 'base64');
