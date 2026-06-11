@@ -40,12 +40,30 @@ async function getAccessToken(refreshToken: string, region: string): Promise<str
   return j.access_token;
 }
 
+// Pulled from the last Zoho call so we can return the org's daily API
+// quota counters with every response. Zoho sends X-Rate-Limit-Limit /
+// Remaining / Reset (epoch seconds) headers on every successful call.
+let lastApiUsage: { limit: number | null; remaining: number | null; reset: number | null } = {
+  limit: null, remaining: null, reset: null
+};
+
+function captureApiUsage(headers: Headers) {
+  const num = (v: string | null) => (v == null || v === '' ? null : Number(v));
+  const lim = num(headers.get('x-rate-limit-limit'));
+  const rem = num(headers.get('x-rate-limit-remaining'));
+  const rst = num(headers.get('x-rate-limit-reset'));
+  if (lim != null || rem != null || rst != null) {
+    lastApiUsage = { limit: lim, remaining: rem, reset: rst };
+  }
+}
+
 async function zohoGet(path: string, accessToken: string, region: string, params: Record<string, string> = {}) {
   const qs = new URLSearchParams(params).toString();
   const url = `https://www.zohoapis.${region}/books/v3/${path}${qs ? '?' + qs : ''}`;
   const r = await fetch(url, {
     headers: { Authorization: 'Zoho-oauthtoken ' + accessToken }
   });
+  captureApiUsage(r.headers);
   const j: any = await r.json();
   if (!r.ok || j.code !== 0) {
     throw new Error('Zoho API ' + path + ' failed: ' + (j.message || r.statusText));
@@ -64,10 +82,26 @@ async function zohoPost(path: string, accessToken: string, region: string, param
     },
     body: JSON.stringify(body)
   });
+  captureApiUsage(r.headers);
   const j: any = await r.json();
   if (!r.ok || j.code !== 0) {
     // Zoho returns its own error code in j.code (0 = success) and j.message
     // with a human-readable reason. Surface both to the caller.
+    throw new Error((j.message || r.statusText) + (j.code ? ' [zoho code ' + j.code + ']' : ''));
+  }
+  return j;
+}
+
+async function zohoDelete(path: string, accessToken: string, region: string, params: Record<string, string>) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `https://www.zohoapis.${region}/books/v3/${path}${qs ? '?' + qs : ''}`;
+  const r = await fetch(url, {
+    method: 'DELETE',
+    headers: { Authorization: 'Zoho-oauthtoken ' + accessToken }
+  });
+  captureApiUsage(r.headers);
+  const j: any = await r.json();
+  if (!r.ok || j.code !== 0) {
     throw new Error((j.message || r.statusText) + (j.code ? ' [zoho code ' + j.code + ']' : ''));
   }
   return j;
@@ -117,7 +151,7 @@ export const handler = async (event: Event) => {
         country: o.country,
         is_default_org: o.is_default_org
       }));
-      return JSON.stringify({ error: null, items: orgs });
+      return JSON.stringify({ error: null, items: orgs, apiUsage: lastApiUsage });
     }
 
     if (!orgId) return JSON.stringify({ error: 'organizationId is required for kind=' + kind });
@@ -142,7 +176,7 @@ export const handler = async (event: Event) => {
         code: a.account_code || '',
         id: a.account_id  // NEW — needed for push
       }));
-      return JSON.stringify({ error: null, items: accounts });
+      return JSON.stringify({ error: null, items: accounts, apiUsage: lastApiUsage });
     }
 
     if (kind === 'vendors' || kind === 'customers') {
@@ -170,7 +204,7 @@ export const handler = async (event: Event) => {
           idByName[c.contact_name] = c.contact_id;
         }
       }
-      return JSON.stringify({ error: null, items: names, idByName });
+      return JSON.stringify({ error: null, items: names, idByName, apiUsage: lastApiUsage });
     }
 
     // Open invoices for a given org — used to link Payment Received entries
@@ -203,7 +237,7 @@ export const handler = async (event: Event) => {
           balance: Number(i.balance),
           status: i.status
         }));
-      return JSON.stringify({ error: null, items: invoices });
+      return JSON.stringify({ error: null, items: invoices, apiUsage: lastApiUsage });
     }
 
     // Push operations — accept a JSON payload string and POST to Zoho.
@@ -220,11 +254,23 @@ export const handler = async (event: Event) => {
       const j = await zohoPost(path, accessToken, region, { organization_id: orgId }, payload);
       // Surface the new resource id where applicable.
       const resourceId = j.expense?.expense_id || j.journal?.journal_id || j.payment?.payment_id || null;
-      return JSON.stringify({ error: null, success: true, id: resourceId, raw: j });
+      return JSON.stringify({ error: null, success: true, id: resourceId, raw: j, apiUsage: lastApiUsage });
+    }
+
+    // Revert a previously-pushed entry. resourceId comes through `payload`
+    // (the existing string argument, reused so we don't need a schema bump).
+    if (kind === 'deleteExpense' || kind === 'deleteJournal' || kind === 'deletePayment') {
+      const resourceId = (event.arguments?.payload || '').trim();
+      if (!resourceId) return JSON.stringify({ error: 'resourceId is required (pass via payload)' });
+      const path = kind === 'deleteExpense' ? `expenses/${resourceId}`
+        : kind === 'deleteJournal' ? `journals/${resourceId}`
+        : `customerpayments/${resourceId}`;
+      const j = await zohoDelete(path, accessToken, region, { organization_id: orgId });
+      return JSON.stringify({ error: null, success: true, message: j.message || 'Deleted', apiUsage: lastApiUsage });
     }
 
     return JSON.stringify({ error: 'unknown kind: ' + kind });
   } catch (err: any) {
-    return JSON.stringify({ error: err?.message || 'zoho-sync failed' });
+    return JSON.stringify({ error: err?.message || 'zoho-sync failed', apiUsage: lastApiUsage });
   }
 };

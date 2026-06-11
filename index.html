@@ -303,7 +303,10 @@
   </div>
 </div>
 
-<div id="auth-user-menu" class="auth-user-menu auth-hidden" style="position:fixed;top:18px;right:14px;z-index:100000;">
+<div id="auth-user-menu" class="auth-user-menu auth-hidden" style="position:fixed;top:18px;right:14px;z-index:100000;display:flex;align-items:center;gap:10px;">
+  <div id="zoho-api-badge" title="Zoho API calls remaining today (resets at midnight Zoho server time)" style="display:none;align-items:center;gap:6px;padding:6px 10px;border-radius:14px;background:rgba(105,88,194,0.1);border:1px solid rgba(105,88,194,0.25);font-size:11px;font-weight:600;color:#4D3FA0;font-family:'IBM Plex Mono',monospace;cursor:default;">
+    <span style="font-size:10px;">⚡</span><span id="zoho-api-badge-text">—</span>
+  </div>
   <button id="auth-avatar" class="auth-avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Open user menu">??</button>
   <div id="auth-dropdown" class="auth-dropdown" role="menu">
     <div class="auth-dd-user">
@@ -836,10 +839,41 @@ window.zohoDisconnect = async () => {
 // organizationId is required for everything except 'organizations'.
 // Returns the items array. For vendors/customers the array also carries an
 // `_idByName` property (name → Zoho contact_id) used by Push to Zoho.
+// Latest Zoho rate-limit counters, set by every fetch/push/delete. UI
+// reads window.__zohoApiUsage to render a "Zoho calls remaining today"
+// badge. Event 'zoho-api-usage' fires on every update so React can refresh.
+window.__zohoApiUsage = { limit: null, remaining: null, reset: null, at: null };
+const __recordApiUsage = (u) => {
+  if (!u || typeof u !== 'object') return;
+  window.__zohoApiUsage = { ...u, at: Date.now() };
+  try { window.dispatchEvent(new CustomEvent('zoho-api-usage', { detail: window.__zohoApiUsage })); } catch (_) {}
+};
+
+// Update the header API-usage badge whenever a Zoho call returns. Hidden
+// until we have at least one data point. Red when <100 calls remain.
+window.addEventListener('zoho-api-usage', (ev) => {
+  try {
+    const badge = document.getElementById('zoho-api-badge');
+    const text = document.getElementById('zoho-api-badge-text');
+    if (!badge || !text) return;
+    const u = (ev && ev.detail) || window.__zohoApiUsage;
+    if (!u || u.remaining == null) return;
+    badge.style.display = 'inline-flex';
+    text.textContent = u.remaining + (u.limit ? ' / ' + u.limit : '') + ' left';
+    const low = Number(u.remaining) < 100;
+    badge.style.background = low ? 'rgba(220,38,38,0.1)' : 'rgba(105,88,194,0.1)';
+    badge.style.borderColor = low ? 'rgba(220,38,38,0.3)' : 'rgba(105,88,194,0.25)';
+    badge.style.color = low ? '#dc2626' : '#4D3FA0';
+    const tip = 'Zoho API calls remaining today' + (u.reset ? ' — resets at ' + new Date(Number(u.reset) * 1000).toLocaleTimeString() : '');
+    badge.title = tip;
+  } catch (_) {}
+});
+
 window.zohoFetch = async (kind, organizationId) => {
   const r = await dataClient.queries.zohoFetch({ kind, organizationId });
   const d = __unwrapJson(r.data);
   if (!d) throw new Error('Empty response from Zoho.');
+  __recordApiUsage(d.apiUsage);
   if (d.error) throw new Error(d.error);
   const items = d.items || [];
   if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
@@ -855,8 +889,21 @@ window.zohoPush = async (kind, organizationId, payload) => {
   });
   const d = __unwrapJson(r.data);
   if (!d) throw new Error('Empty response from Zoho push.');
+  __recordApiUsage(d.apiUsage);
   if (d.error) throw new Error(d.error);
   return { id: d.id || null, raw: d.raw || null };
+};
+
+// Delete a previously-pushed entry. kind: 'deleteExpense'|'deleteJournal'|'deletePayment'.
+window.zohoDelete = async (kind, organizationId, resourceId) => {
+  const r = await dataClient.mutations.zohoDelete({
+    kind, organizationId, payload: String(resourceId || '')
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response from Zoho delete.');
+  __recordApiUsage(d.apiUsage);
+  if (d.error) throw new Error(d.error);
+  return { message: d.message || 'Deleted' };
 };
 
 window.projectDelete = async (id, dataPath) => {
@@ -2029,6 +2076,13 @@ function App(){
   const[pushFailures,setPushFailures]=useState([]);
   const[pushSuccessCount,setPushSuccessCount]=useState(0);
   const[pushModalOpen,setPushModalOpen]=useState(false);
+  // Entries that pushed successfully — each row carries the Zoho id so the
+  // user can revert individual transactions. Shape:
+  //   { kind: 'expense'|'journal'|'bsItem'|'payment',
+  //     zohoId, label, amount, date, group: 'expenses'|'journals'|'bsItems'|'revenue',
+  //     index: number  // index into journalEntries[group] (row or first row of pair) }
+  const[pushedEntries,setPushedEntries]=useState([]);
+  const[revertingId,setRevertingId]=useState("");
   const[descGroup,setDescGroup]=useState("");
   const bankInputRef=useRef(null);const coaInputRef=useRef(null);const dropdownRefs=useRef({});const refFileRef=useRef(null);
   const vendorInputRef=useRef(null);const customerInputRef=useRef(null);
@@ -3038,11 +3092,16 @@ function App(){
 
     setPushing(true);
     setPushFailures([]);
+    setPushedEntries([]);
     setPushSuccessCount(0);
     setPushProgress({done:0,total:totalUnits,label:"Starting…"});
     setPushModalOpen(true);
 
     const failures=[];
+    const successes=[];
+    // Pending mutations to journalEntries; applied in one setState after
+    // all pushes complete so the saved-project payload picks them up.
+    const idStamps=[]; // [{group, index, zohoId}]
     let success=0;
     let done=0;
     const bump=(label)=>{ done++; setPushProgress({done,total:totalUnits,label}); };
@@ -3066,13 +3125,20 @@ function App(){
       };
       if(r.vendor){ const vid=vendorIds[r.vendor]; if(vid) payload.vendor_id=vid; else payload.vendor_name=r.vendor; }
       if(!acctId){ recordFailure("expense",r,new Error("No Zoho account_id for ledger '"+r.account+"'. Sync CoA and retry.")); bump(label); continue; }
-      try{ await window.zohoPush('pushExpense',orgId,payload); success++; }
+      try{
+        const res = await window.zohoPush('pushExpense',orgId,payload);
+        success++;
+        if(res && res.id){
+          successes.push({kind:'expense',zohoId:res.id,label:(r.vendor||r.account||'')+' '+(r.amount||''),amount:r.amount,date:r.date,group:'expenses',index:i});
+          idStamps.push({group:'expenses',index:i,zohoId:res.id});
+        }
+      }
       catch(e){ recordFailure("expense",r,e); }
       bump(label);
     }
 
     // 2) Journals (entries come in debit/credit pairs)
-    const pushPaired=async (entries,kindLabel,failKind)=>{
+    const pushPaired=async (entries,kindLabel,failKind,groupKey)=>{
       const pairCount=Math.floor(entries.length/2);
       for(let p=0;p<pairCount;p++){
         const e1=entries[p*2], e2=entries[p*2+1];
@@ -3097,13 +3163,22 @@ function App(){
           line_items: e2 ? [l1,l2] : [l1],
           currency_code: currency
         };
-        try{ await window.zohoPush('pushJournal',orgId,payload); success++; }
+        try{
+          const res = await window.zohoPush('pushJournal',orgId,payload);
+          success++;
+          if(res && res.id){
+            successes.push({kind:failKind,zohoId:res.id,label:kindLabel+': '+e1.account+(e2?(' / '+e2.account):''),amount:(e1.debit||e1.credit),date:e1.date,group:groupKey,index:p*2});
+            // Stamp on both rows of the pair so reopen sees the link too.
+            idStamps.push({group:groupKey,index:p*2,zohoId:res.id});
+            if(e2) idStamps.push({group:groupKey,index:p*2+1,zohoId:res.id});
+          }
+        }
         catch(e){ recordFailure(failKind,{date:e1.date,accounts:e1.account+(e2?(" / "+e2.account):"")},e); }
         bump(label);
       }
     };
-    await pushPaired(jnl,"Journal","journal");
-    await pushPaired(bs,"BS item","bsItem");
+    await pushPaired(jnl,"Journal","journal","journals");
+    await pushPaired(bs,"BS item","bsItem","bsItems");
 
     // 3) Payments Received
     for(let i=0;i<pr.length;i++){
@@ -3125,16 +3200,70 @@ function App(){
       if(r.invoiceId){
         payload.invoices=[{ invoice_id: r.invoiceId, amount_applied: Number(r.amount)||0 }];
       }
-      try{ await window.zohoPush('pushPayment',orgId,payload); success++; }
+      try{
+        const res = await window.zohoPush('pushPayment',orgId,payload);
+        success++;
+        if(res && res.id){
+          successes.push({kind:'payment',zohoId:res.id,label:'Payment: '+r.customerName+' '+(r.amount||''),amount:r.amount,date:r.date,group:'revenue',index:i});
+          idStamps.push({group:'revenue',index:i,zohoId:res.id});
+        }
+      }
       catch(e){ recordFailure("payment",r,e); }
       bump(label);
     }
 
+    // Apply all zohoId stamps in one go so the saved-project payload
+    // remembers which rows are already in Zoho.
+    if(idStamps.length>0){
+      setJournalEntries(prev=>{
+        const next={...prev};
+        for(const s of idStamps){
+          const arr=(next[s.group]||[]).slice();
+          if(arr[s.index]){ arr[s.index]={...arr[s.index],zohoId:s.zohoId}; next[s.group]=arr; }
+        }
+        return next;
+      });
+    }
+    setPushedEntries(successes);
     setPushSuccessCount(success);
     setPushFailures(failures);
     setPushing(false);
     setPushProgress({done:totalUnits,total:totalUnits,label:"Done"});
   },[pushing,clients,activeClientId,bankAccount,journalEntries,currency,chartOfAccounts]);
+
+  // Revert a single pushed entry — DELETEs it from Zoho, then strips the
+  // zohoId from the matching row in journalEntries and from the pushed
+  // list. Used by the Revert button per row in the push-modal report.
+  const revertEntry=useCallback(async (entry)=>{
+    if(!entry || !entry.zohoId) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("Client is not linked to a Zoho organization."); return; }
+    if(!confirm("Revert this entry from Zoho?\n\n"+entry.label+"\n\nThis deletes it from Zoho Books — you'll need to re-push to restore it.")) return;
+    setRevertingId(entry.zohoId);
+    try{
+      const kind = entry.kind==='expense' ? 'deleteExpense'
+        : entry.kind==='payment' ? 'deletePayment'
+        : 'deleteJournal';
+      await window.zohoDelete(kind, orgId, entry.zohoId);
+      // Strip zohoId from matching row(s) so a follow-up push re-creates it.
+      setJournalEntries(prev=>{
+        const next={...prev};
+        const arr=(next[entry.group]||[]).slice();
+        // For paired journal/BS entries both rows share the zohoId — clear both.
+        for(let k=0;k<arr.length;k++){
+          if(arr[k] && arr[k].zohoId===entry.zohoId){ const {zohoId,...rest}=arr[k]; arr[k]=rest; }
+        }
+        next[entry.group]=arr;
+        return next;
+      });
+      setPushedEntries(prev=>prev.filter(p=>p.zohoId!==entry.zohoId));
+    } catch(e){
+      alert("Revert failed: "+(e.message||e));
+    } finally {
+      setRevertingId("");
+    }
+  },[clients,activeClientId]);
 
   // Build Suspense Clarification Sheet — formatted for client
   // Build Suspense Clarification Sheet — formatted HTML table exported as .xls
@@ -4610,6 +4739,24 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>
           <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:14}}>
             <button onClick={pushToZoho} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Pushing…":"Push to Zoho"}</button>
+            {(()=>{
+              // Rebuild pushed list from any zohoId-stamped rows so reopened
+              // projects can still revert individual entries.
+              const je=journalEntries||{};
+              const collect=(arr,group,kind,labelFn,paired)=>{
+                const out=[]; const seen=new Set();
+                (arr||[]).forEach((r,i)=>{ if(r && r.zohoId && !seen.has(r.zohoId)){ seen.add(r.zohoId); out.push({kind,zohoId:r.zohoId,label:labelFn(r,i,arr),amount:r.amount||r.debit||r.credit,date:r.date,group,index:i}); } });
+                return out;
+              };
+              const all=[
+                ...collect(je.expenses,'expenses','expense',(r)=>(r.vendor||r.account||'')+' '+(r.amount||'')),
+                ...collect(je.journals,'journals','journal',(r,i,arr)=>'Journal: '+r.account+(arr[i+1]?(' / '+arr[i+1].account):'')),
+                ...collect(je.bsItems,'bsItems','bsItem',(r,i,arr)=>'BS item: '+r.account+(arr[i+1]?(' / '+arr[i+1].account):'')),
+                ...collect(je.revenue,'revenue','payment',(r)=>'Payment: '+r.customerName+' '+(r.amount||'')),
+              ];
+              if(all.length===0) return null;
+              return <button onClick={()=>{ setPushedEntries(all); setPushFailures([]); setPushSuccessCount(all.length); setPushProgress({done:all.length,total:all.length,label:'Loaded from project'}); setPushModalOpen(true); }} style={{background:"#ffffff",border:"1px solid rgba(105,88,194,0.3)",borderRadius:8,padding:"10px 20px",color:"#6958C2",fontSize:12,fontWeight:600,cursor:"pointer"}}>↶ View Pushed Entries ({all.length})</button>;
+            })()}
           </div>
           <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>
             <button onClick={()=>{setStep(1);setTransactions([]);setClassifiedTxns([]);setJournalEntries({expenses:[],journals:[],revenue:[]});setBankFileName("");setParseError("");}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 24px",color:"#1a1a2e",fontSize:13,fontWeight:500,cursor:"pointer"}}>Process New Statement</button>
@@ -4673,8 +4820,36 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </table>
                 </div>
               </div>}
-              {!pushing&&pushFailures.length===0&&pushSuccessCount>0&&<div style={{padding:14,background:"rgba(22,163,74,0.06)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:8,color:"#16a34a",fontSize:13,textAlign:"center"}}>
+              {!pushing&&pushFailures.length===0&&pushSuccessCount>0&&pushedEntries.length===0&&<div style={{padding:14,background:"rgba(22,163,74,0.06)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:8,color:"#16a34a",fontSize:13,textAlign:"center"}}>
                 ✓ All {pushSuccessCount} entries pushed to Zoho Books successfully.
+              </div>}
+              {!pushing&&pushedEntries.length>0&&<div style={{marginTop:pushFailures.length>0?14:0}}>
+                <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:8}}>Pushed entries — click Revert to delete a single transaction from Zoho:</div>
+                <div style={{border:"1px solid rgba(22,163,74,0.2)",borderRadius:8,overflow:"hidden",maxHeight:280,overflowY:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                    <thead><tr style={{background:"rgba(22,163,74,0.06)",position:"sticky",top:0}}>
+                      <th style={{padding:"8px 10px",textAlign:"left",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Type</th>
+                      <th style={{padding:"8px 10px",textAlign:"left",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Entry</th>
+                      <th style={{padding:"8px 10px",textAlign:"left",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Zoho ID</th>
+                      <th style={{padding:"8px 10px",textAlign:"right",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Action</th>
+                    </tr></thead>
+                    <tbody>{pushedEntries.map((p)=>(
+                      <tr key={p.zohoId} style={{borderBottom:"1px solid #f8f9fc"}}>
+                        <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:"#1a1a2e"}}>{p.kind}</td>
+                        <td style={{padding:"7px 10px",color:"#1a1a2e"}}>
+                          <div style={{fontWeight:600}}>{p.label}</div>
+                          <div style={{fontSize:9,color:"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{p.date||""} {p.amount?(currency+" "+p.amount):""}</div>
+                        </td>
+                        <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:"#777777"}}>{p.zohoId}</td>
+                        <td style={{padding:"7px 10px",textAlign:"right"}}>
+                          <button onClick={()=>revertEntry(p)} disabled={revertingId===p.zohoId} style={{background:revertingId===p.zohoId?"#cccccc":"rgba(220,38,38,0.08)",border:"1px solid "+(revertingId===p.zohoId?"#cccccc":"rgba(220,38,38,0.3)"),borderRadius:6,padding:"4px 10px",color:revertingId===p.zohoId?"#777777":"#dc2626",fontSize:10,fontWeight:600,cursor:revertingId===p.zohoId?"default":"pointer"}}>
+                            {revertingId===p.zohoId?"Reverting…":"↶ Revert"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
               </div>}
             </div>
             {!pushing&&<div style={{padding:"14px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"flex-end",gap:10}}>

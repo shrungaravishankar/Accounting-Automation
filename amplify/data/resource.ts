@@ -283,6 +283,23 @@ const schema = a.schema({
     .handler(a.handler.function(zohoSync)),
 
   /**
+   * Revert a previously-pushed Zoho Books entry.
+   * kind = 'deleteExpense' | 'deleteJournal' | 'deletePayment'.
+   * resourceId is the Zoho id returned at push time, passed via `payload`
+   * to reuse the same generic Lambda arg shape.
+   */
+  zohoDelete: a
+    .mutation()
+    .arguments({
+      kind: a.string().required(),
+      organizationId: a.string().required(),
+      payload: a.string().required()
+    })
+    .returns(a.json())
+    .authorization((allow) => [allow.authenticated()])
+    .handler(a.handler.function(zohoSync)),
+
+  /**
    * Replace a User or Admin with a new email. Inherits their client
    * assignments + project ownership. Admin can replace Users in their team;
    * Super Admin can replace anyone (including other Admins).
