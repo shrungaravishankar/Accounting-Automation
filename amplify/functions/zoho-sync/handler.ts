@@ -268,6 +268,14 @@ export const handler = async (event: Event) => {
       const past = new Date(today.getTime() - 365 * 86400000);
       const fromDate = p.fromDate || past.toISOString().slice(0, 10);
       const toDate = p.toDate || today.toISOString().slice(0, 10);
+      // `only` lets callers fetch just one slice — Learn-from-Zoho asks
+      // for ['expenses'] so the call returns in seconds instead of
+      // hitting AppSync's 30 s ceiling on busy orgs.
+      const only: string[] = Array.isArray(p.only) && p.only.length > 0 ? p.only : ['expenses','journals','payments'];
+      // Cap pagination — 10 pages × 200 = 2 000 entries per endpoint, more
+      // than enough for any single learning pass. Old value of 20 could
+      // stretch a single call to >30 s on orgs with thousands of journals.
+      const maxPages = Math.max(1, Math.min(20, Number(p.maxPages || 10)));
 
       const pageAll = async (path: string, listKey: string) => {
         const out: any[] = [];
@@ -283,15 +291,18 @@ export const handler = async (event: Event) => {
           out.push(...(j[listKey] || []));
           if (!j.page_context || !j.page_context.has_more_page) break;
           page++;
-          if (page > 20) break;
+          if (page > maxPages) break;
         }
         return out;
       };
 
+      const wantExp = only.includes('expenses');
+      const wantJrn = only.includes('journals');
+      const wantPay = only.includes('payments');
       const [expRaw, jrnRaw, payRaw] = await Promise.all([
-        pageAll('expenses', 'expenses'),
-        pageAll('journals', 'journals'),
-        pageAll('customerpayments', 'customerpayments')
+        wantExp ? pageAll('expenses', 'expenses') : Promise.resolve([] as any[]),
+        wantJrn ? pageAll('journals', 'journals') : Promise.resolve([] as any[]),
+        wantPay ? pageAll('customerpayments', 'customerpayments') : Promise.resolve([] as any[])
       ]);
 
       const expenses = expRaw.map((e: any) => ({

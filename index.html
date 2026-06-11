@@ -2593,7 +2593,10 @@ function App(){
       const past = new Date(today.getTime() - 730*86400000);
       const fromDate = past.toISOString().slice(0,10);
       const toDate = today.toISOString().slice(0,10);
-      const res = await window.zohoFetch('recentEntries', orgId, { fromDate, toDate });
+      // Learn-from-Zoho only needs expenses; ask the Lambda to skip the
+      // journals and customer-payments slices so the call stays under
+      // AppSync's 30 s sync ceiling on busy orgs.
+      const res = await window.zohoFetch('recentEntries', orgId, { fromDate, toDate, only: ['expenses'] });
       const expenses = (res && res.expenses) || [];
       let added=0, skipped=0;
       // Build the next refDB off the current state so a single setRefDB at
@@ -2614,6 +2617,31 @@ function App(){
       setLearningFromZoho(false);
     }
   },[learningFromZoho,clients,activeClientId,refDB]);
+
+  // Open a saved project in the viewer. Loads its data payload from S3
+  // first (the project row only has the metadata; the heavy
+  // transactions+journalEntries live at p.dataPath). Used by the
+  // sidebar Recent-Projects list, the Dashboard recent panel, and the
+  // Client Detail Projects tab — keeps a single source of truth.
+  const openProjectViewer = useCallback(async (p)=>{
+    if(!p) return;
+    // If the client owning this project isn't the active one, switch
+    // first so the rest of the workflow (state, refDB, customers, etc.)
+    // is pointed at the right one.
+    if(p.clientId && p.clientId !== activeClientId){ switchClient(p.clientId,{keepView:true}); }
+    setStep(1);
+    setView("workflow");
+    // Optimistic: show the metadata immediately, then upgrade with data.
+    setViewingProject(p);
+    if(!p.dataPath){ alert("This project has no saved data path."); return; }
+    try {
+      const data = await window.projectLoad(p.dataPath);
+      if(!data){ alert("Project data could not be found in storage."); return; }
+      setViewingProject(prev => prev && prev.id === p.id ? {...prev, data} : {...p, data});
+    } catch(e){
+      alert("Could not load project data: "+(e.message||e));
+    }
+  },[activeClientId,switchClient]);
 
   // Start a fresh bank-statement workflow for the active client. Resets the
   // workflow state and jumps into the Upload step.
@@ -4365,7 +4393,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:6}}>Recent projects</div>
           <div style={{display:"flex",flexDirection:"column",gap:2,maxHeight:200,overflowY:"auto"}}>
             {recentProjectsAll.slice(0,6).map(p=>(
-              <div key={p.id||(p.clientId+(p.name||'')+(p.exportedAt||''))} onClick={()=>{ switchClient(p.clientId,{keepView:true}); setViewingProject(p); setStep(1); setView("workflow"); }} title={(p.name||'Project')+' · '+(p.clientName||'')+(p.locked?' · locked':'')} style={{padding:"5px 8px",borderRadius:4,cursor:"pointer",fontSize:11,color:"#1a1a2e",background:"transparent"}}>
+              <div key={p.id||(p.clientId+(p.name||'')+(p.exportedAt||''))} onClick={()=>openProjectViewer(p)} title={(p.name||'Project')+' · '+(p.clientName||'')+(p.locked?' · locked':'')} style={{padding:"5px 8px",borderRadius:4,cursor:"pointer",fontSize:11,color:"#1a1a2e",background:"transparent"}}>
                 <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>
                   {p.locked && <span style={{color:"#dc2626",marginRight:4}}>🔒</span>}
                   {p.name||'Project'}
@@ -4476,7 +4504,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {recent.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"30px 10px",textAlign:"center"}}>No projects yet. Pick a client and process a statement to see it here.</div> : (
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
                     {recent.map(p=>(
-                      <div key={p.id||p.clientId+(p.name||p.exportedAt)} onClick={()=>{ switchClient(p.clientId); }} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",border:"1px solid #f0f0f4",borderRadius:8,cursor:"pointer",gap:10}}>
+                      <div key={p.id||p.clientId+(p.name||p.exportedAt)} onClick={()=>openProjectViewer(p)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",border:"1px solid #f0f0f4",borderRadius:8,cursor:"pointer",gap:10}}>
                         <div style={{flex:1,minWidth:0}}>
                           <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||"Project"}</div>
                           <div style={{fontSize:10,color:"#888888",marginTop:2}}>{p.clientName}{p.period?(" · "+p.period):""}</div>
@@ -4554,7 +4582,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     {["Name","Bank","Period","Transactions","Exported","Status"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
                   </tr></thead>
                   <tbody>{projects.map(p=>(
-                    <tr key={p.id} onClick={()=>{ setViewingProject(p); setStep(1); setView("workflow"); }} style={{borderBottom:"1px solid #f8f9fc",cursor:"pointer"}}>
+                    <tr key={p.id} onClick={()=>openProjectViewer(p)} style={{borderBottom:"1px solid #f8f9fc",cursor:"pointer"}}>
                       <td style={{padding:"10px 14px",color:"#1a1a2e",fontWeight:500}}>{p.name||"—"}</td>
                       <td style={{padding:"10px 14px",color:"#777777"}}>{p.bankName||""}</td>
                       <td style={{padding:"10px 14px",color:"#777777"}}>{p.period||""}</td>
