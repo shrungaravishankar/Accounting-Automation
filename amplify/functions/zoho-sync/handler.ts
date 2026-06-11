@@ -6,7 +6,7 @@ import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 type Event = {
-  arguments: { kind: string; organizationId?: string; payload?: string };
+  arguments: { kind: string; organizationId?: string; payload?: string; params?: string };
   identity?: { username?: string; sub?: string; claims?: Record<string, any> };
 };
 
@@ -238,6 +238,72 @@ export const handler = async (event: Event) => {
           status: i.status
         }));
       return JSON.stringify({ error: null, items: invoices, apiUsage: lastApiUsage });
+    }
+
+    // Recent entries — fetch expenses, journals, and customer payments
+    // for a date range so the frontend can check for duplicates BEFORE
+    // pushing. params = JSON string with optional fromDate / toDate
+    // (YYYY-MM-DD). If absent, defaults to the last 365 days.
+    if (kind === 'recentEntries') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const today = new Date();
+      const past = new Date(today.getTime() - 365 * 86400000);
+      const fromDate = p.fromDate || past.toISOString().slice(0, 10);
+      const toDate = p.toDate || today.toISOString().slice(0, 10);
+
+      const pageAll = async (path: string, listKey: string) => {
+        const out: any[] = [];
+        let page = 1;
+        while (true) {
+          const j: any = await zohoGet(path, accessToken, region, {
+            organization_id: orgId,
+            date_start: fromDate,
+            date_end: toDate,
+            per_page: '200',
+            page: String(page)
+          });
+          out.push(...(j[listKey] || []));
+          if (!j.page_context || !j.page_context.has_more_page) break;
+          page++;
+          if (page > 20) break;
+        }
+        return out;
+      };
+
+      const [expRaw, jrnRaw, payRaw] = await Promise.all([
+        pageAll('expenses', 'expenses'),
+        pageAll('journals', 'journals'),
+        pageAll('customerpayments', 'customerpayments')
+      ]);
+
+      const expenses = expRaw.map((e: any) => ({
+        id: e.expense_id,
+        date: e.date,
+        description: e.description || '',
+        amount: Number(e.total || e.bcy_total || e.amount || 0),
+        account: e.account_name || ''
+      }));
+      const journals = jrnRaw.map((j: any) => ({
+        id: j.journal_id,
+        date: j.journal_date,
+        description: j.notes || j.reference_number || '',
+        amount: Number(j.total || 0)
+      }));
+      const payments = payRaw.map((p: any) => ({
+        id: p.payment_id,
+        date: p.date,
+        description: p.description || p.reference_number || '',
+        amount: Number(p.amount || 0),
+        customer: p.customer_name || ''
+      }));
+
+      return JSON.stringify({
+        error: null,
+        fromDate, toDate,
+        expenses, journals, payments,
+        apiUsage: lastApiUsage
+      });
     }
 
     // Push operations — accept a JSON payload string and POST to Zoho.

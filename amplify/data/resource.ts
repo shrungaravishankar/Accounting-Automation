@@ -261,7 +261,13 @@ const schema = a.schema({
    */
   zohoFetch: a
     .query()
-    .arguments({ kind: a.string().required(), organizationId: a.string() })
+    .arguments({
+      kind: a.string().required(),
+      organizationId: a.string(),
+      // Optional JSON-encoded extra params (e.g. date range for kind='recentEntries').
+      // Older callers omit this; new code passes a stringified object.
+      params: a.string()
+    })
     .returns(a.json())
     .authorization((allow) => [allow.authenticated()])
     .handler(a.handler.function(zohoSync)),

@@ -304,9 +304,6 @@
 </div>
 
 <div id="auth-user-menu" class="auth-user-menu auth-hidden" style="position:fixed;top:18px;right:14px;z-index:100000;display:flex;align-items:center;gap:10px;">
-  <div id="zoho-api-badge" title="Zoho API calls remaining today (resets at midnight Zoho server time)" style="display:none;align-items:center;gap:6px;padding:6px 10px;border-radius:14px;background:rgba(105,88,194,0.1);border:1px solid rgba(105,88,194,0.25);font-size:11px;font-weight:600;color:#4D3FA0;font-family:'IBM Plex Mono',monospace;cursor:default;">
-    <span style="font-size:10px;">⚡</span><span id="zoho-api-badge-text">—</span>
-  </div>
   <button id="auth-avatar" class="auth-avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Open user menu">??</button>
   <div id="auth-dropdown" class="auth-dropdown" role="menu">
     <div class="auth-dd-user">
@@ -849,32 +846,47 @@ const __recordApiUsage = (u) => {
   try { window.dispatchEvent(new CustomEvent('zoho-api-usage', { detail: window.__zohoApiUsage })); } catch (_) {}
 };
 
-// Update the header API-usage badge whenever a Zoho call returns. Hidden
-// until we have at least one data point. Red when <100 calls remain.
-window.addEventListener('zoho-api-usage', (ev) => {
-  try {
-    const badge = document.getElementById('zoho-api-badge');
-    const text = document.getElementById('zoho-api-badge-text');
-    if (!badge || !text) return;
-    const u = (ev && ev.detail) || window.__zohoApiUsage;
-    if (!u || u.remaining == null) return;
-    badge.style.display = 'inline-flex';
-    text.textContent = u.remaining + (u.limit ? ' / ' + u.limit : '') + ' left';
-    const low = Number(u.remaining) < 100;
-    badge.style.background = low ? 'rgba(220,38,38,0.1)' : 'rgba(105,88,194,0.1)';
-    badge.style.borderColor = low ? 'rgba(220,38,38,0.3)' : 'rgba(105,88,194,0.25)';
-    badge.style.color = low ? '#dc2626' : '#4D3FA0';
-    const tip = 'Zoho API calls remaining today' + (u.reset ? ' — resets at ' + new Date(Number(u.reset) * 1000).toLocaleTimeString() : '');
-    badge.title = tip;
-  } catch (_) {}
-});
+// Per-client API call tracking (best-effort, localStorage-backed). Each
+// outgoing Zoho call increments the counter for window.__activeClientId.
+// The sidebar reads these to show a per-client breakdown.
+const __AL_API_KEY = 'al_apiCalls_v1';
+const __loadApiCounts = () => {
+  try { return JSON.parse(localStorage.getItem(__AL_API_KEY) || '{}'); }
+  catch (_) { return {}; }
+};
+const __saveApiCounts = (m) => {
+  try { localStorage.setItem(__AL_API_KEY, JSON.stringify(m)); } catch (_) {}
+};
+window.__alIncrementApiCount = (kind) => {
+  const cid = window.__activeClientId || '__unassigned__';
+  const cname = window.__activeClientName || 'Unassigned';
+  const today = new Date().toISOString().slice(0,10);
+  const m = __loadApiCounts();
+  const row = m[cid] || { name: cname, total: 0, byDay: {} };
+  row.name = cname || row.name;
+  row.total = (row.total || 0) + 1;
+  row.byDay[today] = (row.byDay[today] || 0) + 1;
+  row.lastKind = kind || '';
+  row.lastAt = Date.now();
+  m[cid] = row;
+  __saveApiCounts(m);
+  try { window.dispatchEvent(new CustomEvent('al-api-counts', { detail: m })); } catch (_) {}
+};
+window.alGetApiCounts = __loadApiCounts;
+window.alResetApiCounts = () => { __saveApiCounts({}); try { window.dispatchEvent(new CustomEvent('al-api-counts', { detail: {} })); } catch (_) {} };
 
-window.zohoFetch = async (kind, organizationId) => {
-  const r = await dataClient.queries.zohoFetch({ kind, organizationId });
+window.zohoFetch = async (kind, organizationId, extraParams) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('fetch:'+kind);
+  const args = { kind, organizationId };
+  if (extraParams && typeof extraParams === 'object') args.params = JSON.stringify(extraParams);
+  const r = await dataClient.queries.zohoFetch(args);
   const d = __unwrapJson(r.data);
   if (!d) throw new Error('Empty response from Zoho.');
   __recordApiUsage(d.apiUsage);
   if (d.error) throw new Error(d.error);
+  // For 'recentEntries' we want the full object (expenses/journals/payments
+  // arrays), not just `items`. Return the whole payload when items absent.
+  if (kind === 'recentEntries') return d;
   const items = d.items || [];
   if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
   return items;
@@ -884,6 +896,7 @@ window.zohoFetch = async (kind, organizationId) => {
 // payload is a plain object that will be JSON-stringified for the Lambda.
 // Returns { id, raw } on success; throws on Zoho error with the message.
 window.zohoPush = async (kind, organizationId, payload) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount(kind);
   const r = await dataClient.mutations.zohoPush({
     kind, organizationId, payload: JSON.stringify(payload || {})
   });
@@ -896,6 +909,7 @@ window.zohoPush = async (kind, organizationId, payload) => {
 
 // Delete a previously-pushed entry. kind: 'deleteExpense'|'deleteJournal'|'deletePayment'.
 window.zohoDelete = async (kind, organizationId, resourceId) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount(kind);
   const r = await dataClient.mutations.zohoDelete({
     kind, organizationId, payload: String(resourceId || '')
   });
@@ -2003,6 +2017,9 @@ function App(){
   const[clients,setClients]=useState([]);
   const[activeClientId,setActiveClientId]=useState(()=>{ try { return localStorage.getItem("autoledger_active_client")||""; } catch(e) { return ""; } });
   const[activeClientName,setActiveClientName]=useState("");
+  // Mirror to window so non-React helpers (zohoFetch/Push/Delete) can
+  // attribute API calls to the right client in the sidebar usage panel.
+  useEffect(()=>{ window.__activeClientId = activeClientId; window.__activeClientName = activeClientName; },[activeClientId,activeClientName]);
   // Load the client list from the cloud on mount; restore last-active client.
   useEffect(()=>{ (async()=>{
     try {
@@ -2083,6 +2100,28 @@ function App(){
   //     index: number  // index into journalEntries[group] (row or first row of pair) }
   const[pushedEntries,setPushedEntries]=useState([]);
   const[revertingId,setRevertingId]=useState("");
+  const[revertSelected,setRevertSelected]=useState(()=>new Set());
+  const[bulkReverting,setBulkReverting]=useState(false);
+  const[bulkRevertProgress,setBulkRevertProgress]=useState({done:0,total:0});
+  // Pre-push duplicate scan state. When the user clicks Push, we first
+  // pull a recent-entries snapshot from Zoho, match by (date+description),
+  // and -- if any matches -- show this modal asking Skip / Push anyway /
+  // Cancel before doing the actual push.
+  const[dupCheckOpen,setDupCheckOpen]=useState(false);
+  const[dupCheckMatches,setDupCheckMatches]=useState([]); // [{group, index, label, date, description, existing:{...}}]
+  const[dupCheckPushArgs,setDupCheckPushArgs]=useState(null); // staged args for resuming push
+  // Sidebar (steps + Zoho API usage panel + per-client breakdown).
+  const[sidebarOpen,setSidebarOpen]=useState(()=>{ try { return localStorage.getItem("al_sidebar_open")!=="0"; } catch(_){ return true; } });
+  const[apiCounts,setApiCounts]=useState(()=>{ try { return JSON.parse(localStorage.getItem('al_apiCalls_v1')||'{}'); } catch(_){ return {}; } });
+  const[apiUsage,setApiUsage]=useState(()=>window.__zohoApiUsage||{remaining:null,limit:null,reset:null});
+  useEffect(()=>{
+    const onCounts=(e)=>setApiCounts(e.detail||{});
+    const onUsage=(e)=>setApiUsage({...(e.detail||{})});
+    window.addEventListener('al-api-counts',onCounts);
+    window.addEventListener('zoho-api-usage',onUsage);
+    return ()=>{ window.removeEventListener('al-api-counts',onCounts); window.removeEventListener('zoho-api-usage',onUsage); };
+  },[]);
+  useEffect(()=>{ try { localStorage.setItem('al_sidebar_open',sidebarOpen?"1":"0"); } catch(_){} },[sidebarOpen]);
   const[descGroup,setDescGroup]=useState("");
   const bankInputRef=useRef(null);const coaInputRef=useRef(null);const dropdownRefs=useRef({});const refFileRef=useRef(null);
   const vendorInputRef=useRef(null);const customerInputRef=useRef(null);
@@ -3010,7 +3049,15 @@ function App(){
   // Sequentially push all built entries to Zoho Books. Sequential because each
   // Zoho-sync Lambda call refreshes its own access token, and Zoho rate-limits
   // refresh-token calls aggressively (~30/min). One-at-a-time keeps us safe.
-  const pushToZoho=useCallback(async ()=>{
+  // Normalize a (date, description) pair into a single key for dup matching.
+  // Tolerant to date separators and case/whitespace in description.
+  const dupKey = (date, desc) => {
+    const d = (date||'').replace(/\//g,'-').trim();
+    const n = (desc||'').toLowerCase().replace(/\s+/g,' ').trim();
+    return d + '|' + n;
+  };
+
+  const pushToZoho=useCallback(async (skipKeys)=>{
     if(pushing) return;
     const c=clients.find(x=>x.id===activeClientId);
     const orgId=c && c.zohoOrgId;
@@ -3085,6 +3132,10 @@ function App(){
     const jnl=je.journals||[];
     const bs=je.bsItems||[];
     const pr=je.revenue||[];
+    // Helper: should we skip this entry as a duplicate? skipKeys is a Set
+    // of dupKey(date,description) values built by the pre-push scan.
+    const shouldSkip = (date, desc) => skipKeys && skipKeys.size>0 && skipKeys.has(dupKey(date,desc));
+    let skipped = 0;
     const totalUnits=exp.length + Math.floor(jnl.length/2) + Math.floor(bs.length/2) + pr.length;
     if(totalUnits===0){ alert("Nothing to push."); return; }
 
@@ -3114,6 +3165,7 @@ function App(){
       const r=exp[i];
       const label="Expense "+(i+1)+"/"+exp.length+": "+(r.vendor||r.account||"");
       setPushProgress({done,total:totalUnits,label});
+      if(shouldSkip(r.date,r.description)){ skipped++; bump(label+" — skipped (duplicate)"); continue; }
       const acctId=accountIds[r.account];
       const payload={
         account_id: acctId,
@@ -3144,6 +3196,7 @@ function App(){
         const e1=entries[p*2], e2=entries[p*2+1];
         const label=kindLabel+" "+(p+1)+"/"+pairCount;
         setPushProgress({done,total:totalUnits,label});
+        if(shouldSkip(e1.date, e1.narration)){ skipped++; bump(label+" — skipped (duplicate)"); continue; }
         const buildLine=(e)=>{
           const acctId=accountIds[e.account];
           return acctId ? { account_id: acctId, debit_or_credit: e.debit>0?'debit':'credit', amount: Number(e.debit||e.credit)||0, description: e.narration||"" } : null;
@@ -3185,6 +3238,7 @@ function App(){
       const r=pr[i];
       const label="Payment "+(i+1)+"/"+pr.length+": "+(r.customerName||"");
       setPushProgress({done,total:totalUnits,label});
+      if(shouldSkip(r.date, r.description)){ skipped++; bump(label+" — skipped (duplicate)"); continue; }
       const custId=customerIds[r.customerName];
       const depositId=accountIds[r.depositTo]||bankId;
       if(!custId){ recordFailure("payment",r,new Error("No Zoho customer_id for '"+r.customerName+"'. Sync customers and retry.")); bump(label); continue; }
@@ -3228,8 +3282,75 @@ function App(){
     setPushSuccessCount(success);
     setPushFailures(failures);
     setPushing(false);
-    setPushProgress({done:totalUnits,total:totalUnits,label:"Done"});
+    setPushProgress({done:totalUnits,total:totalUnits,label: skipped>0 ? ("Done — "+skipped+" skipped as duplicate") : "Done"});
   },[pushing,clients,activeClientId,bankAccount,journalEntries,currency,chartOfAccounts]);
+
+  // Pre-flight duplicate check. Pulls Zoho's expenses + journals + customer
+  // payments for the date range of the batch we're about to push, then
+  // matches by (date + description). If matches exist, opens the dup-check
+  // modal so the user can Skip the dupes, Push anyway, or Cancel.
+  const prePushCheck = useCallback(async ()=>{
+    if(pushing) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
+    const je=journalEntries||{};
+    const exp=je.expenses||[], jnl=je.journals||[], bs=je.bsItems||[], pr=je.revenue||[];
+    if(exp.length===0 && jnl.length===0 && bs.length===0 && pr.length===0){ alert("Nothing to push."); return; }
+
+    // Collect (group, index, date, description) tuples for the batch.
+    const local = [];
+    exp.forEach((r,i)=>local.push({group:'expenses',index:i,date:r.date,description:r.description||'',amount:r.amount,label:(r.vendor||r.account||'')+' '+(r.amount||'')}));
+    for(let p=0;p<Math.floor(jnl.length/2);p++){ const e1=jnl[p*2]; local.push({group:'journals',index:p*2,date:e1.date,description:e1.narration||'',amount:e1.debit||e1.credit,label:'Journal: '+e1.account}); }
+    for(let p=0;p<Math.floor(bs.length/2);p++){ const e1=bs[p*2]; local.push({group:'bsItems',index:p*2,date:e1.date,description:e1.narration||'',amount:e1.debit||e1.credit,label:'BS: '+e1.account}); }
+    pr.forEach((r,i)=>local.push({group:'revenue',index:i,date:r.date,description:r.description||'',amount:r.amount,label:'Payment: '+r.customerName}));
+
+    // Date range for the Zoho scan — convert DD/MM/YYYY → YYYY-MM-DD.
+    const toIso = (d)=>{
+      const s=(d||'').replace(/\//g,'-').trim();
+      const m=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+      if(m){ const pad=(n)=>n.length<2?"0"+n:n; return m[3]+'-'+pad(m[2])+'-'+pad(m[1]); }
+      if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      return null;
+    };
+    const isoDates = local.map(l=>toIso(l.date)).filter(Boolean).sort();
+    const fromDate = isoDates[0];
+    const toDate   = isoDates[isoDates.length-1];
+    if(!fromDate || !toDate){ alert("Could not parse dates from the batch — duplicate check skipped."); pushToZoho(); return; }
+
+    let existing;
+    try {
+      existing = await window.zohoFetch('recentEntries', orgId, { fromDate, toDate });
+    } catch(e){
+      if(!confirm("Could not check Zoho for duplicates: "+(e.message||e)+"\n\nPush anyway?")) return;
+      pushToZoho();
+      return;
+    }
+
+    // Build a Set of existing (date+description) keys from Zoho.
+    const existingKeys = new Map(); // key -> existing row meta for display
+    const collectExisting = (arr, type) => {
+      (arr||[]).forEach(x=>{
+        const k = dupKey(x.date, x.description);
+        if(!existingKeys.has(k)) existingKeys.set(k, {type, id:x.id, date:x.date, description:x.description, amount:x.amount, customer:x.customer});
+      });
+    };
+    collectExisting(existing.expenses,'expense');
+    collectExisting(existing.journals,'journal');
+    collectExisting(existing.payments,'payment');
+
+    const matches = local
+      .map(l => ({...l, key: dupKey(l.date,l.description), existing: existingKeys.get(dupKey(l.date,l.description))}))
+      .filter(l => !!l.existing);
+
+    if(matches.length===0){
+      pushToZoho();
+      return;
+    }
+    setDupCheckMatches(matches);
+    setDupCheckPushArgs({ orgId });
+    setDupCheckOpen(true);
+  },[pushing,clients,activeClientId,journalEntries,pushToZoho]);
 
   // Revert a single pushed entry — DELETEs it from Zoho, then strips the
   // zohoId from the matching row in journalEntries and from the pushed
@@ -3264,6 +3385,72 @@ function App(){
       setRevertingId("");
     }
   },[clients,activeClientId]);
+
+  // Bulk revert — sequential to avoid Zoho rate-limit. Each failure is
+  // surfaced but doesn't stop the rest.
+  const revertBulk=useCallback(async ()=>{
+    if(bulkReverting) return;
+    const ids = Array.from(revertSelected);
+    if(ids.length===0){ alert("Select at least one entry to revert."); return; }
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("Client is not linked to a Zoho organization."); return; }
+    const entries = pushedEntries.filter(p=>ids.includes(p.zohoId));
+    if(!confirm("Revert "+entries.length+" entr"+(entries.length===1?"y":"ies")+" from Zoho?\n\nThis deletes them from Zoho Books — you'll need to re-push to restore.")) return;
+
+    setBulkReverting(true);
+    setBulkRevertProgress({done:0,total:entries.length});
+    const failures=[];
+    const succeededIds=[];
+    for(let i=0;i<entries.length;i++){
+      const entry=entries[i];
+      setRevertingId(entry.zohoId);
+      try {
+        const kind = entry.kind==='expense' ? 'deleteExpense'
+          : entry.kind==='payment' ? 'deletePayment'
+          : 'deleteJournal';
+        await window.zohoDelete(kind, orgId, entry.zohoId);
+        succeededIds.push(entry.zohoId);
+      } catch(e){
+        failures.push({label:entry.label,reason:e.message||String(e)});
+      }
+      setBulkRevertProgress({done:i+1,total:entries.length});
+    }
+    setRevertingId("");
+
+    // Strip zohoId from rows that succeeded and remove them from the
+    // pushed list. Failed ones stay so the user can retry.
+    if(succeededIds.length>0){
+      setJournalEntries(prev=>{
+        const next={...prev};
+        for(const group of ['expenses','journals','bsItems','revenue']){
+          const arr=(next[group]||[]).slice();
+          let touched=false;
+          for(let k=0;k<arr.length;k++){
+            if(arr[k] && succeededIds.includes(arr[k].zohoId)){ const {zohoId,...rest}=arr[k]; arr[k]=rest; touched=true; }
+          }
+          if(touched) next[group]=arr;
+        }
+        return next;
+      });
+      setPushedEntries(prev=>prev.filter(p=>!succeededIds.includes(p.zohoId)));
+    }
+    setRevertSelected(new Set());
+    setBulkReverting(false);
+    if(failures.length>0){
+      alert("Reverted "+succeededIds.length+" of "+entries.length+". Failures:\n\n"+failures.map(f=>"• "+f.label+" — "+f.reason).join("\n"));
+    }
+  },[bulkReverting,revertSelected,pushedEntries,clients,activeClientId]);
+
+  const toggleRevertOne=useCallback((id)=>{
+    setRevertSelected(prev=>{ const n=new Set(prev); if(n.has(id)) n.delete(id); else n.add(id); return n; });
+  },[]);
+  const toggleRevertAll=useCallback(()=>{
+    setRevertSelected(prev=>{
+      if(prev.size===pushedEntries.length) return new Set();
+      return new Set(pushedEntries.map(p=>p.zohoId));
+    });
+  },[pushedEntries]);
 
   // Build Suspense Clarification Sheet — formatted for client
   // Build Suspense Clarification Sheet — formatted HTML table exported as .xls
@@ -3685,8 +3872,67 @@ td,th{padding:8px 12px;vertical-align:middle}
   const stats=useMemo(()=>({total:classifiedTxns.length,auto:classifiedTxns.filter(t=>t.status==="Auto-Assigned").length,suspense:classifiedTxns.filter(t=>t.status==="Suspense").length,confirmed:classifiedTxns.filter(t=>t.status==="Confirmed").length,totalDebit:classifiedTxns.reduce((s,t)=>s+t.debit,0),totalCredit:classifiedTxns.reduce((s,t)=>s+t.credit,0)}),[classifiedTxns]);
   const typeBadge=fileType==="pdf"?{text:"Parsed",bg:"rgba(105,88,194,0.15)",color:"#6958C2",border:"rgba(105,88,194,0.2)"}:fileType==="xlsx"?{text:"Excel Parsed",bg:"rgba(22,163,74,0.1)",color:"#16a34a",border:"rgba(22,163,74,0.2)"}:{text:"CSV",bg:"rgba(105,88,194,0.1)",color:"#6958C2",border:"rgba(105,88,194,0.2)"};
 
+  // Per-client API usage list, sorted by today's count desc.
+  const apiCountsList = useMemo(()=>{
+    const today = new Date().toISOString().slice(0,10);
+    return Object.entries(apiCounts||{}).map(([cid,row])=>({
+      cid, name: row.name||cid, total: row.total||0, today: (row.byDay&&row.byDay[today])||0
+    })).sort((a,b)=>(b.today-a.today)||(b.total-a.total));
+  },[apiCounts]);
+  const SIDEBAR_W = sidebarOpen ? 220 : 48;
+
   return(
-    <div style={{fontFamily:"'IBM Plex Sans',-apple-system,sans-serif",background:"#f7f5fc",color:"#1a1a2e",minHeight:"100vh"}}>
+    <div style={{fontFamily:"'IBM Plex Sans',-apple-system,sans-serif",background:"#f7f5fc",color:"#1a1a2e",minHeight:"100vh",paddingLeft:SIDEBAR_W,transition:"padding-left 0.2s"}}>
+
+      {/* ═══════════════ Left sidebar — steps + API usage ═══════════════ */}
+      <aside style={{position:"fixed",top:0,left:0,bottom:0,width:SIDEBAR_W,background:"linear-gradient(180deg,#ffffff,#f5f3fc)",borderRight:"1px solid #e2e2ea",display:"flex",flexDirection:"column",zIndex:50,transition:"width 0.2s",overflow:"hidden"}}>
+        <div style={{padding:sidebarOpen?"14px 14px 8px 14px":"14px 6px",display:"flex",alignItems:"center",justifyContent:sidebarOpen?"space-between":"center",borderBottom:"1px solid #f0f0f4"}}>
+          {sidebarOpen && <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase"}}>Workflow</span>}
+          <button onClick={()=>setSidebarOpen(o=>!o)} title={sidebarOpen?"Collapse":"Expand"} style={{background:"transparent",border:"none",cursor:"pointer",color:"#777777",fontSize:14,padding:"2px 6px",borderRadius:4}}>{sidebarOpen?"‹":"›"}</button>
+        </div>
+
+        {/* Steps (mirrors top bar, vertical) */}
+        {appMode==="bank" && <div style={{padding:sidebarOpen?"8px 10px":"8px 4px",display:"flex",flexDirection:"column",gap:4}}>
+          {STEPS.map(s=>{
+            const reachable = s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0));
+            const active=step===s.id, done=step>s.id;
+            return <div key={s.id} onClick={()=>{ if(reachable) setStep(s.id); }} title={s.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:reachable?"pointer":"default",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":done?"#16a34a":"#777777",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+              <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{s.icon}</span>
+              {sidebarOpen && <span>{s.label}</span>}
+              {sidebarOpen && active && <span style={{marginLeft:"auto",fontSize:9,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{s.id}/6</span>}
+            </div>;
+          })}
+        </div>}
+
+        {/* Zoho API usage panel */}
+        {sidebarOpen && <div style={{marginTop:"auto",borderTop:"1px solid #f0f0f4",padding:"12px 14px",fontSize:11}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase",marginBottom:8}}>Zoho API today</div>
+          {apiUsage && apiUsage.remaining!=null ? (
+            <div style={{padding:"8px 10px",background:Number(apiUsage.remaining)<100?"rgba(220,38,38,0.08)":"rgba(105,88,194,0.08)",border:"1px solid "+(Number(apiUsage.remaining)<100?"rgba(220,38,38,0.25)":"rgba(105,88,194,0.2)"),borderRadius:8,marginBottom:10,color:Number(apiUsage.remaining)<100?"#dc2626":"#4D3FA0"}} title={apiUsage.reset?"Resets at "+new Date(Number(apiUsage.reset)*1000).toLocaleString():""}>
+              <div style={{fontSize:18,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.1}}>{apiUsage.remaining}{apiUsage.limit?(<span style={{fontSize:11,color:"#888888"}}> / {apiUsage.limit}</span>):null}</div>
+              <div style={{fontSize:10,color:"#888888",marginTop:2}}>calls remaining</div>
+            </div>
+          ) : (
+            <div style={{padding:"8px 10px",background:"#f8f9fc",border:"1px dashed #e2e2ea",borderRadius:8,marginBottom:10,color:"#999999",fontSize:10}}>No Zoho calls yet this session.</div>
+          )}
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>By client (today)</span>
+            {Object.keys(apiCounts||{}).length>0 && <span onClick={()=>{ if(confirm("Reset local per-client API call counters?")) window.alResetApiCounts(); }} style={{fontSize:9,fontWeight:600,color:"#dc2626",cursor:"pointer",letterSpacing:0,textTransform:"none"}}>Reset</span>}
+          </div>
+          {apiCountsList.length===0 ? (
+            <div style={{fontSize:10,color:"#999999",padding:"4px 0"}}>No client activity yet.</div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:200,overflowY:"auto"}}>
+              {apiCountsList.slice(0,12).map(r=>(
+                <div key={r.cid} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"4px 6px",borderRadius:4,background:r.cid===activeClientId?"rgba(77,63,160,0.08)":"transparent",fontSize:10}} title={"Total all-time: "+r.total}>
+                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:r.cid===activeClientId?"#4D3FA0":"#1a1a2e",fontWeight:r.cid===activeClientId?600:400}}>{r.name||"—"}</span>
+                  <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#777777",flexShrink:0}}>{r.today}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>}
+      </aside>
 
       {/* Header */}
       <div style={{background:"linear-gradient(135deg,#ffffff,#f5f5fa)",borderBottom:"1px solid #e2e2ea",padding:"12px 28px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
@@ -4738,7 +4984,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
           </div>
           <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:14}}>
-            <button onClick={pushToZoho} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Pushing…":"Push to Zoho"}</button>
+            <button onClick={prePushCheck} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Pushing…":"Push to Zoho"}</button>
             {(()=>{
               // Rebuild pushed list from any zohoId-stamped rows so reopened
               // projects can still revert individual entries.
@@ -4824,17 +5070,33 @@ td,th{padding:8px 12px;vertical-align:middle}
                 ✓ All {pushSuccessCount} entries pushed to Zoho Books successfully.
               </div>}
               {!pushing&&pushedEntries.length>0&&<div style={{marginTop:pushFailures.length>0?14:0}}>
-                <div style={{fontSize:12,fontWeight:600,color:"#16a34a",marginBottom:8}}>Pushed entries — click Revert to delete a single transaction from Zoho:</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8,flexWrap:"wrap"}}>
+                  <div style={{fontSize:12,fontWeight:600,color:"#16a34a"}}>Pushed entries — tick rows to revert in bulk, or use the per-row button:</div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    {bulkReverting && <span style={{fontSize:10,color:"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{bulkRevertProgress.done}/{bulkRevertProgress.total}</span>}
+                    <button onClick={revertBulk} disabled={bulkReverting||revertSelected.size===0} style={{background:(bulkReverting||revertSelected.size===0)?"#cccccc":"rgba(220,38,38,0.1)",border:"1px solid "+((bulkReverting||revertSelected.size===0)?"#cccccc":"rgba(220,38,38,0.35)"),borderRadius:6,padding:"5px 12px",color:(bulkReverting||revertSelected.size===0)?"#777777":"#dc2626",fontSize:11,fontWeight:600,cursor:(bulkReverting||revertSelected.size===0)?"default":"pointer"}}>
+                      {bulkReverting?"Reverting…":"↶ Revert selected ("+revertSelected.size+")"}
+                    </button>
+                  </div>
+                </div>
                 <div style={{border:"1px solid rgba(22,163,74,0.2)",borderRadius:8,overflow:"hidden",maxHeight:280,overflowY:"auto"}}>
                   <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                     <thead><tr style={{background:"rgba(22,163,74,0.06)",position:"sticky",top:0}}>
+                      <th style={{padding:"8px 8px",width:36,textAlign:"center",borderBottom:"1px solid rgba(22,163,74,0.2)"}}>
+                        <input type="checkbox" checked={pushedEntries.length>0&&revertSelected.size===pushedEntries.length} onChange={toggleRevertAll} disabled={bulkReverting} style={{cursor:"pointer",accentColor:"#dc2626"}} />
+                      </th>
                       <th style={{padding:"8px 10px",textAlign:"left",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Type</th>
                       <th style={{padding:"8px 10px",textAlign:"left",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Entry</th>
                       <th style={{padding:"8px 10px",textAlign:"left",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Zoho ID</th>
                       <th style={{padding:"8px 10px",textAlign:"right",color:"#16a34a",fontWeight:600,borderBottom:"1px solid rgba(22,163,74,0.2)"}}>Action</th>
                     </tr></thead>
-                    <tbody>{pushedEntries.map((p)=>(
-                      <tr key={p.zohoId} style={{borderBottom:"1px solid #f8f9fc"}}>
+                    <tbody>{pushedEntries.map((p)=>{
+                      const checked=revertSelected.has(p.zohoId);
+                      const isThis=revertingId===p.zohoId;
+                      return <tr key={p.zohoId} style={{borderBottom:"1px solid #f8f9fc",background:checked?"rgba(220,38,38,0.04)":"transparent"}}>
+                        <td style={{padding:"7px 8px",textAlign:"center"}}>
+                          <input type="checkbox" checked={checked} onChange={()=>toggleRevertOne(p.zohoId)} disabled={bulkReverting} style={{cursor:"pointer",accentColor:"#dc2626"}} />
+                        </td>
                         <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:"#1a1a2e"}}>{p.kind}</td>
                         <td style={{padding:"7px 10px",color:"#1a1a2e"}}>
                           <div style={{fontWeight:600}}>{p.label}</div>
@@ -4842,20 +5104,68 @@ td,th{padding:8px 12px;vertical-align:middle}
                         </td>
                         <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:"#777777"}}>{p.zohoId}</td>
                         <td style={{padding:"7px 10px",textAlign:"right"}}>
-                          <button onClick={()=>revertEntry(p)} disabled={revertingId===p.zohoId} style={{background:revertingId===p.zohoId?"#cccccc":"rgba(220,38,38,0.08)",border:"1px solid "+(revertingId===p.zohoId?"#cccccc":"rgba(220,38,38,0.3)"),borderRadius:6,padding:"4px 10px",color:revertingId===p.zohoId?"#777777":"#dc2626",fontSize:10,fontWeight:600,cursor:revertingId===p.zohoId?"default":"pointer"}}>
-                            {revertingId===p.zohoId?"Reverting…":"↶ Revert"}
+                          <button onClick={()=>revertEntry(p)} disabled={isThis||bulkReverting} style={{background:(isThis||bulkReverting)?"#cccccc":"rgba(220,38,38,0.08)",border:"1px solid "+((isThis||bulkReverting)?"#cccccc":"rgba(220,38,38,0.3)"),borderRadius:6,padding:"4px 10px",color:(isThis||bulkReverting)?"#777777":"#dc2626",fontSize:10,fontWeight:600,cursor:(isThis||bulkReverting)?"default":"pointer"}}>
+                            {isThis?"Reverting…":"↶ Revert"}
                           </button>
                         </td>
-                      </tr>
-                    ))}</tbody>
+                      </tr>;
+                    })}</tbody>
                   </table>
                 </div>
               </div>}
             </div>
             {!pushing&&<div style={{padding:"14px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"flex-end",gap:10}}>
-              {pushFailures.length>0&&<button onClick={()=>{ setPushModalOpen(false); pushToZoho(); }} style={{background:"#ffffff",border:"1px solid rgba(105,88,194,0.3)",borderRadius:8,padding:"8px 18px",color:"#6958C2",fontSize:12,fontWeight:600,cursor:"pointer"}}>Retry full push</button>}
+              {pushFailures.length>0&&<button onClick={()=>{ setPushModalOpen(false); prePushCheck(); }} style={{background:"#ffffff",border:"1px solid rgba(105,88,194,0.3)",borderRadius:8,padding:"8px 18px",color:"#6958C2",fontSize:12,fontWeight:600,cursor:"pointer"}}>Retry full push</button>}
               <button onClick={()=>setPushModalOpen(false)} style={{background:"#6958C2",color:"#ffffff",border:"none",borderRadius:8,padding:"8px 20px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Close</button>
             </div>}
+          </div>
+        </div>}
+
+        {/* ═══════════════ Duplicate-check modal ═══════════════ */}
+        {dupCheckOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5100,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div style={{background:"#ffffff",borderRadius:12,maxWidth:760,width:"100%",maxHeight:"90vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"18px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(217,119,6,0.06)"}}>
+              <h3 style={{fontSize:16,fontWeight:700,color:"#92400e"}}>⚠ Possible duplicates in Zoho Books</h3>
+              <button onClick={()=>{ setDupCheckOpen(false); setDupCheckMatches([]); }} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
+            </div>
+            <div style={{padding:"18px 22px",overflowY:"auto",flex:1}}>
+              <div style={{fontSize:13,color:"#555555",marginBottom:14}}>
+                Matched <strong>{dupCheckMatches.length}</strong> entr{dupCheckMatches.length===1?'y':'ies'} in Zoho with the same <strong>date + description</strong> as rows you're about to push. Review and choose how to proceed.
+              </div>
+              <div style={{border:"1px solid rgba(217,119,6,0.25)",borderRadius:8,overflow:"hidden",maxHeight:380,overflowY:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                  <thead><tr style={{background:"rgba(217,119,6,0.06)",position:"sticky",top:0}}>
+                    <th style={{padding:"8px 10px",textAlign:"left",color:"#92400e",fontWeight:600,borderBottom:"1px solid rgba(217,119,6,0.2)"}}>Date</th>
+                    <th style={{padding:"8px 10px",textAlign:"left",color:"#92400e",fontWeight:600,borderBottom:"1px solid rgba(217,119,6,0.2)"}}>To push</th>
+                    <th style={{padding:"8px 10px",textAlign:"left",color:"#92400e",fontWeight:600,borderBottom:"1px solid rgba(217,119,6,0.2)"}}>Existing in Zoho</th>
+                    <th style={{padding:"8px 10px",textAlign:"right",color:"#92400e",fontWeight:600,borderBottom:"1px solid rgba(217,119,6,0.2)"}}>Amount</th>
+                  </tr></thead>
+                  <tbody>{dupCheckMatches.map((m,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f8f9fc"}}>
+                      <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:"#1a1a2e"}}>{m.date||""}</td>
+                      <td style={{padding:"7px 10px",color:"#1a1a2e"}}>
+                        <div style={{fontWeight:600,fontSize:11}}>{m.label}</div>
+                        <div style={{fontSize:10,color:"#777777",maxWidth:240,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.description}</div>
+                      </td>
+                      <td style={{padding:"7px 10px",color:"#92400e"}}>
+                        <div style={{fontWeight:600,fontSize:11}}>{m.existing.type}{m.existing.customer?(" — "+m.existing.customer):""}</div>
+                        <div style={{fontSize:10,color:"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{m.existing.id}</div>
+                      </td>
+                      <td style={{padding:"7px 10px",textAlign:"right",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:"#1a1a2e"}}>{currency} {fmt(m.amount||0)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              <div style={{marginTop:12,padding:10,background:"rgba(105,88,194,0.04)",border:"1px solid rgba(105,88,194,0.15)",borderRadius:6,fontSize:11,color:"#555555"}}>
+                <strong style={{color:"#4D3FA0"}}>Skip duplicates</strong> pushes everything <em>except</em> these {dupCheckMatches.length} matched row{dupCheckMatches.length===1?'':'s'}.<br/>
+                <strong style={{color:"#dc2626"}}>Push anyway</strong> uploads everything — Zoho will create new entries alongside the existing ones.
+              </div>
+            </div>
+            <div style={{padding:"14px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"flex-end",gap:10,flexWrap:"wrap"}}>
+              <button onClick={()=>{ setDupCheckOpen(false); setDupCheckMatches([]); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"8px 18px",color:"#1a1a2e",fontSize:12,fontWeight:600,cursor:"pointer"}}>Cancel</button>
+              <button onClick={()=>{ const keys=new Set(dupCheckMatches.map(m=>m.key)); setDupCheckOpen(false); setDupCheckMatches([]); pushToZoho(keys); }} style={{background:"#6958C2",color:"#ffffff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Skip duplicates &amp; push</button>
+              <button onClick={()=>{ setDupCheckOpen(false); setDupCheckMatches([]); pushToZoho(); }} style={{background:"#dc2626",color:"#ffffff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Push anyway</button>
+            </div>
           </div>
         </div>}
 
