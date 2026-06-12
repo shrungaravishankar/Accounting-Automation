@@ -489,7 +489,22 @@ export const handler = async (event: Event) => {
       } else {
         body.tax_treatment = p.tax_treatment || 'vat_not_registered';
       }
-      if (p.country_code) body.country_code = p.country_code;
+      // Zoho's Contacts API doesn't accept `country_code` at the root —
+      // it wants the country NAME inside billing_address.country /
+      // shipping_address.country. We map the ISO-2 code that the
+      // frontend sends to the full name Zoho's UI displays. Anything
+      // unmapped falls through as the raw code (still valid, just less
+      // pretty in the Zoho UI).
+      const COUNTRY_NAMES: Record<string,string> = {
+        AE: 'United Arab Emirates', SA: 'Saudi Arabia', OM: 'Oman',
+        BH: 'Bahrain', QA: 'Qatar', KW: 'Kuwait', IN: 'India',
+        PK: 'Pakistan', EG: 'Egypt', JO: 'Jordan', LB: 'Lebanon',
+        GB: 'United Kingdom', US: 'United States', SG: 'Singapore',
+        CN: 'China', TR: 'Türkiye', DE: 'Germany', FR: 'France',
+        CH: 'Switzerland', AU: 'Australia', CA: 'Canada', ES: 'Spain',
+        IT: 'Italy', NL: 'Netherlands', BE: 'Belgium', JP: 'Japan',
+      };
+      const countryName = p.country_code ? (COUNTRY_NAMES[String(p.country_code).toUpperCase()] || p.country_code) : '';
       // place_of_supply is MANDATORY on a Zoho UAE customer contact
       // (the "Place of Supply *" red-asterisked field on the Other
       // Details tab). API expects the 2-letter emirate code (AB/DU/
@@ -520,16 +535,16 @@ export const handler = async (event: Event) => {
       };
       const billingAddr = toAddress(p.billing_address || p.address);
       if (billingAddr) {
-        // Stamp the structured country_code on the billing/shipping
-        // address objects too — Zoho's contact screen needs it to
-        // populate the Country/Region dropdown, separately from the
-        // root contact-level country_code.
-        if (p.country_code && !billingAddr.country_code) billingAddr.country_code = p.country_code;
+        // Zoho's contact billing_address uses `country` (full name),
+        // not `country_code`. Override whatever toAddress() inferred
+        // from the last comma-separated chunk with the explicit value
+        // the user picked in the review modal.
+        if (countryName) billingAddr.country = countryName;
         body.billing_address = billingAddr;
       }
       const shipAddr = toAddress(p.shipping_address || p.address);
       if (shipAddr) {
-        if (p.country_code && !shipAddr.country_code) shipAddr.country_code = p.country_code;
+        if (countryName) shipAddr.country = countryName;
         body.shipping_address = shipAddr;
       }
       const j = await zohoPost('contacts', accessToken, region, { organization_id: orgId }, body);
