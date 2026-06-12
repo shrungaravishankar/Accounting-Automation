@@ -558,6 +558,20 @@ export const handler = async (event: Event) => {
         throw new Error((e?.message || String(e)) + suffix);
       }
       const inv = j.invoice || {};
+      // Zoho creates invoices in 'draft' status by default. The Revenue
+      // OCR workflow represents a real, issued invoice — mark it as Sent
+      // immediately via /invoices/{id}/status/sent. Best-effort: if the
+      // status flip fails we still return success for the creation, with
+      // markSentError populated so the frontend can surface a warning.
+      let markSentError: string | null = null;
+      if (inv.invoice_id) {
+        try {
+          await zohoPost(`invoices/${inv.invoice_id}/status/sent`, accessToken, region, { organization_id: orgId! }, {});
+        } catch (e: any) {
+          markSentError = e?.message || String(e);
+          console.warn('[zoho-sync] mark-sent failed for', inv.invoice_id, markSentError);
+        }
+      }
       return JSON.stringify({
         error: null,
         success: true,
@@ -565,6 +579,7 @@ export const handler = async (event: Event) => {
         invoice_number: inv.invoice_number || '',
         balance: Number(inv.balance || 0),
         total: Number(inv.total || 0),
+        markSentError,
         raw: j,
         apiUsage: lastApiUsage
       });
