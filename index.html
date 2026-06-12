@@ -3622,8 +3622,10 @@ function App(){
           invoice_number:item.invoiceNumber,
           // tax_treatment is the CUSTOMER's status. The project is always
           // VAT-registered (it's our entity); what matters here is whether
-          // the buyer has a TRN. No TRN → vat_not_registered (B2C-style).
-          tax_treatment: item.customerTrn ? 'vat_registered' : 'vat_not_registered',
+          // the buyer has a TRN. Zoho UAE enum: 'vat_registered' (has TRN)
+          // or 'non_vat_registered' (no TRN). NOT 'vat_not_registered' —
+          // that string is rejected as "Invalid value [zoho code 6]".
+          tax_treatment: item.customerTrn ? 'vat_registered' : 'non_vat_registered',
           place_of_supply: placeOfSupply,
           line_items:lines,
           notes:'Imported via AutoLedger OCR — source file: '+item.fileName
