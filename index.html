@@ -2631,13 +2631,21 @@ function App(){
     if(p.clientId && p.clientId !== activeClientId){ switchClient(p.clientId,{keepView:true}); }
     setStep(1);
     setView("workflow");
-    // Optimistic: show the metadata immediately, then upgrade with data.
-    setViewingProject(p);
     if(!p.dataPath){ alert("This project has no saved data path."); return; }
     try {
       const data = await window.projectLoad(p.dataPath);
       if(!data){ alert("Project data could not be found in storage."); return; }
-      setViewingProject(prev => prev && prev.id === p.id ? {...prev, data} : {...p, data});
+      // Normalise: older saves may lack some arrays — the viewer reads
+      // .expenses/.journals/.bsItems/.revenue/.suspense without guards.
+      const safe = {
+        transactions: data.transactions||[],
+        expenses: data.expenses||[],
+        journals: data.journals||[],
+        bsItems: data.bsItems||[],
+        revenue: data.revenue||[],
+        suspense: data.suspense||[]
+      };
+      setViewingProject({...p, data: safe});
     } catch(e){
       alert("Could not load project data: "+(e.message||e));
     }
@@ -5113,7 +5121,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>}
 
           {/* Project Detail View */}
-          {viewingProject&&<div style={{background:"#f8f9fc",borderRadius:12,border:"1px solid rgba(8,145,178,0.3)",padding:20}}>
+          {viewingProject&&viewingProject.data&&<div style={{background:"#f8f9fc",borderRadius:12,border:"1px solid rgba(8,145,178,0.3)",padding:20}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:"#0891b2"}}>{viewingProject.name}</div>
