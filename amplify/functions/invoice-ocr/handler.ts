@@ -148,19 +148,31 @@ export const handler = async (event: Event) => {
     const cmd = new AnalyzeExpenseCommand({ Document: { Bytes: bytes } });
     const res = await textract.send(cmd);
 
-    const doc = (res.ExpenseDocuments || [])[0];
+    const docs = res.ExpenseDocuments || [];
+    const doc = docs[0];
     if (!doc) {
       return JSON.stringify({ error: 'Textract returned no expense documents — is this an invoice/receipt image?' });
     }
 
-    const vendor = getSummary(doc, 'VENDOR_NAME');
-    const receiver = getSummary(doc, 'RECEIVER_NAME');
-    const invoiceNumber = getSummary(doc, 'INVOICE_RECEIPT_ID');
-    const dateRaw = getSummary(doc, 'INVOICE_RECEIPT_DATE');
-    const dueRaw = getSummary(doc, 'DUE_DATE');
-    const total = getSummary(doc, 'TOTAL');
-    const subtotal = getSummary(doc, 'SUBTOTAL');
-    const tax = getSummary(doc, 'TAX');
+    // Multi-page: header fields come from the first page that has them;
+    // totals come from the LAST page that has them (where invoice totals
+    // conventionally sit on multi-page documents).
+    const firstOf = (label: string) => {
+      for (const d of docs) { const v = getSummary(d, label); if (v && v.value) return v; }
+      return null;
+    };
+    const lastOf = (label: string) => {
+      for (let i = docs.length - 1; i >= 0; i--) { const v = getSummary(docs[i], label); if (v && v.value) return v; }
+      return null;
+    };
+    const vendor = firstOf('VENDOR_NAME');
+    const receiver = firstOf('RECEIVER_NAME');
+    const invoiceNumber = firstOf('INVOICE_RECEIPT_ID');
+    const dateRaw = firstOf('INVOICE_RECEIPT_DATE');
+    const dueRaw = firstOf('DUE_DATE');
+    const total = lastOf('TOTAL');
+    const subtotal = lastOf('SUBTOTAL');
+    const tax = lastOf('TAX');
     // UAE TRNs sometimes land as VENDOR_VAT_NUMBER or as a free-text label;
     // collect candidates and pick a 15-digit run if found.
     const trnCandidates = getAllSummary(doc, ['VENDOR_VAT_NUMBER', 'RECEIVER_VAT_NUMBER', 'TAX_PAYER_ID']);
@@ -184,7 +196,96 @@ export const handler = async (event: Event) => {
       vatPercent = Math.round(pct * 100) / 100;
     }
 
-    const lineItems = extractLineItems(doc);
+    // Aggregate line items across every page, de-duplicating identical
+    // (description, amount) pairs that repeat in carried-forward tables.
+    const lineItems: ReturnType<typeof extractLineItems> = [];
+    const liSeen = new Set<string>();
+    for (const d of docs) {
+      for (const li of extractLineItems(d)) {
+        const key = li.description.toLowerCase() + '|' + li.amount.toFixed(2);
+        if (liSeen.has(key)) continue;
+        liSeen.add(key);
+        lineItems.push(li);
+      }
+    }
+
+    // ---- Raw text corpus (labels + values from every detected field) ----
+    // Used by the frontend's validation engine for document classification,
+    // credit-note detection, currency detection, and VAT-intelligence
+    // keyword scanning. AnalyzeExpense doesn't return a flat text blob, so
+    // we synthesize one from all label/value detections across the doc.
+    const rawText: string[] = [];
+    const collectText = (fields: ExpenseField[] | undefined) => {
+      for (const f of (fields || [])) {
+        const label = (f as any).LabelDetection?.Text;
+        const value = f.ValueDetection?.Text;
+        const type = f.Type?.Text;
+        if (label) rawText.push(label);
+        if (value) rawText.push(value);
+        if (type && type !== 'OTHER') rawText.push(type);
+      }
+    };
+    for (const d of (res.ExpenseDocuments || [])) {
+      collectText(d.SummaryFields as ExpenseField[]);
+      for (const g of (d.LineItemGroups || [])) {
+        for (const li of (g.LineItems || [])) {
+          collectText(li.LineItemExpenseFields as ExpenseField[]);
+        }
+      }
+    }
+    const corpus = rawText.join(' \n ').toLowerCase();
+
+    // ---- Document classification ----
+    // Rejected types take precedence over accepted: a "Quotation" that
+    // happens to contain the word invoice in its footer must still be
+    // rejected. Credit notes are detected separately so the frontend can
+    // route them to the (future) credit-note workflow.
+    const isCreditNote = /credit\s*note|tax\s*credit\s*note|\bcn[-\s]?\d/i.test(corpus);
+    const rejectedMatch = corpus.match(/quotation|proforma|pro[-\s]forma|purchase\s*order|delivery\s*note|\breceipt\s*voucher|statement\s*of\s*account|agreement|contract|debit\s*note/i);
+    const acceptedMatch = corpus.match(/simplified\s*tax\s*invoice|tax\s*invoice|commercial\s*invoice|\binvoice\b/i);
+    let docType = 'unknown';
+    if (isCreditNote) docType = 'credit_note';
+    else if (rejectedMatch) docType = rejectedMatch[0].replace(/\s+/g, '_');
+    else if (acceptedMatch) {
+      const m = acceptedMatch[0];
+      docType = /simplified/.test(m) ? 'simplified_tax_invoice' : /tax/.test(m) ? 'tax_invoice' : /commercial/.test(m) ? 'commercial_invoice' : 'invoice';
+    }
+    const isInvoice = !isCreditNote && !rejectedMatch && !!acceptedMatch;
+
+    // ---- Currency detection ----
+    // Count currency-code mentions; the most frequent wins. Default AED.
+    const SUPPORTED = ['AED','USD','EUR','GBP','SAR','QAR','OMR','KWD','BHD'];
+    let currency = 'AED';
+    let bestCount = 0;
+    for (const code of SUPPORTED) {
+      const re = new RegExp('\\b' + code.toLowerCase() + '\\b', 'g');
+      const count = (corpus.match(re) || []).length;
+      if (count > bestCount) { bestCount = count; currency = code; }
+    }
+    // Symbol hints when no code appears in text.
+    if (bestCount === 0) {
+      if (corpus.includes('$')) currency = 'USD';
+      else if (corpus.includes('€')) currency = 'EUR';
+      else if (corpus.includes('£')) currency = 'GBP';
+    }
+
+    // ---- TRN fallback scan ----
+    // If Textract's VAT-number fields missed them, scan the corpus for
+    // 15-digit runs near a 'trn' / 'vat' mention.
+    if (!vendorTrn || !receiverTrn) {
+      const trnRuns = corpus.match(/\b\d{15}\b/g) || [];
+      if (trnRuns.length >= 1 && !vendorTrn) vendorTrn = trnRuns[0];
+      if (trnRuns.length >= 2 && !receiverTrn) receiverTrn = trnRuns[1];
+    }
+
+    // ---- VAT intelligence indicators ----
+    const vatFlags: string[] = [];
+    if (/reverse\s*charge/i.test(corpus)) vatFlags.push('reverse_charge');
+    if (/outside\s*uae|out\s*of\s*scope/i.test(corpus)) vatFlags.push('outside_uae');
+    if (/export\s*(supply|of)/i.test(corpus)) vatFlags.push('export_supply');
+    if (/zero[-\s]*rated/i.test(corpus)) vatFlags.push('zero_rated');
+    if (/designated\s*zone/i.test(corpus)) vatFlags.push('designated_zone');
+    if (/exempt/i.test(corpus)) vatFlags.push('exempt');
 
     return JSON.stringify({
       error: null,
@@ -205,7 +306,23 @@ export const handler = async (event: Event) => {
       subtotal: subtotalN,
       tax: taxN,
       vat_percent: vatPercent,
-      line_items: lineItems
+      line_items: lineItems,
+      // Validation-engine inputs
+      doc_type: docType,
+      is_invoice: isInvoice,
+      is_credit_note: isCreditNote,
+      currency,
+      vat_flags: vatFlags,
+      page_count: (res.ExpenseDocuments || []).length,
+      confidences: {
+        vendor: vendor?.confidence || 0,
+        receiver: receiver?.confidence || 0,
+        invoice_number: invoiceNumber?.confidence || 0,
+        date: dateRaw?.confidence || 0,
+        total: total?.confidence || 0,
+        subtotal: subtotal?.confidence || 0,
+        tax: tax?.confidence || 0
+      }
     });
   } catch (err: any) {
     return JSON.stringify({ error: err?.message || 'OCR failed' });

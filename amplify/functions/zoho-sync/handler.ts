@@ -244,6 +244,77 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: null, items: invoices, apiUsage: lastApiUsage });
     }
 
+    // Look up invoices by exact invoice_number — duplicate detection for
+    // the OCR module. params = JSON { invoiceNumber }. Returns matches
+    // (possibly across customers; the frontend narrows by customer name).
+    if (kind === 'findInvoice') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const invNo = (p.invoiceNumber || '').trim();
+      if (!invNo) return JSON.stringify({ error: 'invoiceNumber is required (pass via params)' });
+      const j = await zohoGet('invoices', accessToken, region, {
+        organization_id: orgId,
+        invoice_number: invNo
+      });
+      const matches = (j.invoices || []).map((i: any) => ({
+        invoice_id: i.invoice_id,
+        invoice_number: i.invoice_number,
+        customer_id: i.customer_id,
+        customer_name: i.customer_name,
+        date: i.date,
+        total: Number(i.total),
+        balance: Number(i.balance),
+        status: i.status
+      }));
+      return JSON.stringify({ error: null, items: matches, apiUsage: lastApiUsage });
+    }
+
+    // Historical FX rate for foreign-currency invoices. params = JSON
+    // { from, to, date }. GCC pegs are constants (USD/SAR/QAR/OMR/KWD/BHD
+    // are all pegged to USD, hence stable against AED); floating pairs
+    // (EUR/GBP) are fetched live from a free rates API as a best-effort
+    // proxy for the Central Bank of UAE reference rate — the response
+    // carries `source` so the audit trail shows where the number came
+    // from, and the frontend allows a manual override either way.
+    if (kind === 'fxRate') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const from = (p.from || '').toUpperCase();
+      const to = (p.to || 'AED').toUpperCase();
+      if (!from) return JSON.stringify({ error: 'from currency is required' });
+      if (from === to) return JSON.stringify({ error: null, rate: 1, source: 'identity', dateUsed: p.date || null, apiUsage: lastApiUsage });
+
+      // Pegged cross-rates via AED (1 USD = 3.6725 AED fixed since 1997;
+      // SAR/QAR/OMR/KWD/BHD are USD-pegged so their AED crosses are stable).
+      const AED_PER: Record<string, number> = {
+        USD: 3.6725,
+        SAR: 0.97933,   // 3.75 SAR / USD
+        QAR: 1.00892,   // 3.64 QAR / USD
+        OMR: 9.54545,   // 0.3845 OMR / USD
+        KWD: 11.95440,  // ~0.3072 KWD / USD
+        BHD: 9.74801,   // 0.376 BHD / USD
+        AED: 1
+      };
+      const pegged = (f: string, t: string): number | null => {
+        if (AED_PER[f] != null && AED_PER[t] != null) return AED_PER[f] / AED_PER[t];
+        return null;
+      };
+      const peg = pegged(from, to);
+      if (peg != null) {
+        return JSON.stringify({ error: null, rate: Math.round(peg * 100000) / 100000, source: 'GCC peg (fixed parity)', dateUsed: p.date || null, apiUsage: lastApiUsage });
+      }
+      // Floating pair — try the free open.er-api.com latest table.
+      try {
+        const r = await fetch(`https://open.er-api.com/v6/latest/${from}`);
+        const j: any = await r.json();
+        const rate = j && j.rates && j.rates[to];
+        if (rate) {
+          return JSON.stringify({ error: null, rate: Math.round(Number(rate) * 100000) / 100000, source: 'open.er-api.com (latest reference rate)', dateUsed: new Date().toISOString().slice(0, 10), apiUsage: lastApiUsage });
+        }
+      } catch (_) { /* fall through */ }
+      return JSON.stringify({ error: 'Historical exchange rate could not be retrieved. Enter the rate manually.', apiUsage: lastApiUsage });
+    }
+
     // Taxes configured in this Zoho org. UAE orgs typically expose
     // "Standard Rate" (5%), "Zero Rated" (0%), "Exempt" (0%), and
     // "Out of Scope" (0%). Returned as { id, name, percentage, type }

@@ -17,6 +17,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; }
@@ -884,9 +885,9 @@ window.zohoFetch = async (kind, organizationId, extraParams) => {
   if (!d) throw new Error('Empty response from Zoho.');
   __recordApiUsage(d.apiUsage);
   if (d.error) throw new Error(d.error);
-  // For 'recentEntries' we want the full object (expenses/journals/payments
-  // arrays), not just `items`. Return the whole payload when items absent.
-  if (kind === 'recentEntries') return d;
+  // For 'recentEntries' and 'fxRate' we want the full object (multiple
+  // top-level keys), not just `items`.
+  if (kind === 'recentEntries' || kind === 'fxRate') return d;
   const items = d.items || [];
   if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
   return items;
@@ -968,7 +969,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','ocrDrafts'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -1762,6 +1763,186 @@ function saveRefDB(db) {
   try { localStorage.setItem("autoledger_refdb", JSON.stringify(db)); } catch(e) {}
 }
 
+// ═══════════════ Invoice OCR validation engine (UAE) ═══════════════
+// Modular validators over an OCR'd invoice. Pure + synchronous: anything
+// requiring network (Zoho duplicate lookup, FX rate) is pre-fetched by the
+// caller and passed in via ctx. Each validator returns
+//   { key, label, status: 'pass'|'warn'|'fail'|'skip', message }
+// Only 'fail' blocks pushing to Zoho.
+
+function alNormalizeEntityName(s){
+  return (s||'').toLowerCase()
+    .replace(/l\.?\s*l\.?\s*c\.?/g,'llc')
+    .replace(/f\.?\s*z\.?\s*e\.?/g,'fze')
+    .replace(/f\.?\s*z\.?\s*c\.?o?\.?/g,'fzco')
+    .replace(/[^a-z0-9 ]/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+// Similarity in 0..1 — exact, containment, then token overlap.
+function alNameSimilarity(a,b){
+  const x=alNormalizeEntityName(a), y=alNormalizeEntityName(b);
+  if(!x||!y) return 0;
+  if(x===y) return 1;
+  if(x.includes(y)||y.includes(x)) return 0.9;
+  const ta=new Set(x.split(' ').filter(t=>t.length>=2));
+  const tb=new Set(y.split(' ').filter(t=>t.length>=2));
+  if(ta.size===0||tb.size===0) return 0;
+  let common=0; ta.forEach(t=>{ if(tb.has(t)) common++; });
+  return common/Math.max(ta.size,tb.size);
+}
+
+function alValidateOcrInvoice(item, ctx){
+  // item: the OCR result + any user edits (customerName, invoiceNumber,
+  //       date, subtotal, tax, total, currency, lineItems, receiverName,
+  //       receiverTrn, docType, isInvoice, isCreditNote, confidences, vatFlags)
+  // ctx:  { project: {legalName, tradeName, trn, currency},
+  //         customers: [names], zohoDupMatches: [], localDupKeys: Set,
+  //         fx: { rate, source, error } | null }
+  const out=[];
+  const push=(key,label,status,message)=>out.push({key,label,status,message});
+
+  // 1 · Document classification
+  if(item.isCreditNote){
+    push('classification','Document type','fail','This is a Credit Note — it cannot be processed as a revenue invoice. Route it to the credit-note workflow.');
+  } else if(item.isInvoice===false){
+    push('classification','Document type','fail','This document is not a valid revenue invoice ('+(item.docType||'unknown').replace(/_/g,' ')+').');
+  } else {
+    push('classification','Document type','pass','Detected: '+(item.docType||'invoice').replace(/_/g,' ')+'.');
+  }
+
+  // 2 · Project ownership (receiver vs project legal/trade name)
+  const projNames=[ctx.project.legalName, ctx.project.tradeName].filter(Boolean);
+  if(projNames.length===0){
+    push('ownership','Project match','warn','No legal/trade name configured in Settings — ownership could not be verified.');
+  } else if(!item.receiverName){
+    push('ownership','Project match','warn','No Bill-To / receiver name detected on the invoice.');
+  } else {
+    const best=Math.max(...projNames.map(n=>alNameSimilarity(n,item.receiverName)));
+    if(best>=0.85) push('ownership','Project match','pass','Receiver "'+item.receiverName+'" matches the project ('+Math.round(best*100)+'%).');
+    else push('ownership','Project match','fail','This invoice does not appear to belong to the selected project. Receiver: "'+item.receiverName+'" — best match '+Math.round(best*100)+'%.');
+  }
+
+  // 3 · Project TRN (mandatory when configured)
+  if(!ctx.project.trn){
+    push('trn','Project TRN','warn','No TRN configured for this project in Settings — TRN check skipped.');
+  } else if(!item.receiverTrn){
+    push('trn','Project TRN','fail','Customer VAT TRN could not be identified on the uploaded invoice. Project VAT TRN could not be verified.');
+  } else if(item.receiverTrn!==ctx.project.trn){
+    push('trn','Project TRN','fail','Customer VAT TRN identified on invoice does not match the VAT TRN configured for this project. Expected: '+ctx.project.trn+' · Detected: '+item.receiverTrn+'.');
+  } else {
+    push('trn','Project TRN','pass','TRN '+item.receiverTrn+' matches the project.');
+  }
+
+  // 4 · UAE tax-invoice compliance — mandatory fields
+  const missing=[];
+  if(!item.customerName) missing.push('Supplier Name');
+  if(!item.supplierTrn) missing.push('Supplier TRN');
+  if(!item.invoiceNumber) missing.push('Invoice Number');
+  if(!item.date) missing.push('Invoice Date');
+  if(!item.receiverName) missing.push('Customer Name');
+  if(!(Number(item.subtotal)>0)) missing.push('Taxable Amount');
+  if(item.tax==null||item.tax==='') missing.push('VAT Amount');
+  if(!(Number(item.total)>0)) missing.push('Total Amount');
+  if(missing.length>0) push('compliance','UAE VAT compliance','fail','Missing mandatory field(s): '+missing.join(', ')+'.');
+  else push('compliance','UAE VAT compliance','pass','All mandatory UAE tax-invoice fields present.');
+
+  // 5 · Invoice number sanity
+  const invNo=(item.invoiceNumber||'').trim();
+  if(!invNo) push('invno','Invoice number','fail','Invoice number is missing.');
+  else if(!/[a-z0-9]/i.test(invNo)) push('invno','Invoice number','fail','Invoice number contains only symbols.');
+  else push('invno','Invoice number','pass','Invoice number: '+invNo+'.');
+
+  // 6 · Duplicate detection (local queue + Zoho)
+  const dupKey=((item.customerName||'')+'|'+invNo).toLowerCase();
+  if(invNo && ctx.localDupKeys && ctx.localDupKeys.has(dupKey)){
+    push('duplicate','Duplicate check','fail','Invoice already exists in the AutoLedger OCR queue (same customer + invoice number).');
+  } else if(ctx.zohoDupMatches && ctx.zohoDupMatches.length>0){
+    const m=ctx.zohoDupMatches[0];
+    push('duplicate','Duplicate check','fail','Invoice already exists in Zoho: '+m.invoice_number+' for '+m.customer_name+' ('+m.date+', total '+m.total+').');
+  } else {
+    push('duplicate','Duplicate check','pass','No duplicate found.');
+  }
+
+  // 7 · Invoice date window
+  if(item.date){
+    const d=new Date(item.date), now=new Date();
+    const diffDays=(d.getTime()-now.getTime())/86400000;
+    if(diffDays>30) push('date','Invoice date','fail','Invoice date is more than 30 days in the future ('+item.date+').');
+    else if(diffDays< -365) push('date','Invoice date','warn','Invoice date is older than 12 months ('+item.date+') — confirm this period is still open.');
+    else push('date','Invoice date','pass','Invoice date '+item.date+' is within the acceptable window.');
+  } else {
+    push('date','Invoice date','fail','Invoice date missing or unparseable.');
+  }
+
+  // 8 · Currency / FX
+  const projCur=ctx.project.currency||'AED';
+  const invCur=item.currency||'AED';
+  if(invCur===projCur){
+    push('currency','Currency','pass','Invoice currency '+invCur+' matches the project.');
+  } else if(ctx.fx && ctx.fx.rate){
+    push('currency','Currency','pass','Foreign currency '+invCur+' → '+projCur+' @ '+ctx.fx.rate+' ('+(ctx.fx.source||'manual')+').');
+  } else if(ctx.fx && ctx.fx.error){
+    push('currency','Currency','fail','Historical exchange rate could not be retrieved ('+invCur+' → '+projCur+'). Enter a rate manually.');
+  } else {
+    push('currency','Currency','warn','Foreign currency '+invCur+' detected — fetch or enter an exchange rate before pushing.');
+  }
+
+  // 9 · VAT percentage sanity
+  const sub=Number(item.subtotal||0), vat=Number(item.tax||0);
+  if(sub>0){
+    const pct=vat/sub*100;
+    const near=(x,t)=>Math.abs(x-t)<0.6;
+    if(near(pct,5)||near(pct,0)) push('vat','VAT rate','pass','Effective VAT rate '+(Math.round(pct*100)/100)+'% is a recognised UAE rate.');
+    else push('vat','VAT rate','warn','Effective VAT rate '+(Math.round(pct*100)/100)+'% is not a standard UAE rate (expected 5% or 0%) — review.');
+  } else {
+    push('vat','VAT rate','skip','No taxable amount to derive a VAT rate from.');
+  }
+
+  // 10 · Mathematical integrity
+  const tot=Number(item.total||0);
+  if(sub>0&&tot>0){
+    const diff=Math.abs(sub+vat-tot);
+    if(diff<=Math.max(0.05, tot*0.001)) push('math','Math check','pass','Subtotal + VAT = Total ✓ (±'+diff.toFixed(2)+').');
+    else push('math','Math check','fail','Subtotal ('+sub.toFixed(2)+') + VAT ('+vat.toFixed(2)+') ≠ Total ('+tot.toFixed(2)+') — off by '+diff.toFixed(2)+'.');
+  } else {
+    push('math','Math check','skip','Amounts incomplete — math check skipped.');
+  }
+
+  // 11 · Customer existence in Zoho
+  if(item.customerName){
+    const sim=(ctx.customers||[]).map(n=>({n,score:alNameSimilarity(n,item.customerName)})).sort((a,b)=>b.score-a.score)[0];
+    if(sim&&sim.score>=0.85) push('customer','Customer in Zoho','pass','Matched existing Zoho customer "'+sim.n+'" ('+Math.round(sim.score*100)+'%).');
+    else push('customer','Customer in Zoho','warn','Customer "'+item.customerName+'" does not exist in Zoho — map an existing customer or create a new one before pushing.');
+  } else {
+    push('customer','Customer in Zoho','fail','No customer (supplier on the invoice) detected.');
+  }
+
+  // 12 · OCR confidence scoring
+  const conf=item.confidences||{};
+  const lows=Object.entries(conf).filter(([k,v])=>Number(v)>0&&Number(v)<75).map(([k])=>k);
+  const mids=Object.entries(conf).filter(([k,v])=>Number(v)>=75&&Number(v)<90).map(([k])=>k);
+  if(lows.length>0) push('confidence','OCR confidence','warn','Manual verification required — low confidence on: '+lows.join(', ')+'.');
+  else if(mids.length>0) push('confidence','OCR confidence','warn','Needs review — medium confidence on: '+mids.join(', ')+'.');
+  else push('confidence','OCR confidence','pass','All extracted fields ≥90% confidence.');
+
+  // 15 · VAT intelligence
+  if((item.vatFlags||[]).length>0){
+    push('vatintel','VAT treatment hints','warn','Detected: '+(item.vatFlags||[]).map(f=>f.replace(/_/g,' ')).join(', ')+' — confirm VAT treatment before pushing.');
+  } else {
+    push('vatintel','VAT treatment hints','pass','No special VAT indicators detected (standard domestic supply assumed).');
+  }
+
+  return out;
+}
+
+function alOcrOverallStatus(validations){
+  if((validations||[]).some(v=>v.status==='fail')) return 'Error';
+  if((validations||[]).some(v=>v.status==='warn')) return 'Validated';
+  return 'Ready To Push';
+}
+
 function addToRefDB(db, description, ledger) {
   const norm = normalizeDesc(description);
   const keywords = extractKeywords(description);
@@ -2155,6 +2336,33 @@ function App(){
   // "Advance from customer" picker — when the user wants to treat the
   // payment as unapplied/advance instead of linking to an invoice.
   const[advancePickerOpen,setAdvancePickerOpen]=useState({});
+  // ── Invoice OCR module (Revenue tab) ──
+  // Queue of OCR'd invoice drafts for the active client. Persisted into
+  // the per-client config under 'ocrDrafts'. Item shape:
+  //  { id, fileName, status: 'Processing'|'Draft'|'Validated'|'Error'|
+  //    'Ready To Push'|'Pushed To Zoho'|'Sent'|'Partially Paid'|'Paid',
+  //    ...extracted/edited fields, validations:[], zohoInvoiceId,
+  //    zohoInvoiceNumber, pushedAt, sentAt, sentBy, fx:{rate,source} }
+  const[ocrQueue,setOcrQueue]=useState([]);
+  const[ocrProcessing,setOcrProcessing]=useState(false);
+  const[ocrProgress,setOcrProgress]=useState({done:0,total:0});
+  const[ocrReviewId,setOcrReviewId]=useState("");   // draft being reviewed in the modal
+  const[ocrSelected,setOcrSelected]=useState(()=>new Set());
+  const[ocrPushing,setOcrPushing]=useState(false);
+  const[revenueSub,setRevenueSub]=useState("ocr");  // 'invoices' | 'ocr' | 'payments'
+  // Load the persisted queue when the client changes.
+  useEffect(()=>{
+    if(!activeClientId) return;
+    setOcrQueue(getClientData(activeClientId,'ocrDrafts',[])||[]);
+    setOcrSelected(new Set());
+    setOcrReviewId("");
+  },[activeClientId]);
+  // Persist on change (skip transient Processing rows).
+  const persistOcrQueue=useCallback((queue)=>{
+    if(!activeClientId) return;
+    const stable=(queue||[]).filter(q=>q.status!=='Processing');
+    setClientData(activeClientId,'ocrDrafts',stable);
+  },[activeClientId]);
   // Push-to-Zoho state — drives Step 6's progress UI + failure modal.
   const[pushing,setPushing]=useState(false);
   const[pushProgress,setPushProgress]=useState({done:0,total:0,label:""});
@@ -3174,6 +3382,209 @@ function App(){
       setInvoiceCreatorSubmitting(false);
     }
   },[invoiceCreatorForm,invoiceCreatorRow,invoiceCreatorSubmitting,clients,activeClientId,zohoTaxes,handleInvoiceChange]);
+
+  // ═══════════ Invoice OCR pipeline (Revenue → Invoice OCR) ═══════════
+  // Expand a FileList into individual processable files. ZIPs are opened
+  // client-side (JSZip) and their PDF/image members extracted.
+  const expandOcrFiles = useCallback(async (fileList)=>{
+    const out=[];
+    for(const f of Array.from(fileList||[])){
+      if(/\.zip$/i.test(f.name) && window.JSZip){
+        try{
+          const zip = await window.JSZip.loadAsync(f);
+          const names = Object.keys(zip.files).filter(n=>!zip.files[n].dir && /\.(pdf|png|jpe?g|webp)$/i.test(n));
+          for(const n of names){
+            const blob = await zip.files[n].async('blob');
+            const mime = /\.pdf$/i.test(n)?'application/pdf':/\.png$/i.test(n)?'image/png':'image/jpeg';
+            out.push(new File([blob], n.split('/').pop(), { type: mime }));
+          }
+        }catch(e){ alert('Could not open ZIP "'+f.name+'": '+(e.message||e)); }
+      } else if(/\.(pdf|png|jpe?g|webp)$/i.test(f.name)){
+        out.push(f);
+      }
+    }
+    return out;
+  },[]);
+
+  // Re-run the validation engine for one draft (sync, using whatever
+  // network context is already on the item). Returns the updated item.
+  const revalidateOcrItem = useCallback((item, queue)=>{
+    const project={
+      legalName: getClientData(activeClientId,'legal_name','') || activeClientName,
+      tradeName: getClientData(activeClientId,'trade_name',''),
+      trn: getClientData(activeClientId,'trn',''),
+      currency: getClientData(activeClientId,'currency','AED')
+    };
+    const localDupKeys=new Set((queue||[]).filter(q=>q.id!==item.id && q.invoiceNumber)
+      .map(q=>((q.customerName||'')+'|'+(q.invoiceNumber||'')).toLowerCase()));
+    const validations = alValidateOcrInvoice(item, {
+      project, customers, localDupKeys,
+      zohoDupMatches: item.zohoDupMatches||[],
+      fx: item.fx||null
+    });
+    const status = item.status==='Pushed To Zoho'||item.status==='Sent'||item.status==='Partially Paid'||item.status==='Paid'
+      ? item.status : alOcrOverallStatus(validations);
+    return {...item, validations, status};
+  },[activeClientId,activeClientName,customers]);
+
+  // Process a batch of files: each file is OCR'd, validated, and added to
+  // the queue independently — one failure never stops the rest.
+  const processOcrFiles = useCallback(async (fileList)=>{
+    if(ocrProcessing) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    const files = await expandOcrFiles(fileList);
+    if(files.length===0){ alert("No PDF/image invoices found in the selection."); return; }
+    setOcrProcessing(true);
+    setOcrProgress({done:0,total:files.length});
+    let queue=[...ocrQueue];
+    for(let i=0;i<files.length;i++){
+      const f=files[i];
+      const id=crypto.randomUUID();
+      // OCR
+      try{
+        if(f.size>10*1024*1024) throw new Error('File exceeds 10 MB.');
+        const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result||''));r.onerror=()=>rej(new Error('Could not read file.'));r.readAsDataURL(f);});
+        const ocr=await window.invoiceOcr(b64,f.type);
+        let item={
+          id, fileName:f.name, uploadedAt:Date.now(),
+          // The supplier on the invoice == our user's CUSTOMER.
+          customerName:(ocr.vendor_name||'').trim(),
+          supplierTrn: ocr.vendor_trn||'',
+          receiverName:(ocr.receiver_name||'').trim(),
+          receiverTrn: ocr.receiver_trn||'',
+          invoiceNumber: ocr.invoice_number||'',
+          date: ocr.invoice_date||'',
+          dueDate: ocr.due_date||'',
+          subtotal: ocr.subtotal||0,
+          tax: ocr.tax||0,
+          total: ocr.total||0,
+          currency: ocr.currency||'AED',
+          vatPercent: ocr.vat_percent!=null ? (Number(ocr.vat_percent)>=2.5?5:0) : (Number(ocr.tax||0)>0?5:0),
+          lineItems: (ocr.line_items||[]).map(l=>({description:l.description,quantity:l.quantity||1,rate:l.rate||l.amount,amount:l.amount})),
+          docType: ocr.doc_type||'unknown',
+          isInvoice: ocr.is_invoice!==false,
+          isCreditNote: !!ocr.is_credit_note,
+          vatFlags: ocr.vat_flags||[],
+          confidences: ocr.confidences||{},
+          status:'Draft', validations:[], zohoDupMatches:[], fx:null,
+          zohoInvoiceId:'', zohoInvoiceNumber:'', pushedAt:null, sentAt:null, sentBy:''
+        };
+        // Zoho duplicate lookup — best-effort, only when linked + invno.
+        if(orgId && item.invoiceNumber){
+          try{
+            const dup=await window.zohoFetch('findInvoice',orgId,{invoiceNumber:item.invoiceNumber});
+            item.zohoDupMatches=(dup||[]).filter(m=>alNameSimilarity(m.customer_name,item.customerName)>=0.7 || !item.customerName);
+          }catch(_){/* dup check best-effort */}
+        }
+        // FX rate when foreign currency.
+        const projCur=getClientData(activeClientId,'currency','AED');
+        if(orgId && item.currency!==projCur){
+          try{
+            const fx=await window.zohoFetch('fxRate',orgId,{from:item.currency,to:projCur,date:item.date});
+            item.fx=fx&&fx.rate?{rate:fx.rate,source:fx.source,dateUsed:fx.dateUsed}:{error:fx&&fx.error||'unavailable'};
+          }catch(e){ item.fx={error:e.message||String(e)}; }
+        }
+        item=revalidateOcrItem(item,queue);
+        queue=[...queue,item];
+      }catch(e){
+        queue=[...queue,{id,fileName:f.name,uploadedAt:Date.now(),status:'Error',
+          validations:[{key:'ocr',label:'OCR extraction',status:'fail',message:e.message||String(e)}],
+          customerName:'',invoiceNumber:'',date:'',subtotal:0,tax:0,total:0,currency:'AED',lineItems:[],confidences:{},vatFlags:[]}];
+      }
+      setOcrQueue([...queue]);
+      setOcrProgress({done:i+1,total:files.length});
+    }
+    persistOcrQueue(queue);
+    setOcrProcessing(false);
+  },[ocrProcessing,ocrQueue,clients,activeClientId,expandOcrFiles,revalidateOcrItem,persistOcrQueue]);
+
+  // Apply edits from the review modal, re-validate, persist.
+  const updateOcrItem = useCallback((id,patch)=>{
+    setOcrQueue(prev=>{
+      const next=prev.map(q=>q.id===id?revalidateOcrItem({...q,...patch},prev):q);
+      persistOcrQueue(next);
+      return next;
+    });
+  },[revalidateOcrItem,persistOcrQueue]);
+
+  const deleteOcrItems = useCallback((ids)=>{
+    if(!confirm("Remove "+ids.length+" draft(s) from the OCR queue? Pushed invoices stay in Zoho.")) return;
+    setOcrQueue(prev=>{ const next=prev.filter(q=>!ids.includes(q.id)); persistOcrQueue(next); return next; });
+    setOcrSelected(new Set());
+  },[persistOcrQueue]);
+
+  // Push one or many drafts to Zoho. Only items with no 'fail' validation
+  // are eligible. Creates the customer if missing (explicit user action —
+  // the review modal asks first via the validations panel).
+  const pushOcrItems = useCallback(async (ids)=>{
+    if(ocrPushing) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
+    const eligible=ocrQueue.filter(q=>ids.includes(q.id) && q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail'));
+    const blocked=ids.length-eligible.length;
+    if(eligible.length===0){ alert("No eligible drafts — resolve FAIL validations first."+(blocked>0?" ("+blocked+" blocked)":"")); return; }
+    if(!confirm("Push "+eligible.length+" invoice(s) to Zoho?"+(blocked>0?"\n\n"+blocked+" selected item(s) are blocked by failed validations and will be skipped.":""))) return;
+    setOcrPushing(true);
+    let queue=[...ocrQueue];
+    await loadZohoTaxes();
+    const customerIds=getClientData(activeClientId,'customerIds',{})||{};
+    for(const item of eligible){
+      try{
+        // Resolve / create customer.
+        let custName=item.customerName;
+        let custId=customerIds[custName]||'';
+        if(!custId){
+          const m=findCustomerMatch(custName);
+          if(m && m.score>=0.85 && m.customerId){ custId=m.customerId; custName=m.name; }
+        }
+        if(!custId){
+          const created=await window.zohoCreateCustomer(orgId,{contact_name:custName, trn:item.supplierTrn||undefined, country_code:'AE', currency_code:item.currency||'AED'});
+          custId=created.id;
+          customerIds[created.name||custName]=custId;
+          setClientData(activeClientId,'customerIds',customerIds);
+          setCustomers(prev=>prev.includes(custName)?prev:[...prev,custName]);
+        }
+        const vat=Number(item.vatPercent||0);
+        const taxMatch=(zohoTaxes||[]).find(t=>Number(t.percentage)===vat);
+        const lines=(item.lineItems&&item.lineItems.length>0?item.lineItems:[{description:'Sales — '+(item.invoiceNumber||item.fileName),quantity:1,rate:item.subtotal||item.total}])
+          .map(l=>{
+            const li={name:(l.description||'Item').slice(0,100),description:l.description||'',rate:Number(l.rate||0),quantity:Number(l.quantity||1)};
+            if(defaultSalesAccount?.id) li.account_id=defaultSalesAccount.id;
+            if(taxMatch) li.tax_id=taxMatch.id; else if(vat>0) li.tax_percentage=vat;
+            return li;
+          });
+        const body={
+          customer_id:custId,
+          date:item.date,
+          due_date:item.dueDate||item.date,
+          invoice_number:item.invoiceNumber,
+          tax_treatment: item.supplierTrn?'vat_registered':'vat_not_registered',
+          place_of_supply:'AE',
+          line_items:lines,
+          notes:'Imported via AutoLedger OCR — source file: '+item.fileName
+        };
+        if(item.fx&&item.fx.rate) body.exchange_rate=item.fx.rate;
+        const res=await window.zohoCreateInvoice(orgId,body);
+        queue=queue.map(q=>q.id===item.id?{...q,status:'Pushed To Zoho',zohoInvoiceId:res.id,zohoInvoiceNumber:res.invoice_number||item.invoiceNumber,pushedAt:Date.now()}:q);
+      }catch(e){
+        queue=queue.map(q=>q.id===item.id?{...q,status:'Error',validations:[...(q.validations||[]).filter(v=>v.key!=='push'),{key:'push',label:'Zoho push',status:'fail',message:e.message||String(e)}]}:q);
+      }
+      setOcrQueue([...queue]);
+    }
+    persistOcrQueue(queue);
+    setOcrSelected(new Set());
+    setOcrPushing(false);
+  },[ocrPushing,ocrQueue,clients,activeClientId,zohoTaxes,loadZohoTaxes,findCustomerMatch,defaultSalesAccount,persistOcrQueue]);
+
+  // Mark a pushed invoice as Sent (dispatch tracking).
+  const markOcrSent = useCallback((id)=>{
+    const note=prompt("Mark as sent — optional note (e.g. emailed to client on …):","");
+    if(note===null) return;
+    setOcrQueue(prev=>{ const next=prev.map(q=>q.id===id?{...q,status:'Sent',sentAt:Date.now(),sentBy:(window.AUTH_USER&&window.AUTH_USER.name)||'',sentNote:note}:q); persistOcrQueue(next); return next; });
+  },[persistOcrQueue]);
+
 
   const confirmSelected=useCallback(()=>{
     if(selectedIds.size===0){alert("Select transactions using checkboxes first.");return;}
@@ -4552,6 +4963,7 @@ td,th{padding:8px 12px;vertical-align:middle}
           const isAdmin=["admin","team-lead"].includes(role);
           const TABS = [
             {key:"projects", label:"Projects", icon:"📁", count: projects.length},
+            {key:"revenue", label:"Revenue", icon:"💰", count: ocrQueue.length||null},
             {key:"masterData", label:"Master Data", icon:"📚"},
             {key:"settings", label:"Settings", icon:"⚙"},
             {key:"activity", label:"Activity", icon:"📊"},
@@ -4602,6 +5014,254 @@ td,th{padding:8px 12px;vertical-align:middle}
                 </table>
               </div>
             )}
+            {/* ═══════════ REVENUE TAB — Invoices / Invoice OCR / Payments ═══════════ */}
+            {clientDetailTab==="revenue" && (()=>{
+              const statusBadge=(s)=>{
+                const cfg={
+                  'Processing':{c:'#4D3FA0',b:'rgba(105,88,194,0.1)'},
+                  'Draft':{c:'#777777',b:'rgba(0,0,0,0.05)'},
+                  'Validated':{c:'#d97706',b:'rgba(217,119,6,0.1)'},
+                  'Error':{c:'#dc2626',b:'rgba(220,38,38,0.1)'},
+                  'Ready To Push':{c:'#16a34a',b:'rgba(22,163,74,0.1)'},
+                  'Pushed To Zoho':{c:'#0891b2',b:'rgba(8,145,178,0.1)'},
+                  'Sent':{c:'#4D3FA0',b:'rgba(105,88,194,0.1)'},
+                  'Partially Paid':{c:'#d97706',b:'rgba(217,119,6,0.1)'},
+                  'Paid':{c:'#16a34a',b:'rgba(22,163,74,0.12)'}
+                }[s]||{c:'#777777',b:'rgba(0,0,0,0.05)'};
+                return <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:cfg.b,color:cfg.c,fontWeight:600,whiteSpace:"nowrap"}}>{s}</span>;
+              };
+              const vBadge=(st)=> st==='pass'?<span style={{color:"#16a34a",fontWeight:700}}>PASS</span>
+                : st==='warn'?<span style={{color:"#d97706",fontWeight:700}}>WARNING</span>
+                : st==='fail'?<span style={{color:"#dc2626",fontWeight:700}}>FAIL</span>
+                : <span style={{color:"#999999"}}>—</span>;
+              const drafts=ocrQueue;
+              const pushed=drafts.filter(q=>['Pushed To Zoho','Sent','Partially Paid','Paid'].includes(q.status));
+              const reviewItem=drafts.find(q=>q.id===ocrReviewId);
+              const SUBT=[
+                {key:'invoices',label:'Revenue Invoices',icon:'🧾',count:pushed.length},
+                {key:'ocr',label:'Invoice OCR',icon:'🤖',count:drafts.filter(q=>!pushed.includes(q)).length},
+                {key:'payments',label:'Payments Received',icon:'💳'}
+              ];
+              return <div>
+                <datalist id="rev-ocr-customer-list">{(customers||[]).map(cn=><option key={cn} value={cn} />)}</datalist>
+                <div style={{display:"flex",gap:0,marginBottom:16,borderBottom:"1px solid #f0f0f4"}}>
+                  {SUBT.map(t=>(
+                    <div key={t.key} onClick={()=>setRevenueSub(t.key)} style={{padding:"8px 16px",fontSize:12,fontWeight:600,cursor:"pointer",borderBottom:"2px solid "+(revenueSub===t.key?"#16a34a":"transparent"),color:revenueSub===t.key?"#16a34a":"#777777",display:"flex",alignItems:"center",gap:6}}>
+                      <span>{t.icon}</span>{t.label}{t.count!=null?" ("+t.count+")":""}
+                    </div>
+                  ))}
+                </div>
+
+                {/* ── Sub-tab: Invoice OCR ── */}
+                {revenueSub==='ocr' && <div>
+                  {/* Upload zone */}
+                  <div onDragOver={(e)=>{e.preventDefault();e.currentTarget.style.borderColor="#16a34a";}}
+                    onDragLeave={(e)=>{e.currentTarget.style.borderColor="#c7e8cf";}}
+                    onDrop={(e)=>{e.preventDefault();e.currentTarget.style.borderColor="#c7e8cf";processOcrFiles(e.dataTransfer.files);}}
+                    onClick={()=>{const i=document.getElementById('rev-ocr-input');if(i)i.click();}}
+                    style={{border:"2px dashed "+(ocrProcessing?"#16a34a":"#c7e8cf"),borderRadius:12,padding:"22px 24px",background:"rgba(22,163,74,0.03)",cursor:"pointer",marginBottom:16,textAlign:"center"}}>
+                    <input id="rev-ocr-input" type="file" multiple accept="image/*,application/pdf,.zip" style={{display:"none"}} onChange={(e)=>{processOcrFiles(e.target.files);e.target.value='';}} />
+                    <div style={{fontSize:30,marginBottom:6}}>{ocrProcessing?"⏳":"📤"}</div>
+                    {ocrProcessing
+                      ? <div style={{fontSize:13,fontWeight:600,color:"#16a34a"}}>Processing {ocrProgress.done} / {ocrProgress.total}… each invoice is independent — failures won't stop the batch.</div>
+                      : <>
+                        <div style={{fontSize:14,fontWeight:700,color:"#16a34a"}}>Upload revenue invoices</div>
+                        <div style={{fontSize:11,color:"#777777",marginTop:4}}>Single or bulk · PDF (multi-page OK), JPG, PNG, or a ZIP of invoices · 10 MB per file</div>
+                        <div style={{fontSize:10,color:"#999999",marginTop:4}}>Each file goes through: classification → OCR → 16-layer UAE validation → draft. Nothing reaches Zoho until you approve it.</div>
+                      </>}
+                  </div>
+
+                  {/* Queue actions */}
+                  {drafts.length>0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap"}}>
+                    <div style={{fontSize:11,color:"#888888"}}>{drafts.length} in queue · {drafts.filter(q=>q.status==='Ready To Push').length} ready · {drafts.filter(q=>q.status==='Error').length} blocked</div>
+                    <div style={{display:"flex",gap:8}}>
+                      <button onClick={()=>pushOcrItems(Array.from(ocrSelected))} disabled={ocrPushing||ocrSelected.size===0} style={{background:(ocrPushing||ocrSelected.size===0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",fontSize:11,fontWeight:700,cursor:(ocrPushing||ocrSelected.size===0)?"default":"pointer"}}>{ocrPushing?"Pushing…":"⚡ Push selected ("+ocrSelected.size+")"}</button>
+                      <button onClick={()=>deleteOcrItems(Array.from(ocrSelected))} disabled={ocrPushing||ocrSelected.size===0} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:(ocrPushing||ocrSelected.size===0)?"default":"pointer"}}>Remove</button>
+                    </div>
+                  </div>}
+
+                  {/* Queue table */}
+                  {drafts.length===0 ? <div style={{padding:"30px",textAlign:"center",color:"#999999",fontSize:12,border:"1px dashed #e2e2ea",borderRadius:10}}>No invoices in the OCR queue yet.</div>
+                  : <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}><div style={{overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                      <thead><tr style={{background:"#f8f9fc"}}>
+                        <th style={{padding:"8px",width:32,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}>
+                          <input type="checkbox" checked={drafts.length>0&&ocrSelected.size===drafts.length} onChange={()=>setOcrSelected(prev=>prev.size===drafts.length?new Set():new Set(drafts.map(q=>q.id)))} style={{cursor:"pointer",accentColor:"#16a34a"}} />
+                        </th>
+                        {["File","Customer","Invoice #","Date","Total","Cur","Validation","Status",""].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap"}}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>{drafts.map(q=>{
+                        const fails=(q.validations||[]).filter(v=>v.status==='fail').length;
+                        const warns=(q.validations||[]).filter(v=>v.status==='warn').length;
+                        return <tr key={q.id} style={{borderBottom:"1px solid #f8f9fc",background:ocrSelected.has(q.id)?"rgba(22,163,74,0.04)":"transparent"}}>
+                          <td style={{padding:"7px",textAlign:"center"}}><input type="checkbox" checked={ocrSelected.has(q.id)} onChange={()=>setOcrSelected(prev=>{const n=new Set(prev);if(n.has(q.id))n.delete(q.id);else n.add(q.id);return n;})} style={{cursor:"pointer",accentColor:"#16a34a"}} /></td>
+                          <td style={{padding:"7px 10px",maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#777777"}} title={q.fileName}>{q.fileName}</td>
+                          <td style={{padding:"7px 10px",fontWeight:600,color:"#1a1a2e",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{q.customerName||"—"}</td>
+                          <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace"}}>{q.invoiceNumber||"—"}</td>
+                          <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",whiteSpace:"nowrap"}}>{q.date||"—"}</td>
+                          <td style={{padding:"7px 10px",fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}}>{fmt(q.total||0)}</td>
+                          <td style={{padding:"7px 10px"}}>{q.currency||"AED"}</td>
+                          <td style={{padding:"7px 10px",whiteSpace:"nowrap"}}>
+                            {fails>0&&<span style={{color:"#dc2626",fontWeight:700,marginRight:6}}>{fails} fail</span>}
+                            {warns>0&&<span style={{color:"#d97706",fontWeight:600,marginRight:6}}>{warns} warn</span>}
+                            {fails===0&&warns===0&&(q.validations||[]).length>0&&<span style={{color:"#16a34a",fontWeight:600}}>all pass</span>}
+                          </td>
+                          <td style={{padding:"7px 10px"}}>{statusBadge(q.status)}</td>
+                          <td style={{padding:"7px 10px",whiteSpace:"nowrap"}}>
+                            <button onClick={()=>setOcrReviewId(q.id)} style={{background:"rgba(105,88,194,0.08)",border:"1px solid rgba(105,88,194,0.25)",borderRadius:5,padding:"3px 10px",color:"#4D3FA0",fontSize:10,fontWeight:600,cursor:"pointer"}}>Review</button>
+                          </td>
+                        </tr>;
+                      })}</tbody>
+                    </table>
+                  </div></div>}
+                </div>}
+
+                {/* ── Sub-tab: Revenue Invoices (pushed) ── */}
+                {revenueSub==='invoices' && <div>
+                  {pushed.length===0 ? <div style={{padding:"30px",textAlign:"center",color:"#999999",fontSize:12,border:"1px dashed #e2e2ea",borderRadius:10}}>No invoices pushed to Zoho yet. Process uploads in the Invoice OCR sub-tab first.</div>
+                  : <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}><div style={{overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                      <thead><tr style={{background:"#f8f9fc"}}>
+                        {["Invoice #","Customer","Date","Total","Cur","Zoho ID","Pushed","Status","Dispatch"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap"}}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>{pushed.map(q=>(
+                        <tr key={q.id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                          <td style={{padding:"8px 10px",fontWeight:600,fontFamily:"'IBM Plex Mono',monospace"}}>{q.zohoInvoiceNumber||q.invoiceNumber}</td>
+                          <td style={{padding:"8px 10px"}}>{q.customerName}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace"}}>{q.date}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}}>{fmt(q.total||0)}</td>
+                          <td style={{padding:"8px 10px"}}>{q.currency}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:"#777777"}}>{q.zohoInvoiceId}</td>
+                          <td style={{padding:"8px 10px",fontSize:10,color:"#777777",whiteSpace:"nowrap"}}>{q.pushedAt?new Date(q.pushedAt).toLocaleDateString():"—"}</td>
+                          <td style={{padding:"8px 10px"}}>{statusBadge(q.status)}</td>
+                          <td style={{padding:"8px 10px"}}>
+                            {q.status==='Pushed To Zoho'
+                              ? <button onClick={()=>markOcrSent(q.id)} style={{background:"rgba(105,88,194,0.08)",border:"1px solid rgba(105,88,194,0.25)",borderRadius:5,padding:"3px 10px",color:"#4D3FA0",fontSize:10,fontWeight:600,cursor:"pointer"}}>Mark Sent</button>
+                              : q.sentAt ? <span style={{fontSize:10,color:"#777777"}} title={q.sentNote||""}>Sent {new Date(q.sentAt).toLocaleDateString()}{q.sentBy?(" · "+q.sentBy):""}</span> : "—"}
+                          </td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div></div>}
+                </div>}
+
+                {/* ── Sub-tab: Payments Received ── */}
+                {revenueSub==='payments' && <div>
+                  <div style={{padding:14,background:"rgba(8,145,178,0.04)",border:"1px solid rgba(8,145,178,0.2)",borderRadius:10,marginBottom:14,fontSize:12,color:"#555555",lineHeight:1.7}}>
+                    <strong style={{color:"#0891b2"}}>Payments Received allocates receipts against open invoices — it never creates invoices.</strong><br/>
+                    Workflow: process the bank statement (<span style={{color:"#16a34a",cursor:"pointer",fontWeight:600}} onClick={startNewStatement}>+ New Bank Statement</span>) → on the Review tab's Credit side, pick the customer → the picker below each row matches the receipt to one of these open invoices (or records it as an advance). Pushing creates the Payment Received entry in Zoho.
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>Open invoices in Zoho</h3>
+                    <button onClick={()=>loadOpenInvoices(true)} disabled={openInvoicesLoading} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:openInvoicesLoading?"default":"pointer"}}>{openInvoicesLoading?"Loading…":"↻ Refresh from Zoho"}</button>
+                  </div>
+                  {openInvoicesError&&<div style={{padding:"10px 14px",color:"#dc2626",fontSize:12,background:"rgba(220,38,38,0.05)",borderRadius:8,marginBottom:10}}>{openInvoicesError}</div>}
+                  {openInvoices.length===0&&!openInvoicesLoading ? <div style={{padding:"26px",textAlign:"center",color:"#999999",fontSize:12,border:"1px dashed #e2e2ea",borderRadius:10}}>No open invoices loaded. Click "Refresh from Zoho".</div>
+                  : <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}><div style={{overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                      <thead><tr style={{background:"#f8f9fc"}}>
+                        {["Invoice #","Customer","Date","Due","Total","Balance","Status"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap"}}>{h}</th>)}
+                      </tr></thead>
+                      <tbody>{openInvoices.map(inv=>(
+                        <tr key={inv.invoice_id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                          <td style={{padding:"8px 10px",fontWeight:600,fontFamily:"'IBM Plex Mono',monospace"}}>{inv.invoice_number}</td>
+                          <td style={{padding:"8px 10px"}}>{inv.customer_name}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace"}}>{inv.date}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace"}}>{inv.due_date||"—"}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}}>{fmt(inv.total)}</td>
+                          <td style={{padding:"8px 10px",fontFamily:"'IBM Plex Mono',monospace",textAlign:"right",color:"#16a34a",fontWeight:600}}>{fmt(inv.balance)}</td>
+                          <td style={{padding:"8px 10px"}}>{statusBadge(inv.status==='partially_paid'?'Partially Paid':inv.status==='paid'?'Paid':'Sent')}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div></div>}
+                </div>}
+
+                {/* ── OCR Review modal ── */}
+                {reviewItem && (()=>{
+                  const q=reviewItem;
+                  const setQ=(patch)=>updateOcrItem(q.id,patch);
+                  const fails=(q.validations||[]).filter(v=>v.status==='fail').length;
+                  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+                    <div style={{background:"#ffffff",borderRadius:12,maxWidth:900,width:"100%",maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+                      <div style={{padding:"16px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(22,163,74,0.04)"}}>
+                        <div>
+                          <h3 style={{fontSize:15,fontWeight:700,color:"#1a1a2e"}}>Review draft — {q.fileName}</h3>
+                          <div style={{fontSize:11,color:"#888888",marginTop:2,display:"flex",gap:8,alignItems:"center"}}>{statusBadge(q.status)} <span>{(q.docType||'').replace(/_/g,' ')}</span></div>
+                        </div>
+                        <button onClick={()=>setOcrReviewId("")} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
+                      </div>
+                      <div style={{padding:"16px 22px",overflowY:"auto",flex:1,display:"grid",gridTemplateColumns:"1.2fr 1fr",gap:18}}>
+                        {/* Left: extracted fields (editable) */}
+                        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                          <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em"}}>OCR extraction (edit to correct)</div>
+                          {[
+                            {k:'customerName',l:'Customer (supplier on invoice)',list:true},
+                            {k:'invoiceNumber',l:'Invoice number',mono:true},
+                            {k:'date',l:'Invoice date',type:'date'},
+                            {k:'dueDate',l:'Due date',type:'date'},
+                            {k:'receiverName',l:'Bill To / receiver (should be this project)'},
+                            {k:'receiverTrn',l:'Receiver TRN (validated against project TRN)',mono:true},
+                            {k:'supplierTrn',l:'Supplier TRN (customer’s TRN)',mono:true},
+                          ].map(fdef=>(
+                            <div key={fdef.k}>
+                              <label style={{fontSize:10,color:"#888888"}}>{fdef.l}{q.confidences&&q.confidences[fdef.k==='customerName'?'vendor':fdef.k==='receiverName'?'receiver':fdef.k==='invoiceNumber'?'invoice_number':fdef.k==='date'?'date':'']!=null?(" · conf "+Math.round(q.confidences[fdef.k==='customerName'?'vendor':fdef.k==='receiverName'?'receiver':fdef.k==='invoiceNumber'?'invoice_number':'date']||0)+"%"):""}</label>
+                              <input type={fdef.type||'text'} value={q[fdef.k]||''} onChange={(e)=>setQ({[fdef.k]:e.target.value})} list={fdef.list?'rev-ocr-customer-list':undefined} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:fdef.mono?"'IBM Plex Mono',monospace":"inherit"}} />
+                            </div>
+                          ))}
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 80px",gap:8}}>
+                            <div><label style={{fontSize:10,color:"#888888"}}>Taxable (subtotal)</label><input type="number" step="0.01" value={q.subtotal||0} onChange={(e)=>setQ({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                            <div><label style={{fontSize:10,color:"#888888"}}>VAT amount</label><input type="number" step="0.01" value={q.tax||0} onChange={(e)=>setQ({tax:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                            <div><label style={{fontSize:10,color:"#888888"}}>Total</label><input type="number" step="0.01" value={q.total||0} onChange={(e)=>setQ({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                            <div><label style={{fontSize:10,color:"#888888"}}>Currency</label><select value={q.currency||'AED'} onChange={(e)=>setQ({currency:e.target.value})} style={{width:"100%",padding:"7px 6px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select></div>
+                          </div>
+                          {q.fx&&<div style={{padding:"8px 10px",background:q.fx.rate?"rgba(22,163,74,0.05)":"rgba(220,38,38,0.05)",border:"1px solid "+(q.fx.rate?"rgba(22,163,74,0.2)":"rgba(220,38,38,0.2)"),borderRadius:6,fontSize:11}}>
+                            {q.fx.rate
+                              ? <span>FX: 1 {q.currency} = <strong>{q.fx.rate}</strong> {getClientData(activeClientId,'currency','AED')} · {q.fx.source}{q.fx.dateUsed?(" · "+q.fx.dateUsed):""}</span>
+                              : <span style={{color:"#dc2626"}}>{q.fx.error} </span>}
+                            <span onClick={()=>{const r=prompt("Manual exchange rate (1 "+q.currency+" = ? "+getClientData(activeClientId,'currency','AED')+"):",q.fx.rate||"");if(r&&Number(r)>0)setQ({fx:{rate:Number(r),source:'manual override',dateUsed:new Date().toISOString().slice(0,10)}});}} style={{color:"#4D3FA0",cursor:"pointer",fontWeight:600,marginLeft:6}}>✎ Override</span>
+                          </div>}
+                          {(q.lineItems||[]).length>0&&<div>
+                            <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Line items ({q.lineItems.length})</div>
+                            <div style={{border:"1px solid #f0f0f4",borderRadius:6,maxHeight:140,overflowY:"auto"}}>
+                              {(q.lineItems||[]).map((l,i)=>(
+                                <div key={i} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"5px 10px",borderBottom:"1px solid #f8f9fc",fontSize:11}}>
+                                  <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.description}</span>
+                                  <span style={{fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>{l.quantity}× {fmt(l.rate||0)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>}
+                        </div>
+                        {/* Right: validation summary */}
+                        <div>
+                          <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:8}}>Validation summary</div>
+                          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                            {(q.validations||[]).map(v=>(
+                              <div key={v.key} style={{padding:"8px 10px",borderRadius:6,background:v.status==='fail'?"rgba(220,38,38,0.05)":v.status==='warn'?"rgba(217,119,6,0.05)":"#f8f9fc",border:"1px solid "+(v.status==='fail'?"rgba(220,38,38,0.2)":v.status==='warn'?"rgba(217,119,6,0.2)":"#f0f0f4")}}>
+                                <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:2}}>
+                                  <span style={{fontWeight:600,color:"#1a1a2e"}}>{v.label}</span>{vBadge(v.status)}
+                                </div>
+                                <div style={{fontSize:10,color:"#666666",lineHeight:1.5}}>{v.message}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{padding:"12px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                        <div style={{fontSize:10,color:fails>0?"#dc2626":"#16a34a",fontWeight:600}}>{fails>0?fails+" failed validation(s) block pushing — edits above re-validate live.":"All validations clear — ready to push."}</div>
+                        <div style={{display:"flex",gap:8}}>
+                          <button onClick={()=>deleteOcrItems([q.id])} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>Delete draft</button>
+                          <button onClick={()=>setOcrReviewId("")} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:7,padding:"7px 14px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>Close</button>
+                          {q.status!=='Pushed To Zoho'&&<button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing||fails>0} style={{background:(ocrPushing||fails>0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:(ocrPushing||fails>0)?"default":"pointer"}}>{ocrPushing?"Pushing…":"⚡ Push to Zoho"}</button>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>;
+                })()}
+              </div>;
+            })()}
+
             {clientDetailTab==="masterData" && <>
             {/* Learn-from-Zoho banner */}
             {c.zohoOrgId && <div style={{background:"linear-gradient(135deg,rgba(105,88,194,0.06),rgba(8,145,178,0.06))",border:"1px solid rgba(105,88,194,0.25)",borderRadius:12,padding:"16px 20px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -4636,6 +5296,30 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
             </>}
             {clientDetailTab==="settings" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:20,display:"flex",flexDirection:"column",gap:14}}>
+              {/* Editable entity profile — feeds the OCR validation engine */}
+              <div style={{padding:14,background:"rgba(105,88,194,0.04)",border:"1px solid rgba(105,88,194,0.15)",borderRadius:8}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:10}}>Entity profile (used by Invoice OCR validation)</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                  <div>
+                    <label style={{fontSize:10,color:"#888888"}}>Legal name (as on invoices)</label>
+                    <input type="text" defaultValue={getClientData(c.id,"legal_name","")} onBlur={(e)=>setClientData(c.id,"legal_name",e.target.value.trim())} placeholder={c.name} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,color:"#888888"}}>Trade name (optional)</label>
+                    <input type="text" defaultValue={getClientData(c.id,"trade_name","")} onBlur={(e)=>setClientData(c.id,"trade_name",e.target.value.trim())} placeholder="e.g. shorter brand name" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,color:"#888888"}}>VAT TRN (15 digits — mandatory check on every OCR'd invoice)</label>
+                    <input type="text" defaultValue={getClientData(c.id,"trn","")} onBlur={(e)=>{ const v=e.target.value.replace(/\D/g,''); if(v && v.length!==15){ alert("A UAE TRN has exactly 15 digits."); } setClientData(c.id,"trn",v); }} placeholder="100123456700003" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
+                  </div>
+                  <div>
+                    <label style={{fontSize:10,color:"#888888"}}>Base currency</label>
+                    <select defaultValue={getClientData(c.id,"currency","AED")} onChange={(e)=>setClientData(c.id,"currency",e.target.value)} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}}>
+                      {["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc} value={cc}>{cc}</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Zoho organization</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.zohoOrgId||<span style={{color:"#999999"}}>Not linked</span>}</div></div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Bank ledger</div><div style={{fontSize:13,color:"#1a1a2e"}}>{getClientData(c.id,"bank","Not set")}</div></div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Created by</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.ownerName||c.ownerEmail||"—"}</div></div>
