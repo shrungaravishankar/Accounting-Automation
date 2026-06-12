@@ -1796,17 +1796,19 @@ function saveRefDB(db) {
   try { localStorage.setItem("autoledger_refdb", JSON.stringify(db)); } catch(e) {}
 }
 
-// Canonical UAE emirate codes used by Zoho UAE editions for the
-// place_of_supply field. Exposed here so the review-modal dropdown and
-// the push body stay in lock-step.
+// Canonical UAE emirate names that Zoho UAE editions accept verbatim
+// for the place_of_supply field on invoices. Strings here MUST match
+// Zoho's own dropdown — sending an ISO code (AE-DU etc.) returns
+// "Invalid value passed for place_of_supply [zoho code 2]". Casing of
+// "al-" in Ras al-Khaimah / Umm al-Quwain mirrors Zoho exactly.
 const AL_UAE_EMIRATES = [
-  { code: 'AE-AZ', label: 'Abu Dhabi' },
-  { code: 'AE-DU', label: 'Dubai' },
-  { code: 'AE-SH', label: 'Sharjah' },
-  { code: 'AE-AJ', label: 'Ajman' },
-  { code: 'AE-UQ', label: 'Umm Al Quwain' },
-  { code: 'AE-RK', label: 'Ras Al Khaimah' },
-  { code: 'AE-FU', label: 'Fujairah' }
+  { code: 'Abu Dhabi',      label: 'Abu Dhabi' },
+  { code: 'Dubai',          label: 'Dubai' },
+  { code: 'Sharjah',        label: 'Sharjah' },
+  { code: 'Ajman',          label: 'Ajman' },
+  { code: 'Umm al-Quwain',  label: 'Umm al-Quwain' },
+  { code: 'Ras al-Khaimah', label: 'Ras al-Khaimah' },
+  { code: 'Fujairah',       label: 'Fujairah' }
 ];
 
 // Map a customer address blob to a UAE Emirate code that Zoho's UAE
@@ -1818,13 +1820,13 @@ const AL_UAE_EMIRATES = [
 function alDetectEmirate(addr){
   const a = (addr||'').toLowerCase();
   if (!a) return null;
-  if (/\babu\s*dhabi\b|adgm|saadiyat|yas\s*island|khalifa\s*city|musaffah|reem\s*island|al\s*ain\b/.test(a)) return 'AE-AZ';
-  if (/\bdubai\b|jumeirah|\bjbr\b|\bjlt\b|business\s*bay|downtown\s*dubai|deira|bur\s*dubai|al\s*barsha|tecom|dafza|jafza|dubai\s*marina|jvc|jumeirah\s*village|al\s*quoz/.test(a)) return 'AE-DU';
-  if (/\bsharjah\b|hamriyah|saif\s*zone/.test(a)) return 'AE-SH';
-  if (/\bajman\b/.test(a)) return 'AE-AJ';
-  if (/\bfujairah\b/.test(a)) return 'AE-FU';
-  if (/ras\s*al\s*khaimah|\brak\b/.test(a)) return 'AE-RK';
-  if (/umm\s*al\s*quwain|\buaq\b/.test(a)) return 'AE-UQ';
+  if (/\babu\s*dhabi\b|adgm|saadiyat|yas\s*island|khalifa\s*city|musaffah|reem\s*island|al\s*ain\b/.test(a)) return 'Abu Dhabi';
+  if (/\bdubai\b|jumeirah|\bjbr\b|\bjlt\b|business\s*bay|downtown\s*dubai|deira|bur\s*dubai|al\s*barsha|tecom|dafza|jafza|dubai\s*marina|jvc|jumeirah\s*village|al\s*quoz/.test(a)) return 'Dubai';
+  if (/\bsharjah\b|hamriyah|saif\s*zone/.test(a)) return 'Sharjah';
+  if (/\bajman\b/.test(a)) return 'Ajman';
+  if (/\bfujairah\b/.test(a)) return 'Fujairah';
+  if (/ras\s*al\s*khaimah|\brak\b/.test(a)) return 'Ras al-Khaimah';
+  if (/umm\s*al\s*quwain|\buaq\b/.test(a)) return 'Umm al-Quwain';
   return null;
 }
 
@@ -1897,12 +1899,17 @@ function alValidateOcrInvoice(item, ctx){
   const push=(key,label,status,message)=>out.push({key,label,status,message});
 
   // 1 · Document classification
+  const dt=(item.docType||'unknown').replace(/_/g,' ');
   if(item.isCreditNote){
-    push('classification','Document type','fail','This is a Credit Note — it cannot be processed as a revenue invoice. Route it to the credit-note workflow.');
+    push('classification','Document type','fail','This document is a Credit Note, not a revenue invoice. Credit notes cannot be pushed through the Revenue OCR path — route it to the credit-note workflow instead.');
   } else if(item.isInvoice===false){
-    push('classification','Document type','fail','This document is not a valid revenue invoice ('+(item.docType||'unknown').replace(/_/g,' ')+').');
+    let msg='This document is not a tax/commercial invoice — detected document type: "'+dt+'".';
+    if(/quotation/i.test(dt))       msg='This is a Quotation, not an invoice. Quotations are not pushed to Zoho — upload the final tax invoice once it is raised.';
+    else if(/proforma/i.test(dt))   msg='This is a Pro-forma Invoice, not a tax invoice. Pro-formas are not posted as revenue — upload the final tax invoice instead.';
+    else if(dt==='unknown')         msg='Document could not be classified as a tax invoice. No invoice number / total / "Tax Invoice" wording was detected. If this is an expense bill, upload it under Expenses (bank workflow), not Revenue.';
+    push('classification','Document type','fail',msg);
   } else {
-    push('classification','Document type','pass','Detected: '+(item.docType||'invoice').replace(/_/g,' ')+'.');
+    push('classification','Document type','pass','Detected: '+dt+'.');
   }
 
   // 2 · Project ownership — supplier (issuer) name must match the project
@@ -1913,8 +1920,25 @@ function alValidateOcrInvoice(item, ctx){
     push('ownership','Project match','warn','No supplier name detected on the invoice.');
   } else {
     const best=Math.max(...projNames.map(n=>alNameSimilarity(n,item.supplierName)));
-    if(best>=0.85) push('ownership','Project match','pass','Supplier "'+item.supplierName+'" matches the project ('+Math.round(best*100)+'%).');
-    else push('ownership','Project match','fail','This invoice does not appear to belong to the selected project. Supplier on invoice: "'+item.supplierName+'" — best match '+Math.round(best*100)+'%.');
+    if(best>=0.85){
+      push('ownership','Project match','pass','Supplier "'+item.supplierName+'" matches the project ('+Math.round(best*100)+'%).');
+    } else {
+      // Reversed-direction check: if the CUSTOMER on the document matches
+      // the project, the user has uploaded an expense bill (where this
+      // project is the buyer) into the Revenue path. Call that out
+      // explicitly instead of a generic "no match" message.
+      const recvMatch = item.customerName ? Math.max(...projNames.map(n=>alNameSimilarity(n,item.customerName))) : 0;
+      if(recvMatch>=0.85){
+        push('ownership','Project match','fail',
+          'This looks like an expense/purchase bill, not a revenue invoice — "'+projNames[0]+'" appears as the BILL-TO party, not the issuer. '+
+          'Supplier on the document is "'+item.supplierName+'". '+
+          'Upload supplier bills through the bank-statement Expense workflow; the Revenue OCR path is only for invoices YOUR company has issued.');
+      } else {
+        push('ownership','Project match','fail',
+          'This invoice does not appear to belong to "'+projNames[0]+'". The issuer (supplier) on the document is "'+item.supplierName+'" — best name-match score '+Math.round(best*100)+'% (need ≥85%). '+
+          'Either you have selected the wrong project, or the OCR misread the supplier name — edit it above to correct.');
+      }
+    }
   }
 
   // 3 · Project TRN — must match the SUPPLIER TRN (the project is the issuer)
@@ -3590,7 +3614,7 @@ function App(){
         const placeOfSupply = item.placeOfSupply
           || (alResolvePlaceOfSupply({customerAddress:item.customerAddress,customerTrn:item.customerTrn,supplierEmirate})||{}).code
           || supplierEmirate
-          || 'AE-DU';
+          || 'Dubai';
         const body={
           customer_id:custId,
           date:item.date,
