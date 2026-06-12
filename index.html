@@ -1830,6 +1830,60 @@ function alDetectEmirate(addr){
   return null;
 }
 
+// Detect ISO-2 country code from a free-text billing address. Used when
+// creating Zoho contacts so the "Country/Region" mandatory field is
+// populated correctly — defaulting to AE silently is wrong for export
+// customers (e.g. ATCOM-style USD invoices to overseas buyers).
+const AL_COUNTRIES = [
+  { code: 'AE', label: 'United Arab Emirates' },
+  { code: 'SA', label: 'Saudi Arabia' },
+  { code: 'OM', label: 'Oman' },
+  { code: 'BH', label: 'Bahrain' },
+  { code: 'QA', label: 'Qatar' },
+  { code: 'KW', label: 'Kuwait' },
+  { code: 'IN', label: 'India' },
+  { code: 'PK', label: 'Pakistan' },
+  { code: 'EG', label: 'Egypt' },
+  { code: 'JO', label: 'Jordan' },
+  { code: 'LB', label: 'Lebanon' },
+  { code: 'GB', label: 'United Kingdom' },
+  { code: 'US', label: 'United States' },
+  { code: 'SG', label: 'Singapore' },
+  { code: 'CN', label: 'China' },
+  { code: 'TR', label: 'Türkiye' },
+  { code: 'DE', label: 'Germany' },
+  { code: 'FR', label: 'France' },
+  { code: 'CH', label: 'Switzerland' },
+  { code: 'AU', label: 'Australia' },
+  { code: 'CA', label: 'Canada' },
+];
+function alDetectCountry(addr){
+  const a = (addr||'').toLowerCase();
+  if (!a) return null;
+  if (/\buae\b|u\.?\s*a\.?\s*e\b|united\s*arab\s*emirates|emirates|\bdubai\b|\babu\s*dhabi\b|\bsharjah\b|\bajman\b|\bfujairah\b|ras\s*al\s*khaimah|umm\s*al\s*quwain/.test(a)) return 'AE';
+  if (/\bksa\b|saudi|riyadh|jeddah|dammam|mecca|medina/.test(a)) return 'SA';
+  if (/\boman\b|muscat|salalah/.test(a)) return 'OM';
+  if (/\bbahrain\b|manama/.test(a)) return 'BH';
+  if (/\bqatar\b|\bdoha\b/.test(a)) return 'QA';
+  if (/\bkuwait\b/.test(a)) return 'KW';
+  if (/\bindia\b|mumbai|delhi|bangalore|bengaluru|chennai|kolkata|hyderabad|pune/.test(a)) return 'IN';
+  if (/\bpakistan\b|karachi|lahore|islamabad/.test(a)) return 'PK';
+  if (/\begypt\b|cairo|alexandria/.test(a)) return 'EG';
+  if (/\bjordan\b|amman/.test(a)) return 'JO';
+  if (/\blebanon\b|beirut/.test(a)) return 'LB';
+  if (/\buk\b|u\.?\s*k\b|united\s*kingdom|england|britain|london|manchester/.test(a)) return 'GB';
+  if (/\busa\b|u\.?\s*s\.?\s*a\b|united\s*states|new\s*york|california|texas/.test(a)) return 'US';
+  if (/singapore/.test(a)) return 'SG';
+  if (/\bchina\b|shanghai|beijing|shenzhen/.test(a)) return 'CN';
+  if (/türkiye|turkey|istanbul|ankara/.test(a)) return 'TR';
+  if (/germany|deutschland|berlin|munich|frankfurt/.test(a)) return 'DE';
+  if (/\bfrance\b|paris/.test(a)) return 'FR';
+  if (/switzerland|zurich|geneva|bern/.test(a)) return 'CH';
+  if (/australia|sydney|melbourne/.test(a)) return 'AU';
+  if (/\bcanada\b|toronto|vancouver|montreal/.test(a)) return 'CA';
+  return null;
+}
+
 // Determine the place of supply for a UAE revenue invoice per UAE VAT
 // Decree-Law No. 8 / Executive Reg. Article 27 — summarised:
 //   • B2B, customer VAT-registered in UAE → customer's emirate of
@@ -3395,7 +3449,13 @@ function App(){
       });
       if (r) { placeOfSupply = r.code; placeOfSupplyReason = r.reason; }
     }
-    return {...item, validations, status, placeOfSupply, placeOfSupplyReason};
+    // Same auto-refresh for the customer country.
+    let customerCountry = item.customerCountry;
+    if (item.customerCountryAuto !== false) {
+      const cc = alDetectCountry(item.customerAddress);
+      if (cc) customerCountry = cc;
+    }
+    return {...item, validations, status, placeOfSupply, placeOfSupplyReason, customerCountry};
   },[activeClientId,activeClientName,customers]);
 
   // Process a batch of files: each file is OCR'd, validated, and added to
@@ -3449,6 +3509,12 @@ function App(){
             supplierEmirate: alDetectEmirate(getClientData(activeClientId,'address',''))
           })||{}).reason || '',
           placeOfSupplyAuto: true,
+          // Customer country — auto-detected from the OCR'd billing
+          // address, overridable. Sent as the contact's country_code
+          // when creating in Zoho so the "Country/Region" mandatory
+          // field is populated correctly.
+          customerCountry: alDetectCountry((ocr.receiver_address||'').trim()) || 'AE',
+          customerCountryAuto: true,
           invoiceNumber: ocr.invoice_number||'',
           date: ocr.invoice_date||'',
           dueDate: ocr.due_date||'',
@@ -3555,7 +3621,7 @@ function App(){
             contact_name:custName,
             trn: item.customerTrn || undefined,           // the CUSTOMER's TRN, not the project's
             address: item.customerAddress || undefined,    // billing + shipping populated from this string
-            country_code:'AE',
+            country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
             currency_code: item.currency || 'AED'
           });
           custId=created.id;
@@ -3708,12 +3774,17 @@ function App(){
     if(!item || !item.customerName){ alert("Pick a customer name first."); return; }
     setOcrCustomerCreating(true);
     try{
+      // Use the invoice's detected currency as the customer's billing
+      // currency in Zoho. A USD invoice issued to a UAE-addressed customer
+      // (e.g. ATCOM billed in USD) must create the Zoho contact as USD —
+      // otherwise Zoho defaults to AED and a future foreign-currency
+      // invoice for them gets rebooked at the wrong amount.
       const res = await window.zohoCreateCustomer(orgId, {
         contact_name: item.customerName.trim(),
         trn: item.customerTrn ? item.customerTrn.trim() : undefined,
         address: (item.customerAddress || '').trim() || undefined,
-        country_code: 'AE',
-        currency_code: 'AED'
+        country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
+        currency_code: item.currency || 'AED'
       });
       const cur = getClientData(activeClientId,'customerIds',{}) || {};
       cur[res.name || item.customerName.trim()] = res.id;
@@ -5412,6 +5483,39 @@ td,th{padding:8px 12px;vertical-align:middle}
                               })()}
                             </div>
                           ))}
+                          {/* Customer country — populates Zoho's mandatory
+                              "Country/Region" on the contact. Auto-detected
+                              from the billing address; overridable. Tax
+                              Treatment is derived (TRN ⇒ VAT Registered,
+                              else Non VAT Registered) and shown read-only. */}
+                          <div style={{padding:"10px 12px",background:"rgba(105,88,194,0.04)",border:"1px solid rgba(105,88,194,0.15)",borderRadius:8}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,gap:8,flexWrap:"wrap"}}>
+                              <label style={{fontSize:10,fontWeight:600,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em"}}>Customer country / Tax treatment {q.customerCountryAuto===false?<span style={{marginLeft:6,fontSize:9,color:"#d97706",fontWeight:600,textTransform:"none",letterSpacing:0}}>· manual</span>:<span style={{marginLeft:6,fontSize:9,color:"#16a34a",fontWeight:600,textTransform:"none",letterSpacing:0}}>· auto</span>}</label>
+                              <button onClick={()=>{
+                                const cc=alDetectCountry(q.customerAddress);
+                                if(cc) setQ({customerCountry:cc,customerCountryAuto:true});
+                                else alert("Couldn't infer country from the billing address. Pick one manually.");
+                              }} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:5,padding:"3px 10px",color:"#4D3FA0",fontSize:10,fontWeight:600,cursor:"pointer"}}>↻ Auto-detect</button>
+                            </div>
+                            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                              <div>
+                                <label style={{fontSize:10,color:"#888888"}}>Country / Region</label>
+                                <select value={q.customerCountry||''} onChange={(e)=>setQ({customerCountry:e.target.value,customerCountryAuto:false})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,background:"#ffffff"}}>
+                                  <option value="">— Choose country —</option>
+                                  {AL_COUNTRIES.map(c=><option key={c.code} value={c.code}>{c.label} ({c.code})</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label style={{fontSize:10,color:"#888888"}}>Tax Treatment (derived)</label>
+                                <div style={{padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,background:"#f8f9fc",color:"#555555"}}>
+                                  {q.customerTrn ? 'VAT Registered' : 'Non VAT Registered'}
+                                </div>
+                              </div>
+                            </div>
+                            <div style={{fontSize:10,color:"#666666",marginTop:5,lineHeight:1.5}}>
+                              Used when creating the customer in Zoho — keeps Country/Region and Tax Treatment in sync with what Zoho's contact screen requires.
+                            </div>
+                          </div>
                           {/* Place of supply — auto-detected per UAE VAT Art. 27,
                               overridable. Auto badge clears the moment the user
                               picks manually; Auto-detect button restores it. */}

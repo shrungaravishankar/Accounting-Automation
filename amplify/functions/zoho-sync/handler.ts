@@ -490,9 +490,19 @@ export const handler = async (event: Event) => {
         return v;
       };
       const billingAddr = toAddress(p.billing_address || p.address);
-      if (billingAddr) body.billing_address = billingAddr;
+      if (billingAddr) {
+        // Stamp the structured country_code on the billing/shipping
+        // address objects too — Zoho's contact screen needs it to
+        // populate the Country/Region dropdown, separately from the
+        // root contact-level country_code.
+        if (p.country_code && !billingAddr.country_code) billingAddr.country_code = p.country_code;
+        body.billing_address = billingAddr;
+      }
       const shipAddr = toAddress(p.shipping_address || p.address);
-      if (shipAddr) body.shipping_address = shipAddr;
+      if (shipAddr) {
+        if (p.country_code && !shipAddr.country_code) shipAddr.country_code = p.country_code;
+        body.shipping_address = shipAddr;
+      }
       const j = await zohoPost('contacts', accessToken, region, { organization_id: orgId }, body);
       const contact = j.contact || {};
       return JSON.stringify({
