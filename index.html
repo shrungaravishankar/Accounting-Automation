@@ -3620,12 +3620,16 @@ function App(){
           date:item.date,
           due_date:item.dueDate||item.date,
           invoice_number:item.invoiceNumber,
-          // tax_treatment is the CUSTOMER's status. The project is always
-          // VAT-registered (it's our entity); what matters here is whether
-          // the buyer has a TRN. Zoho UAE enum: 'vat_registered' (has TRN)
-          // or 'non_vat_registered' (no TRN). NOT 'vat_not_registered' —
-          // that string is rejected as "Invalid value [zoho code 6]".
-          tax_treatment: item.customerTrn ? 'vat_registered' : 'non_vat_registered',
+          // tax_treatment is INHERITED from the Zoho contact record — every
+          // contact in UAE edition already has one set (vat_registered /
+          // vat_not_registered / non_gcc / dz_* / gcc_* depending on how
+          // the contact was created). Sending tax_treatment on the invoice
+          // payload fights the saved value and Zoho rejects with "Invalid
+          // value passed for tax_treatment [zoho code 2]" whenever our
+          // guess (TRN-yes/no) disagrees with what the contact actually is
+          // (e.g. ATCOM is set up as 'non_gcc' because its base currency
+          // is USD even though the address is Dubai). Don't second-guess
+          // the contact — let Zoho derive it.
           place_of_supply: placeOfSupply,
           line_items:lines,
           notes:'Imported via AutoLedger OCR — source file: '+item.fileName
