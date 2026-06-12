@@ -3317,8 +3317,10 @@ function App(){
           // RECEIVER_*) is the CUSTOMER we're invoicing.
           supplierName:(ocr.vendor_name||'').trim(),
           supplierTrn: ocr.vendor_trn||'',
+          supplierAddress:(ocr.vendor_address||'').trim(),
           customerName:(ocr.receiver_name||'').trim(),
           customerTrn: ocr.receiver_trn||'',
+          customerAddress:(ocr.receiver_address||'').trim(),
           invoiceNumber: ocr.invoice_number||'',
           date: ocr.invoice_date||'',
           dueDate: ocr.due_date||'',
@@ -3396,7 +3398,9 @@ function App(){
     const c=clients.find(x=>x.id===activeClientId);
     const orgId=c && c.zohoOrgId;
     if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
-    const eligible=ocrQueue.filter(q=>ids.includes(q.id) && q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail'));
+    // 'push' is a runtime error from a previous attempt — it must NOT
+    // gate a retry. Only pre-flight FAILs block.
+    const eligible=ocrQueue.filter(q=>ids.includes(q.id) && q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail' && v.key!=='push'));
     const blocked=ids.length-eligible.length;
     if(eligible.length===0){ alert("No eligible drafts — resolve FAIL validations first."+(blocked>0?" ("+blocked+" blocked)":"")); return; }
     if(!confirm("Push "+eligible.length+" invoice(s) to Zoho?"+(blocked>0?"\n\n"+blocked+" selected item(s) are blocked by failed validations and will be skipped.":""))) return;
@@ -3405,6 +3409,11 @@ function App(){
     await loadZohoTaxes();
     const customerIds=getClientData(activeClientId,'customerIds',{})||{};
     for(const item of eligible){
+      // Wipe any prior push-failure validation so the row's UI status no
+      // longer says "Error" mid-retry. If this attempt also fails, the
+      // catch path below will re-add it with the fresh message.
+      queue=queue.map(q=>q.id===item.id?{...q,validations:(q.validations||[]).filter(v=>v.key!=='push'),status: q.status==='Error' ? alOcrOverallStatus((q.validations||[]).filter(v=>v.key!=='push')) : q.status }:q);
+      setOcrQueue([...queue]);
       try{
         // Resolve / create customer.
         let custName=item.customerName;
@@ -3414,7 +3423,13 @@ function App(){
           if(m && m.score>=0.85 && m.customerId){ custId=m.customerId; custName=m.name; }
         }
         if(!custId){
-          const created=await window.zohoCreateCustomer(orgId,{contact_name:custName, trn:item.supplierTrn||undefined, country_code:'AE', currency_code:item.currency||'AED'});
+          const created=await window.zohoCreateCustomer(orgId,{
+            contact_name:custName,
+            trn: item.customerTrn || undefined,           // the CUSTOMER's TRN, not the project's
+            address: item.customerAddress || undefined,    // billing + shipping populated from this string
+            country_code:'AE',
+            currency_code: item.currency || 'AED'
+          });
           custId=created.id;
           customerIds[created.name||custName]=custId;
           setClientData(activeClientId,'customerIds',customerIds);
@@ -3501,6 +3516,7 @@ function App(){
       const res = await window.zohoCreateCustomer(orgId, {
         contact_name: item.customerName.trim(),
         trn: item.customerTrn ? item.customerTrn.trim() : undefined,
+        address: (item.customerAddress || '').trim() || undefined,
         country_code: 'AE',
         currency_code: 'AED'
       });
@@ -5059,7 +5075,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                         {["File","Customer","Invoice #","Date","Total","Cur","Validation","Status",""].map(h=><th key={h} style={{padding:"8px 10px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap"}}>{h}</th>)}
                       </tr></thead>
                       <tbody>{drafts.map(q=>{
-                        const fails=(q.validations||[]).filter(v=>v.status==='fail').length;
+                        const fails=(q.validations||[]).filter(v=>v.status==='fail' && v.key!=='push').length;
                         const warns=(q.validations||[]).filter(v=>v.status==='warn').length;
                         return <tr key={q.id} style={{borderBottom:"1px solid #f8f9fc",background:ocrSelected.has(q.id)?"rgba(22,163,74,0.04)":"transparent"}}>
                           <td style={{padding:"7px",textAlign:"center"}}><input type="checkbox" checked={ocrSelected.has(q.id)} onChange={()=>setOcrSelected(prev=>{const n=new Set(prev);if(n.has(q.id))n.delete(q.id);else n.add(q.id);return n;})} style={{cursor:"pointer",accentColor:"#16a34a"}} /></td>
@@ -5149,7 +5165,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {reviewItem && (()=>{
                   const q=reviewItem;
                   const setQ=(patch)=>updateOcrItem(q.id,patch);
-                  const fails=(q.validations||[]).filter(v=>v.status==='fail').length;
+                  const fails=(q.validations||[]).filter(v=>v.status==='fail' && v.key!=='push').length;
                   return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
                     <div style={{background:"#ffffff",borderRadius:12,maxWidth:900,width:"100%",maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
                       <div style={{padding:"16px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(22,163,74,0.04)"}}>
@@ -5182,10 +5198,13 @@ td,th{padding:8px 12px;vertical-align:middle}
                             {k:'dueDate',l:'Due date',type:'date'},
                             {k:'customerName',l:'Invoice to (customer)',list:true,confKey:'receiver'},
                             {k:'customerTrn',l:'Customer TRN (optional)',mono:true},
+                            {k:'customerAddress',l:'Customer billing address (used when creating in Zoho)',textarea:true},
                           ].map(fdef=>(
                             <div key={fdef.k}>
                               <label style={{fontSize:10,color:"#888888"}}>{fdef.l}{fdef.confKey && q.confidences && q.confidences[fdef.confKey]!=null?(" · conf "+Math.round(q.confidences[fdef.confKey])+"%"):""}</label>
-                              <input type={fdef.type||'text'} value={q[fdef.k]||''} onChange={(e)=>setQ({[fdef.k]:e.target.value})} list={fdef.list?'rev-ocr-customer-list':undefined} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:fdef.mono?"'IBM Plex Mono',monospace":"inherit"}} />
+                              {fdef.textarea
+                                ? <textarea value={q[fdef.k]||''} onChange={(e)=>setQ({[fdef.k]:e.target.value})} rows={2} placeholder={fdef.k==='customerAddress'?'Street, City, Emirate, Country':''} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"inherit",resize:"vertical"}} />
+                                : <input type={fdef.type||'text'} value={q[fdef.k]||''} onChange={(e)=>setQ({[fdef.k]:e.target.value})} list={fdef.list?'rev-ocr-customer-list':undefined} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:fdef.mono?"'IBM Plex Mono',monospace":"inherit"}} />}
                               {/* Inline Create-Customer when the typed name isn't in Zoho yet */}
                               {fdef.k==='customerName' && q.customerName && (()=>{
                                 const m = findCustomerMatch(q.customerName);
@@ -5275,6 +5294,13 @@ td,th{padding:8px 12px;vertical-align:middle}
                                   <span style={{fontWeight:600,color:"#1a1a2e"}}>{v.label}</span>{vBadge(v.status)}
                                 </div>
                                 <div style={{fontSize:10,color:"#666666",lineHeight:1.5}}>{v.message}</div>
+                                {v.key==='push' && v.status==='fail' && <div style={{marginTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                                  <span style={{fontSize:10,color:"#92400e",fontWeight:600}}>Fixed the issue in Zoho?</span>
+                                  <div style={{display:"flex",gap:6}}>
+                                    <button onClick={()=>updateOcrItem(q.id,{validations:(q.validations||[]).filter(x=>x.key!=='push')})} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"4px 10px",color:"#1a1a2e",fontSize:10,fontWeight:600,cursor:"pointer"}}>Dismiss error</button>
+                                    <button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing} style={{background:ocrPushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:5,padding:"4px 12px",fontSize:10,fontWeight:700,cursor:ocrPushing?"default":"pointer"}}>{ocrPushing?"Retrying…":"↻ Retry push now"}</button>
+                                  </div>
+                                </div>}
                               </div>
                             ))}
                           </div>

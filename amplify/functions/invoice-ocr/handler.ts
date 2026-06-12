@@ -173,6 +173,13 @@ export const handler = async (event: Event) => {
     const total = lastOf('TOTAL');
     const subtotal = lastOf('SUBTOTAL');
     const tax = lastOf('TAX');
+    // Address fields for the receiver — used when creating the customer
+    // in Zoho. Textract surfaces RECEIVER_BILL_TO_ADDRESS or the more
+    // generic RECEIVER_ADDRESS depending on the invoice layout.
+    const receiverAddress = firstOf('RECEIVER_BILL_TO_ADDRESS')
+      || firstOf('RECEIVER_ADDRESS')
+      || firstOf('RECEIVER_SHIP_TO_ADDRESS');
+    const vendorAddress = firstOf('VENDOR_ADDRESS');
     // UAE TRNs sometimes land as VENDOR_VAT_NUMBER or as a free-text label;
     // collect candidates and pick a 15-digit run if found.
     const trnCandidates = getAllSummary(doc, ['VENDOR_VAT_NUMBER', 'RECEIVER_VAT_NUMBER', 'TAX_PAYER_ID']);
@@ -270,20 +277,60 @@ export const handler = async (event: Event) => {
     const isInvoice = !isCreditNote && (!!acceptedMatch || (looksLikeInvoice && !rejectedMatch));
 
     // ---- Currency detection ----
-    // Count currency-code mentions; the most frequent wins. Default AED.
+    // The token attached to the TOTAL amount is the strongest signal —
+    // a UAE invoice in USD will still mention AED in T&Cs/footer, so a
+    // global keyword count was misleading. Order of preference:
+    //   1. Currency code/symbol immediately adjacent to TOTAL or SUBTOTAL
+    //      values (e.g. "USD 60,000.00", "$60,000", "AED 12,000").
+    //   2. Currency code/symbol adjacent to any line-item PRICE.
+    //   3. Most-frequent currency code in the doc.
+    //   4. Bare symbol fallback ($ / € / £).
     const SUPPORTED = ['AED','USD','EUR','GBP','SAR','QAR','OMR','KWD','BHD'];
-    let currency = 'AED';
-    let bestCount = 0;
-    for (const code of SUPPORTED) {
-      const re = new RegExp('\\b' + code.toLowerCase() + '\\b', 'g');
-      const count = (corpus.match(re) || []).length;
-      if (count > bestCount) { bestCount = count; currency = code; }
+    const detectInString = (s: string | undefined | null): string | null => {
+      if (!s) return null;
+      const u = s.toUpperCase();
+      for (const code of SUPPORTED) { if (u.includes(code)) return code; }
+      if (s.includes('$')) return 'USD';
+      if (s.includes('€')) return 'EUR';
+      if (s.includes('£')) return 'GBP';
+      if (/د\.?\s*إ/.test(s) || /dhs?\b/i.test(s)) return 'AED';
+      return null;
+    };
+    let currency: string | null = null;
+    // (1) inspect TOTAL / SUBTOTAL raw values
+    currency = detectInString(total?.value) || detectInString(subtotal?.value) || null;
+    // (2) inspect line-item PRICE/UNIT_PRICE values
+    if (!currency) {
+      outer: for (const d of docs) {
+        for (const g of (d.LineItemGroups || [])) {
+          for (const li of (g.LineItems || [])) {
+            for (const f of (li.LineItemExpenseFields || []) as ExpenseField[]) {
+              const t = f.Type?.Text;
+              if (t === 'PRICE' || t === 'UNIT_PRICE') {
+                const c = detectInString(f.ValueDetection?.Text);
+                if (c) { currency = c; break outer; }
+              }
+            }
+          }
+        }
+      }
     }
-    // Symbol hints when no code appears in text.
-    if (bestCount === 0) {
+    // (3) most-frequent code in the full corpus
+    if (!currency) {
+      let bestCount = 0, best: string | null = null;
+      for (const code of SUPPORTED) {
+        const re = new RegExp('\\b' + code.toLowerCase() + '\\b', 'g');
+        const count = (corpus.match(re) || []).length;
+        if (count > bestCount) { bestCount = count; best = code; }
+      }
+      currency = best;
+    }
+    // (4) symbol fallback
+    if (!currency) {
       if (corpus.includes('$')) currency = 'USD';
       else if (corpus.includes('€')) currency = 'EUR';
       else if (corpus.includes('£')) currency = 'GBP';
+      else currency = 'AED';
     }
 
     // ---- TRN fallback scan ----
@@ -315,6 +362,8 @@ export const handler = async (event: Event) => {
       receiver_confidence: receiver?.confidence || 0,
       vendor_trn: vendorTrn,
       receiver_trn: receiverTrn,
+      vendor_address: vendorAddress?.value || '',
+      receiver_address: receiverAddress?.value || '',
       invoice_number: invoiceNumber?.value || '',
       invoice_date: toIsoDate(dateRaw?.value || ''),
       invoice_date_raw: dateRaw?.value || '',

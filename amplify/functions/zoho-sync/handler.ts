@@ -459,6 +459,31 @@ export const handler = async (event: Event) => {
         body.tax_treatment = p.tax_treatment || 'vat_not_registered';
       }
       if (p.country_code) body.country_code = p.country_code;
+      // Billing / shipping address — Zoho stores them as structured
+      // objects; callers may pass either a structured object or a single
+      // string blob (the OCR pipeline does the latter), which we map to
+      // `attention` so the line breaks survive in Zoho.
+      const toAddress = (v: any) => {
+        if (!v) return null;
+        if (typeof v === 'string') {
+          const t = v.trim();
+          if (!t) return null;
+          // Best-effort split: last comma-separated chunk → country/zip,
+          // first → street. Keeps Zoho happy without faking structure.
+          const parts = t.split(/\n|,/).map((s: string) => s.trim()).filter(Boolean);
+          const out: any = { address: t };
+          if (parts.length >= 1) out.address = parts[0];
+          if (parts.length >= 2) out.street2 = parts.slice(1, -2).join(', ') || undefined;
+          if (parts.length >= 3) out.city = parts[parts.length - 2];
+          if (parts.length >= 2) out.country = parts[parts.length - 1];
+          return out;
+        }
+        return v;
+      };
+      const billingAddr = toAddress(p.billing_address || p.address);
+      if (billingAddr) body.billing_address = billingAddr;
+      const shipAddr = toAddress(p.shipping_address || p.address);
+      if (shipAddr) body.shipping_address = shipAddr;
       const j = await zohoPost('contacts', accessToken, region, { organization_id: orgId }, body);
       const contact = j.contact || {};
       return JSON.stringify({
