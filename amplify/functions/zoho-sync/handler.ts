@@ -315,6 +315,29 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: 'Historical exchange rate could not be retrieved. Enter the rate manually.', apiUsage: lastApiUsage });
     }
 
+    // Organization profile — legal name + VAT TRN as configured in Zoho
+    // Books (Settings → Taxes → Tax Registration Number). The frontend
+    // syncs these into the per-client config so users never type them.
+    if (kind === 'orgProfile') {
+      const j = await zohoGet(`organizations/${orgId}`, accessToken, region);
+      const o = j.organization || {};
+      // Zoho exposes the VAT registration under tax_reg_no on the detailed
+      // org object for GCC editions; fall back to scanning custom fields.
+      let trn = (o.tax_reg_no || '').replace(/\D/g, '');
+      if (trn.length !== 15) {
+        const blob = JSON.stringify(o);
+        const m = blob.match(/\b1\d{14}\b/);
+        trn = m ? m[0] : '';
+      }
+      return JSON.stringify({
+        error: null,
+        name: o.name || '',
+        currency_code: o.currency_code || 'AED',
+        trn,
+        apiUsage: lastApiUsage
+      });
+    }
+
     // Taxes configured in this Zoho org. UAE orgs typically expose
     // "Standard Rate" (5%), "Zero Rated" (0%), "Exempt" (0%), and
     // "Out of Scope" (0%). Returned as { id, name, percentage, type }

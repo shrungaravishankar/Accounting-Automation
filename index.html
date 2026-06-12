@@ -885,9 +885,9 @@ window.zohoFetch = async (kind, organizationId, extraParams) => {
   if (!d) throw new Error('Empty response from Zoho.');
   __recordApiUsage(d.apiUsage);
   if (d.error) throw new Error(d.error);
-  // For 'recentEntries' and 'fxRate' we want the full object (multiple
-  // top-level keys), not just `items`.
-  if (kind === 'recentEntries' || kind === 'fxRate') return d;
+  // For 'recentEntries', 'fxRate' and 'orgProfile' we want the full object
+  // (multiple top-level keys), not just `items`.
+  if (kind === 'recentEntries' || kind === 'fxRate' || kind === 'orgProfile') return d;
   const items = d.items || [];
   if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
   return items;
@@ -1937,6 +1937,22 @@ function alValidateOcrInvoice(item, ctx){
   return out;
 }
 
+// Filter Chart-of-Accounts entries by usage context. Zoho account_type
+// values: expense / other_expense / cost_of_goods_sold on the debit side;
+// income / other_income on the credit side. Manual CSVs may carry looser
+// labels ("Expense", "Revenue", "Income"), so match by regex. If the
+// filter would return nothing (e.g. a CoA with no type column), fall back
+// to the full list rather than presenting an empty dropdown.
+function alFilterAccountsForContext(coa, context){
+  const list = coa || [];
+  if (context === 'all') return list;
+  const re = context === 'expense'
+    ? /expense|cost\s*of\s*goods|cogs/i
+    : /income|revenue|sales/i;
+  const filtered = list.filter(a => re.test(a.type || ''));
+  return filtered.length > 0 ? filtered : list;
+}
+
 function alOcrOverallStatus(validations){
   if((validations||[]).some(v=>v.status==='fail')) return 'Error';
   if((validations||[]).some(v=>v.status==='warn')) return 'Validated';
@@ -2334,6 +2350,10 @@ function App(){
   //    ...extracted/edited fields, validations:[], zohoInvoiceId,
   //    zohoInvoiceNumber, pushedAt, sentAt, sentBy, fx:{rate,source} }
   const[ocrQueue,setOcrQueue]=useState([]);
+  // Object URLs for uploaded files keyed by draft id — session-only (the
+  // persisted queue stores extracted data, not the binary). Lets the
+  // review modal show the original invoice next to the extraction.
+  const ocrPreviewUrls=useRef({});
   const[ocrProcessing,setOcrProcessing]=useState(false);
   const[ocrProgress,setOcrProgress]=useState({done:0,total:0});
   const[ocrReviewId,setOcrReviewId]=useState("");   // draft being reviewed in the modal
@@ -2676,6 +2696,12 @@ function App(){
           if(vendors._idByName) setClientData(created.id,'vendorIds',vendors._idByName); }
         if(customers && customers.length){ setCustomers(customers); setCustomerFileName('Zoho: '+customers.length+' customers'); setClientData(created.id,'customers',customers); setClientData(created.id,'customer_file','Zoho: '+customers.length+' customers');
           if(customers._idByName) setClientData(created.id,'customerIds',customers._idByName); }
+        try {
+          const prof = await window.zohoFetch('orgProfile', org.organization_id);
+          if(prof && prof.name) setClientData(created.id,'legal_name',prof.name);
+          if(prof) setClientData(created.id,'trn',prof.trn||'');
+          setClientData(created.id,'currency','AED');
+        } catch(_){}
         setZohoPickerOpen(false);
         alert('Client imported ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
       } catch(e){
@@ -2705,6 +2731,14 @@ function App(){
       if(vendors && vendors._idByName) setClientData(activeClientId,'vendorIds',vendors._idByName);
       setCustomers(customers||[]); setCustomerFileName('Zoho: '+(customers||[]).length+' customers'); setClientData(activeClientId,'customers',customers||[]); setClientData(activeClientId,'customer_file','Zoho: '+(customers||[]).length+' customers');
       if(customers && customers._idByName) setClientData(activeClientId,'customerIds',customers._idByName);
+      // Entity profile (legal name + VAT TRN) — synced so OCR validation
+      // never depends on manual entry. Best-effort.
+      try {
+        const prof = await window.zohoFetch('orgProfile', orgId);
+        if(prof && prof.name) setClientData(activeClientId,'legal_name',prof.name);
+        if(prof) setClientData(activeClientId,'trn',prof.trn||'');
+        setClientData(activeClientId,'currency','AED');
+      } catch(_){}
       alert('Synced from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
     } catch(e){
       if(String(e.message||e).includes('Not connected')){
@@ -3243,6 +3277,7 @@ function App(){
     for(let i=0;i<files.length;i++){
       const f=files[i];
       const id=crypto.randomUUID();
+      try{ ocrPreviewUrls.current[id]={url:URL.createObjectURL(f),type:f.type||''}; }catch(_){}
       // OCR
       try{
         if(f.size>10*1024*1024) throw new Error('File exceeds 10 MB.');
@@ -3349,11 +3384,22 @@ function App(){
           setCustomers(prev=>prev.includes(custName)?prev:[...prev,custName]);
         }
         const vat=Number(item.vatPercent||0);
-        const taxMatch=(zohoTaxes||[]).find(t=>Number(t.percentage)===vat);
+        // Tax mapping: 5% → the standard-rate tax; 0% → pick the Zero-Rated
+        // or Exempt tax per the reviewer's choice on the draft.
+        let taxMatch=null;
+        if(vat>0){ taxMatch=(zohoTaxes||[]).find(t=>Number(t.percentage)===vat); }
+        else {
+          const zeros=(zohoTaxes||[]).filter(t=>Number(t.percentage)===0);
+          const wantExempt=(item.zeroType||'zero_rated')==='exempt';
+          taxMatch=zeros.find(t=>wantExempt?/exempt/i.test(t.name||''):/zero/i.test(t.name||''))||zeros[0]||null;
+        }
+        // Income account: reviewer's pick on the draft, else the default
+        // sales account from the CoA.
+        const lineAccountId=item.accountId||defaultSalesAccount?.id||'';
         const lines=(item.lineItems&&item.lineItems.length>0?item.lineItems:[{description:'Sales — '+(item.invoiceNumber||item.fileName),quantity:1,rate:item.subtotal||item.total}])
           .map(l=>{
             const li={name:(l.description||'Item').slice(0,100),description:l.description||'',rate:Number(l.rate||0),quantity:Number(l.quantity||1)};
-            if(defaultSalesAccount?.id) li.account_id=defaultSalesAccount.id;
+            if(lineAccountId) li.account_id=lineAccountId;
             if(taxMatch) li.tax_id=taxMatch.id; else if(vat>0) li.tax_percentage=vat;
             return li;
           });
@@ -4877,6 +4923,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   {drafts.length>0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap"}}>
                     <div style={{fontSize:11,color:"#888888"}}>{drafts.length} in queue · {drafts.filter(q=>q.status==='Ready To Push').length} ready · {drafts.filter(q=>q.status==='Error').length} blocked</div>
                     <div style={{display:"flex",gap:8}}>
+                      {(()=>{ const ready=drafts.filter(q=>q.status==='Ready To Push'||q.status==='Validated').map(q=>q.id); return ready.length>0 && <button onClick={()=>pushOcrItems(ready)} disabled={ocrPushing} style={{background:ocrPushing?"#cccccc":"#ffffff",border:"1.5px solid #16a34a",borderRadius:7,padding:"7px 16px",color:ocrPushing?"#777777":"#16a34a",fontSize:11,fontWeight:700,cursor:ocrPushing?"default":"pointer"}}>⚡ Push all eligible ({ready.length})</button>; })()}
                       <button onClick={()=>pushOcrItems(Array.from(ocrSelected))} disabled={ocrPushing||ocrSelected.size===0} style={{background:(ocrPushing||ocrSelected.size===0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",fontSize:11,fontWeight:700,cursor:(ocrPushing||ocrSelected.size===0)?"default":"pointer"}}>{ocrPushing?"Pushing…":"⚡ Push selected ("+ocrSelected.size+")"}</button>
                       <button onClick={()=>deleteOcrItems(Array.from(ocrSelected))} disabled={ocrPushing||ocrSelected.size===0} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:(ocrPushing||ocrSelected.size===0)?"default":"pointer"}}>Remove</button>
                     </div>
@@ -4996,6 +5043,17 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <div style={{padding:"16px 22px",overflowY:"auto",flex:1,display:"grid",gridTemplateColumns:"1.2fr 1fr",gap:18}}>
                         {/* Left: extracted fields (editable) */}
                         <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                          {/* Original document preview (session-only object URL) */}
+                          {(()=>{ const pv=ocrPreviewUrls.current[q.id]; if(!pv) return <div style={{padding:"8px 10px",background:"#f8f9fc",border:"1px dashed #e2e2ea",borderRadius:6,fontSize:10,color:"#999999"}}>Original file preview is available in the session it was uploaded — re-upload to preview again.</div>;
+                            return <div style={{border:"1px solid #e2e2ea",borderRadius:8,overflow:"hidden"}}>
+                              <div style={{padding:"5px 10px",fontSize:9,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",background:"#f8f9fc",display:"flex",justifyContent:"space-between"}}>
+                                <span>Uploaded invoice</span>
+                                <a href={pv.url} target="_blank" rel="noreferrer" style={{color:"#4D3FA0",textDecoration:"none",fontWeight:600,textTransform:"none"}}>Open full size ↗</a>
+                              </div>
+                              {/^application\/pdf/.test(pv.type)
+                                ? <iframe src={pv.url} title="invoice preview" style={{width:"100%",height:260,border:"none",background:"#ffffff"}} />
+                                : <img src={pv.url} alt="invoice preview" style={{width:"100%",maxHeight:260,objectFit:"contain",background:"#ffffff"}} />}
+                            </div>; })()}
                           <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em"}}>OCR extraction (edit to correct)</div>
                           {[
                             {k:'customerName',l:'Customer (supplier on invoice)',list:true},
@@ -5016,6 +5074,30 @@ td,th{padding:8px 12px;vertical-align:middle}
                             <div><label style={{fontSize:10,color:"#888888"}}>VAT amount</label><input type="number" step="0.01" value={q.tax||0} onChange={(e)=>setQ({tax:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
                             <div><label style={{fontSize:10,color:"#888888"}}>Total</label><input type="number" step="0.01" value={q.total||0} onChange={(e)=>setQ({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
                             <div><label style={{fontSize:10,color:"#888888"}}>Currency</label><select value={q.currency||'AED'} onChange={(e)=>setQ({currency:e.target.value})} style={{width:"100%",padding:"7px 6px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select></div>
+                          </div>
+                          {/* Income account + VAT treatment for the Zoho invoice */}
+                          <div style={{display:"grid",gridTemplateColumns:"2fr 90px 130px",gap:8}}>
+                            <div>
+                              <label style={{fontSize:10,color:"#888888"}}>Income account (Chart of Accounts — income only)</label>
+                              <select value={q.accountId||''} onChange={(e)=>setQ({accountId:e.target.value})} style={{width:"100%",padding:"7px 8px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>
+                                <option value="">— Default sales account —</option>
+                                {alFilterAccountsForContext(chartOfAccounts,'income').map(a=><option key={a.id||a.name} value={a.id||''}>{a.name}{a.type?(' — '+a.type):''}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888888"}}>VAT %</label>
+                              <select value={q.vatPercent||0} onChange={(e)=>setQ({vatPercent:Number(e.target.value)})} style={{width:"100%",padding:"7px 6px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>
+                                <option value="5">5%</option>
+                                <option value="0">0%</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888888"}}>0% treatment</label>
+                              <select value={q.zeroType||'zero_rated'} onChange={(e)=>setQ({zeroType:e.target.value})} disabled={Number(q.vatPercent||0)!==0} style={{width:"100%",padding:"7px 6px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,opacity:Number(q.vatPercent||0)!==0?0.5:1}}>
+                                <option value="zero_rated">Zero Rated</option>
+                                <option value="exempt">Exempt</option>
+                              </select>
+                            </div>
                           </div>
                           {q.fx&&<div style={{padding:"8px 10px",background:q.fx.rate?"rgba(22,163,74,0.05)":"rgba(220,38,38,0.05)",border:"1px solid "+(q.fx.rate?"rgba(22,163,74,0.2)":"rgba(220,38,38,0.2)"),borderRadius:6,fontSize:11}}>
                             {q.fx.rate
@@ -5098,32 +5180,43 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
             </>}
             {clientDetailTab==="settings" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:20,display:"flex",flexDirection:"column",gap:14}}>
-              {/* Editable entity profile — feeds the OCR validation engine */}
+              {/* Entity profile — synced from Zoho, feeds the OCR validation engine.
+                  Legal name + TRN come from the Zoho org (Settings → Taxes there);
+                  users never type them. Base currency is always AED (UAE tool). */}
               <div style={{padding:14,background:"rgba(105,88,194,0.04)",border:"1px solid rgba(105,88,194,0.15)",borderRadius:8}}>
-                <div style={{fontSize:11,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:10}}>Entity profile (used by Invoice OCR validation)</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:8,flexWrap:"wrap"}}>
+                  <div style={{fontSize:11,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em"}}>Entity profile (used by Invoice OCR validation)</div>
+                  {c.zohoOrgId && isAdmin && <button onClick={async()=>{
+                    try{
+                      const prof=await window.zohoFetch('orgProfile',c.zohoOrgId);
+                      if(prof.name) setClientData(c.id,'legal_name',prof.name);
+                      setClientData(c.id,'trn',prof.trn||'');
+                      setClientData(c.id,'currency','AED');
+                      alert('Synced from Zoho ✓\n\nLegal name: '+(prof.name||'—')+'\nVAT TRN: '+(prof.trn||'not configured in Zoho — set it under Zoho Books Settings → Taxes'));
+                      setClientDetailTab('projects'); setClientDetailTab('settings'); // force re-render of defaultValues
+                    }catch(e){ alert('Could not sync entity profile: '+(e.message||e)); }
+                  }} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:6,padding:"5px 12px",color:"#4D3FA0",fontSize:10,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>}
+                </div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
                   <div>
-                    <label style={{fontSize:10,color:"#888888"}}>Legal name (as on invoices)</label>
-                    <input type="text" defaultValue={getClientData(c.id,"legal_name","")} onBlur={(e)=>setClientData(c.id,"legal_name",e.target.value.trim())} placeholder={c.name} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
+                    <label style={{fontSize:10,color:"#888888"}}>Legal name (synced from Zoho organization)</label>
+                    <div style={{padding:"8px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:4,background:"#f8f9fc",color:getClientData(c.id,"legal_name","")?"#1a1a2e":"#999999"}}>{getClientData(c.id,"legal_name","")||"— sync to fetch —"}</div>
                   </div>
                   <div>
-                    <label style={{fontSize:10,color:"#888888"}}>Trade name (optional)</label>
+                    <label style={{fontSize:10,color:"#888888"}}>Trade name (optional, manual)</label>
                     <input type="text" defaultValue={getClientData(c.id,"trade_name","")} onBlur={(e)=>setClientData(c.id,"trade_name",e.target.value.trim())} placeholder="e.g. shorter brand name" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
                   </div>
                   <div>
-                    <label style={{fontSize:10,color:"#888888"}}>VAT TRN (15 digits — mandatory check on every OCR'd invoice)</label>
-                    <input type="text" defaultValue={getClientData(c.id,"trn","")} onBlur={(e)=>{ const v=e.target.value.replace(/\D/g,''); if(v && v.length!==15){ alert("A UAE TRN has exactly 15 digits."); } setClientData(c.id,"trn",v); }} placeholder="100123456700003" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
+                    <label style={{fontSize:10,color:"#888888"}}>VAT TRN (synced from Zoho Settings → Taxes)</label>
+                    <div style={{padding:"8px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:4,background:"#f8f9fc",fontFamily:"'IBM Plex Mono',monospace",color:getClientData(c.id,"trn","")?"#1a1a2e":"#999999"}}>{getClientData(c.id,"trn","")||"— not configured in Zoho —"}</div>
                   </div>
                   <div>
                     <label style={{fontSize:10,color:"#888888"}}>Base currency</label>
-                    <select defaultValue={getClientData(c.id,"currency","AED")} onChange={(e)=>setClientData(c.id,"currency",e.target.value)} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}}>
-                      {["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc} value={cc}>{cc}</option>)}
-                    </select>
+                    <div style={{padding:"8px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:4,background:"#f8f9fc",color:"#1a1a2e",fontWeight:600}}>AED <span style={{fontSize:10,color:"#888888",fontWeight:400}}>(fixed — UAE tool)</span></div>
                   </div>
                 </div>
               </div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Zoho organization</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.zohoOrgId||<span style={{color:"#999999"}}>Not linked</span>}</div></div>
-              <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Bank ledger</div><div style={{fontSize:13,color:"#1a1a2e"}}>{getClientData(c.id,"bank","Not set")}</div></div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Created by</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.ownerName||c.ownerEmail||"—"}</div></div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Assigned to</div><div style={{fontSize:13,color:"#1a1a2e"}}>{(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).join(", ")||"—"}</div></div>
               {isAdmin && <div style={{display:"flex",gap:8,paddingTop:8,borderTop:"1px solid #f0f0f4",marginTop:4,flexWrap:"wrap"}}>
@@ -6130,7 +6223,10 @@ td,th{padding:8px 12px;vertical-align:middle}
                 ) : (
                 <><div onClick={()=>{setCoaDropdownOpen(p=>({...p,[t.id]:!p[t.id]}));setHighlightIdx(0);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:36}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.selectedLedger}</span><span style={{color:"#777777",marginLeft:6}}>▾</span></div>
                 {coaDropdownOpen[t.id]&&(()=>{
-                  const filtered=chartOfAccounts.filter(a=>!coaSearch[t.id]||a.name.toLowerCase().includes((coaSearch[t.id]||"").toLowerCase()));
+                  // Context filter: expenses tab shows expense accounts, revenue tab
+                  // shows income accounts; Journal entry-mode sees everything.
+                  const ctxAccounts=alFilterAccountsForContext(chartOfAccounts, reviewTab==="revenue" ? "income" : (t.entryMode==="journal" ? "all" : "expense"));
+                  const filtered=ctxAccounts.filter(a=>!coaSearch[t.id]||a.name.toLowerCase().includes((coaSearch[t.id]||"").toLowerCase()));
                   return <div style={{position:"absolute",top:"100%",left:8,right:8,zIndex:100,background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:340,overflow:"hidden",display:"flex",flexDirection:"column",minWidth:300}}>
                   <input type="text" placeholder="Search ledger..." value={coaSearch[t.id]||""} onChange={e=>{setCoaSearch(p=>({...p,[t.id]:e.target.value}));setHighlightIdx(0);}} onClick={e=>e.stopPropagation()} autoFocus onKeyDown={e=>{
                     if(e.key==="ArrowDown"){e.preventDefault();setHighlightIdx(p=>Math.min(p+1,filtered.length-1));}

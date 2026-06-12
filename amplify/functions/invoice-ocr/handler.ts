@@ -250,7 +250,12 @@ export const handler = async (event: Event) => {
       const m = acceptedMatch[0];
       docType = /simplified/.test(m) ? 'simplified_tax_invoice' : /tax/.test(m) ? 'tax_invoice' : /commercial/.test(m) ? 'commercial_invoice' : 'invoice';
     }
-    const isInvoice = !isCreditNote && !rejectedMatch && !!acceptedMatch;
+    // Accept when invoice wording is present OR when the document has the
+    // structural shape of an invoice (number + total) and nothing matched
+    // a rejected type — many ERP/POS layouts lose the title to OCR noise.
+    const looksLikeInvoice = !!(invoiceNumber?.value) && parseAmount(total?.value) > 0;
+    const isInvoice = !isCreditNote && !rejectedMatch && (!!acceptedMatch || looksLikeInvoice);
+    if (docType === 'unknown' && isInvoice) docType = 'invoice';
 
     // ---- Currency detection ----
     // Count currency-code mentions; the most frequent wins. Default AED.
