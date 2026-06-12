@@ -483,12 +483,24 @@ export const handler = async (event: Event) => {
       };
       if (p.email) body.email = p.email;
       if (p.phone) body.phone = p.phone;
-      if (p.trn) {
-        body.tax_treatment = 'vat_registered';
-        body.tax_reg_no = p.trn;
-      } else {
-        body.tax_treatment = p.tax_treatment || 'vat_not_registered';
+      // tax_treatment value is country-bucketed in Zoho UAE edition:
+      //   AE                              → vat_registered / vat_not_registered
+      //   GCC (SA/OM/BH/QA/KW)            → gcc_vat_registered / gcc_vat_not_registered
+      //   Everything else (Spain etc.)    → non_gcc
+      // Sending a UAE value for a non-UAE contact returned
+      // "Invalid Element tax_treatment [zoho code 8]".
+      const cc = String(p.country_code || '').toUpperCase();
+      const isAE = cc === 'AE';
+      const isGCC = ['SA','OM','BH','QA','KW'].includes(cc);
+      const hasTrn = !!p.trn;
+      if (isAE) {
+        body.tax_treatment = hasTrn ? 'vat_registered' : 'vat_not_registered';
+      } else if (isGCC) {
+        body.tax_treatment = hasTrn ? 'gcc_vat_registered' : 'gcc_vat_not_registered';
+      } else if (cc) {
+        body.tax_treatment = 'non_gcc';
       }
+      if (hasTrn) body.tax_reg_no = p.trn;
       // Zoho's Contacts API doesn't accept `country_code` at the root —
       // it wants the country NAME inside billing_address.country /
       // shipping_address.country. We map the ISO-2 code that the
@@ -505,13 +517,11 @@ export const handler = async (event: Event) => {
         IT: 'Italy', NL: 'Netherlands', BE: 'Belgium', JP: 'Japan',
       };
       const countryName = p.country_code ? (COUNTRY_NAMES[String(p.country_code).toUpperCase()] || p.country_code) : '';
-      // place_of_supply is MANDATORY on a Zoho UAE customer contact
-      // (the "Place of Supply *" red-asterisked field on the Other
-      // Details tab). API expects the 2-letter emirate code (AB/DU/
-      // SH/AJ/UM/RA/FU) — same enum as the invoice field. Without it
-      // the customer is created in an incomplete state and every
-      // subsequent invoice fights it.
-      if (p.place_of_supply) body.place_of_supply = p.place_of_supply;
+      // place_of_supply applies only to UAE customers — it's the
+      // emirate where the supply lands per Art. 27. For non-UAE
+      // contacts Zoho rejects the element entirely. Only send it when
+      // the customer's country is AE.
+      if (isAE && p.place_of_supply) body.place_of_supply = p.place_of_supply;
       // Billing / shipping address — Zoho stores them as structured
       // objects; callers may pass either a structured object or a single
       // string blob (the OCR pipeline does the latter), which we map to
