@@ -517,7 +517,24 @@ export const handler = async (event: Event) => {
       try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
       if (!p.customer_id) return JSON.stringify({ error: 'customer_id is required' });
       if (!Array.isArray(p.line_items) || p.line_items.length === 0) return JSON.stringify({ error: 'at least one line_item is required' });
-      const j = await zohoPost('invoices', accessToken, region, { organization_id: orgId }, p);
+      let j: any;
+      try {
+        j = await zohoPost('invoices', accessToken, region, { organization_id: orgId }, p);
+      } catch (e: any) {
+        // Zoho's generic "code 6 / invalid value" doesn't say which field
+        // is wrong. Echo the payload fields most likely to be the culprit
+        // (place_of_supply, tax_treatment, currency_code, gst_treatment)
+        // so the reviewer can see at a glance which value Zoho rejected.
+        const hints: string[] = [];
+        if (p.place_of_supply !== undefined) hints.push(`place_of_supply="${p.place_of_supply}"`);
+        if (p.tax_treatment !== undefined)   hints.push(`tax_treatment="${p.tax_treatment}"`);
+        if (p.currency_code !== undefined)   hints.push(`currency_code="${p.currency_code}"`);
+        if (p.gst_treatment !== undefined)   hints.push(`gst_treatment="${p.gst_treatment}"`);
+        if (p.vat_treatment !== undefined)   hints.push(`vat_treatment="${p.vat_treatment}"`);
+        const suffix = hints.length ? ' · sent: ' + hints.join(', ') : '';
+        console.error('[zoho-sync] createInvoice failed', { message: e?.message, payload: p });
+        throw new Error((e?.message || String(e)) + suffix);
+      }
       const inv = j.invoice || {};
       return JSON.stringify({
         error: null,
