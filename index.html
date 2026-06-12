@@ -3622,7 +3622,12 @@ function App(){
             trn: item.customerTrn || undefined,           // the CUSTOMER's TRN, not the project's
             address: item.customerAddress || undefined,    // billing + shipping populated from this string
             country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
-            currency_code: item.currency || 'AED'
+            currency_code: item.currency || 'AED',
+            // place_of_supply is mandatory on Zoho UAE customer contacts.
+            // Use whatever the review modal resolved for the invoice —
+            // for a B2B customer with TRN this is the customer's
+            // emirate; for B2C it's the supplier's emirate (Art. 27).
+            place_of_supply: item.placeOfSupply || undefined
           });
           custId=created.id;
           customerIds[created.name||custName]=custId;
@@ -3784,7 +3789,8 @@ function App(){
         trn: item.customerTrn ? item.customerTrn.trim() : undefined,
         address: (item.customerAddress || '').trim() || undefined,
         country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
-        currency_code: item.currency || 'AED'
+        currency_code: item.currency || 'AED',
+        place_of_supply: item.placeOfSupply || undefined
       });
       const cur = getClientData(activeClientId,'customerIds',{}) || {};
       cur[res.name || item.customerName.trim()] = res.id;

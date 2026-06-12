@@ -468,6 +468,13 @@ export const handler = async (event: Event) => {
         body.tax_treatment = p.tax_treatment || 'vat_not_registered';
       }
       if (p.country_code) body.country_code = p.country_code;
+      // place_of_supply is MANDATORY on a Zoho UAE customer contact
+      // (the "Place of Supply *" red-asterisked field on the Other
+      // Details tab). API expects the 2-letter emirate code (AB/DU/
+      // SH/AJ/UM/RA/FU) — same enum as the invoice field. Without it
+      // the customer is created in an incomplete state and every
+      // subsequent invoice fights it.
+      if (p.place_of_supply) body.place_of_supply = p.place_of_supply;
       // Billing / shipping address — Zoho stores them as structured
       // objects; callers may pass either a structured object or a single
       // string blob (the OCR pipeline does the latter), which we map to
