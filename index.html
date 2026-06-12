@@ -2326,16 +2326,6 @@ function App(){
   // UAE tax list from Zoho /settings/taxes — lazy-loaded once per session.
   const[zohoTaxes,setZohoTaxes]=useState([]);
   const[zohoTaxesLoading,setZohoTaxesLoading]=useState(false);
-  // Create-invoice modal state. txnRow is the bank-statement row we're
-  // creating the invoice for. Form state mirrors the Zoho invoice body.
-  const[invoiceCreatorOpen,setInvoiceCreatorOpen]=useState(false);
-  const[invoiceCreatorRow,setInvoiceCreatorRow]=useState(null);
-  const[invoiceCreatorForm,setInvoiceCreatorForm]=useState(null);
-  const[invoiceCreatorSubmitting,setInvoiceCreatorSubmitting]=useState(false);
-  const[invoiceCreatorError,setInvoiceCreatorError]=useState("");
-  // "Advance from customer" picker — when the user wants to treat the
-  // payment as unapplied/advance instead of linking to an invoice.
-  const[advancePickerOpen,setAdvancePickerOpen]=useState({});
   // ── Invoice OCR module (Revenue tab) ──
   // Queue of OCR'd invoice drafts for the active client. Persisted into
   // the per-client config under 'ocrDrafts'. Item shape:
@@ -3194,194 +3184,6 @@ function App(){
     return best && best.score>=0.5 ? best : null;
   },[customers,activeClientId]);
 
-  // Open the invoice-creator modal pre-filled from a revenue row.
-  const openInvoiceCreator=useCallback((txn)=>{
-    const c=clients.find(x=>x.id===activeClientId);
-    const orgId=c && c.zohoOrgId;
-    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
-    if(!txn.contactName){ alert("Pick a customer for this row first, or use the OCR upload inside the modal to auto-detect from a copy of the invoice."); return; }
-    loadZohoTaxes();
-    const customerIds = getClientData(activeClientId,'customerIds',{}) || {};
-    const customerId = customerIds[txn.contactName] || "";
-    const amount = Number(txn.credit||0);
-    const isoDate = (()=>{ const s=(txn.date||'').replace(/\//g,'-').trim(); const m=s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/); if(m){ const pad=(n)=>n.length<2?"0"+n:n; return m[3]+'-'+pad(m[2])+'-'+pad(m[1]); } return s; })();
-    setInvoiceCreatorRow(txn);
-    setInvoiceCreatorForm({
-      customerId,
-      customerName: txn.contactName,
-      customerTrn: "",
-      needsCustomerCreate: !customerId,
-      invoiceNumber: "",
-      date: isoDate || new Date().toISOString().slice(0,10),
-      dueDate: isoDate || new Date().toISOString().slice(0,10),
-      // Multi-line items. First row pre-filled with the bank-statement
-      // description + amount; user can add/remove rows.
-      lineItems: [{
-        description: txn.description||"",
-        accountId: defaultSalesAccount?.id || "",
-        accountName: defaultSalesAccount?.name || "",
-        rate: amount,
-        quantity: 1
-      }],
-      vatPercent: 5, // UAE standard-rate default
-      taxId: "",
-      notes: "",
-      // OCR state
-      ocrLoading: false,
-      ocrError: "",
-      ocrConfidence: null,
-      ocrSource: "" // 'file' once OCR populates fields
-    });
-    setInvoiceCreatorError("");
-    setInvoiceCreatorOpen(true);
-  },[clients,activeClientId,defaultSalesAccount,loadZohoTaxes]);
-
-  // Handle a user-supplied invoice file (PDF / image). Calls invoiceOcr,
-  // matches the customer via fuzzy lookup, applies extracted fields onto
-  // the invoice-creator form. Existing form values are overwritten only
-  // when the OCR returns something non-empty.
-  const handleInvoiceOcrFile = useCallback(async (file)=>{
-    if(!file || !invoiceCreatorForm) return;
-    if(file.size > 10*1024*1024){ alert("File is larger than 10 MB. Compress it or split into pages."); return; }
-    setInvoiceCreatorForm(prev=>({...prev,ocrLoading:true,ocrError:""}));
-    try {
-      const b64 = await new Promise((resolve,reject)=>{
-        const r = new FileReader();
-        r.onload = ()=>resolve(String(r.result||''));
-        r.onerror = ()=>reject(new Error('Could not read the file.'));
-        r.readAsDataURL(file);
-      });
-      const res = await window.invoiceOcr(b64, file.type);
-      // Pick the customer name on the invoice. AnalyzeExpense calls the
-      // issuer VENDOR_NAME — in our world, the issuer IS our user's
-      // customer. (Our user is doing accounting for the receiver.)
-      const ocrCustomerName = (res.vendor_name||'').trim();
-      const matched = ocrCustomerName ? findCustomerMatch(ocrCustomerName) : null;
-      // Build line items from OCR. Fallback to a single line carrying the
-      // total if Textract returned nothing usable.
-      let lineItems = (res.line_items||[]).filter(l => (l.description||'').trim() && Number(l.amount||0)>0)
-        .map(l=>({
-          description: l.description.trim(),
-          accountId: defaultSalesAccount?.id || "",
-          accountName: defaultSalesAccount?.name || "",
-          rate: Number(l.rate || (l.amount/(l.quantity||1)) || 0),
-          quantity: Number(l.quantity||1)
-        }));
-      if(lineItems.length===0){
-        const total = Number(res.subtotal||res.total||0);
-        if(total>0) lineItems = [{
-          description: ocrCustomerName ? `Sales — ${ocrCustomerName}` : "Sales",
-          accountId: defaultSalesAccount?.id || "",
-          accountName: defaultSalesAccount?.name || "",
-          rate: total,
-          quantity: 1
-        }];
-      }
-      const vat = res.vat_percent != null
-        ? (Number(res.vat_percent)>=2.5 ? 5 : 0)
-        : (Number(res.tax||0) > 0 ? 5 : 0);
-      setInvoiceCreatorForm(prev=>({
-        ...prev,
-        customerName: matched ? matched.name : (ocrCustomerName || prev.customerName),
-        customerId: matched ? matched.customerId : "",
-        needsCustomerCreate: !(matched && matched.customerId),
-        customerTrn: res.vendor_trn || prev.customerTrn,
-        invoiceNumber: res.invoice_number || prev.invoiceNumber,
-        date: res.invoice_date || prev.date,
-        dueDate: res.due_date || prev.dueDate,
-        lineItems: lineItems.length>0 ? lineItems : prev.lineItems,
-        vatPercent: vat,
-        taxId: "",
-        ocrLoading: false,
-        ocrError: "",
-        ocrConfidence: Math.round(Number(res.vendor_confidence||0)),
-        ocrSource: 'file',
-        ocrMatchedCustomer: matched ? { name: matched.name, score: matched.score, hasId: !!matched.customerId } : null
-      }));
-    } catch(e){
-      setInvoiceCreatorForm(prev=>prev?{...prev,ocrLoading:false,ocrError:e.message||String(e)}:prev);
-    }
-  },[invoiceCreatorForm,findCustomerMatch,defaultSalesAccount]);
-
-  // Submit the invoice creator. Creates the customer if needed, then the
-  // invoice, then links the new invoice_id back onto the bank row so the
-  // eventual Push to Zoho will apply this payment against the new invoice.
-  const submitInvoiceCreator=useCallback(async ()=>{
-    if(!invoiceCreatorForm || invoiceCreatorSubmitting) return;
-    const f = invoiceCreatorForm;
-    const row = invoiceCreatorRow;
-    const c=clients.find(x=>x.id===activeClientId);
-    const orgId=c && c.zohoOrgId;
-    if(!orgId){ setInvoiceCreatorError("Client is not linked to Zoho."); return; }
-    if(!f.customerName.trim()){ setInvoiceCreatorError("Customer name required."); return; }
-    const lines = (f.lineItems||[]).filter(l => (l.description||'').trim() && Number(l.rate||0)>0 && l.accountId);
-    if(lines.length===0){ setInvoiceCreatorError("Add at least one line item with description, amount and account."); return; }
-
-    setInvoiceCreatorSubmitting(true);
-    setInvoiceCreatorError("");
-    try {
-      // 1) Create customer if we don't have a Zoho id yet.
-      let customerId = f.customerId;
-      if(!customerId){
-        const res = await window.zohoCreateCustomer(orgId, {
-          contact_name: f.customerName.trim(),
-          trn: f.customerTrn ? f.customerTrn.trim() : undefined,
-          country_code: 'AE',
-          currency_code: 'AED'
-        });
-        customerId = res.id;
-        // Persist into per-client config so future runs see it.
-        const cur = getClientData(activeClientId,'customerIds',{}) || {};
-        cur[res.name||f.customerName.trim()] = customerId;
-        setClientData(activeClientId,'customerIds',cur);
-        // And drop into local customers list for the dropdowns.
-        setCustomers(prev => prev.includes(f.customerName.trim()) ? prev : [...prev, f.customerName.trim()]);
-      }
-      // 2) Resolve the tax id. Either the user picked one explicitly, or
-      //    we map by VAT % against the loaded tax list (Zoho UAE returns
-      //    "Standard Rate" = 5%, "Zero Rated" = 0%, etc).
-      let taxId = f.taxId;
-      const vat = Number(f.vatPercent || 0);
-      if(!taxId){
-        const match = (zohoTaxes||[]).find(t => Number(t.percentage) === vat);
-        if(match) taxId = match.id;
-      }
-      // 3) Build the Zoho invoice body. UAE-specific fields included.
-      const line_items = lines.map(l => {
-        const item = {
-          name: l.description,
-          description: l.description,
-          account_id: l.accountId,
-          rate: Number(l.rate),
-          quantity: Number(l.quantity||1)
-        };
-        if(taxId) item.tax_id = taxId;
-        else if(vat>0) item.tax_percentage = vat;
-        return item;
-      });
-      const body = {
-        customer_id: customerId,
-        date: f.date,
-        due_date: f.dueDate || f.date,
-        tax_treatment: f.customerTrn ? 'vat_registered' : 'vat_not_registered',
-        place_of_supply: 'AE',
-        line_items,
-        notes: f.notes || ""
-      };
-      if(f.invoiceNumber && f.invoiceNumber.trim()) body.invoice_number = f.invoiceNumber.trim();
-      // 4) Create the invoice and link it onto the bank row.
-      const res = await window.zohoCreateInvoice(orgId, body);
-      handleInvoiceChange(row.id, { invoice_id: res.id, invoice_number: res.invoice_number || f.invoiceNumber || '' });
-      // 5) Close the modal.
-      setInvoiceCreatorOpen(false);
-      setInvoiceCreatorRow(null);
-      setInvoiceCreatorForm(null);
-    } catch(e){
-      setInvoiceCreatorError(e.message || String(e));
-    } finally {
-      setInvoiceCreatorSubmitting(false);
-    }
-  },[invoiceCreatorForm,invoiceCreatorRow,invoiceCreatorSubmitting,clients,activeClientId,zohoTaxes,handleInvoiceChange]);
 
   // ═══════════ Invoice OCR pipeline (Revenue → Invoice OCR) ═══════════
   // Expand a FileList into individual processable files. ZIPs are opened
@@ -6277,7 +6079,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                           {t.invoiceId ? ("📎 "+t.invoiceNumber)
                             : t.revenueMode==="advance" ? ("⏳ Advance → "+(t.advanceLedger||"(pick ledger)"))
-                            : "Pick: invoice · advance · new invoice"}
+                            : "Pick: apply to invoice · advance"}
                         </span>
                         <span style={{color:"#777777",marginLeft:4}}>▾</span>
                       </div>
@@ -6301,12 +6103,14 @@ td,th{padding:8px 12px;vertical-align:middle}
                             <div style={{fontSize:9,color:"#777777",marginTop:2}}>{inv.date} · {inv.status}{inv.due_date?(" · due "+inv.due_date):""}</div>
                           </div>)}</div>;
                         })()}
-                        {/* Create-new-invoice action */}
+                        {/* Invoice missing? Route to the dedicated OCR module — invoice
+                            creation was removed from the bank workflow so there is a
+                            single validated path for creating revenue invoices. */}
                         <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#4D3FA0",borderTop:"1px solid #f0f0f4",borderBottom:"1px solid #f0f0f4",marginTop:2}}>2 · Invoice not in Zoho yet?</div>
-                        <div onClick={()=>{ setInvoicePickerOpen(p=>({...p,[t.id]:false})); openInvoiceCreator(t); }}
+                        <div onClick={()=>{ setInvoicePickerOpen(p=>({...p,[t.id]:false})); setView("clientDetail"); setClientDetailTab("revenue"); setRevenueSub("ocr"); }}
                           style={{padding:"8px 10px",fontSize:11,cursor:"pointer",color:"#4D3FA0",background:"rgba(105,88,194,0.04)",fontWeight:600}}>
-                          ➕ Create invoice in Zoho from this row…
-                          <div style={{fontSize:9,color:"#777777",marginTop:2,fontWeight:400}}>Builds a UAE-compliant invoice (5% VAT-aware) and links it back to this payment.</div>
+                          📤 Create it via Revenue → Invoice OCR
+                          <div style={{fontSize:9,color:"#777777",marginTop:2,fontWeight:400}}>Upload the customer's invoice there — it runs the full UAE validation before reaching Zoho. Come back here and Refresh to link it.</div>
                         </div>
                         {/* Advance / unapplied */}
                         <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#d97706",borderTop:"1px solid #f0f0f4",borderBottom:"1px solid #f0f0f4",marginTop:2}}>3 · No invoice — advance from customer</div>
@@ -6742,182 +6546,6 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>
         </div>}
 
-        {/* ═══════════════ Invoice creator modal (UAE-aware) ═══════════════ */}
-        {invoiceCreatorOpen && invoiceCreatorForm && (()=>{
-          const f = invoiceCreatorForm;
-          const set = (patch)=>setInvoiceCreatorForm(prev=>({...prev,...patch}));
-          const coa = chartOfAccounts || [];
-          // Sales-like accounts first.
-          const sortedAccts = [...coa].sort((a,b)=>{
-            const sa = /sales|service revenue|income|5%|standard\s*rat|taxable/i.test(a.name||'') ? 0 : 1;
-            const sb = /sales|service revenue|income|5%|standard\s*rat|taxable/i.test(b.name||'') ? 0 : 1;
-            if(sa!==sb) return sa-sb;
-            return (a.name||'').localeCompare(b.name||'');
-          });
-          const lines = f.lineItems || [];
-          const subTotal = lines.reduce((s,l)=>s+Number(l.rate||0)*Number(l.quantity||1),0);
-          const vatAmount = subTotal * Number(f.vatPercent||0) / 100;
-          const grandTotal = subTotal + vatAmount;
-          const updateLine = (i, patch)=> setInvoiceCreatorForm(prev=>{
-            const li = (prev.lineItems||[]).slice();
-            li[i] = { ...li[i], ...patch };
-            return { ...prev, lineItems: li };
-          });
-          const addLine = ()=> setInvoiceCreatorForm(prev=>({
-            ...prev,
-            lineItems: [...(prev.lineItems||[]), { description:"", accountId: defaultSalesAccount?.id||"", accountName: defaultSalesAccount?.name||"", rate:0, quantity:1 }]
-          }));
-          const removeLine = (i)=> setInvoiceCreatorForm(prev=>({
-            ...prev,
-            lineItems: (prev.lineItems||[]).filter((_,k)=>k!==i)
-          }));
-          return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-            <div style={{background:"#ffffff",borderRadius:12,maxWidth:820,width:"100%",maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
-              <div style={{padding:"18px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(105,88,194,0.04)"}}>
-                <div>
-                  <h3 style={{fontSize:15,fontWeight:700,color:"#1a1a2e"}}>Create invoice in Zoho — {f.customerName||"new invoice"}</h3>
-                  <div style={{fontSize:11,color:"#888888",marginTop:2}}>UAE Books · AED · VAT applied per line item</div>
-                </div>
-                <button onClick={()=>{ if(!invoiceCreatorSubmitting) setInvoiceCreatorOpen(false); }} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
-              </div>
-              <div style={{padding:"18px 22px",overflowY:"auto",flex:1,display:"flex",flexDirection:"column",gap:14}}>
-
-                {/* OCR drop zone — upload an invoice copy to auto-fill */}
-                <div onDragOver={(e)=>{e.preventDefault();e.currentTarget.style.borderColor="#4D3FA0";}}
-                  onDragLeave={(e)=>{e.currentTarget.style.borderColor="#c7c0e8";}}
-                  onDrop={(e)=>{e.preventDefault();e.currentTarget.style.borderColor="#c7c0e8";const file=e.dataTransfer.files&&e.dataTransfer.files[0];if(file)handleInvoiceOcrFile(file);}}
-                  style={{border:"2px dashed "+(f.ocrLoading?"#4D3FA0":f.ocrSource?"rgba(22,163,74,0.4)":"#c7c0e8"),borderRadius:10,padding:"14px 18px",background:f.ocrSource?"rgba(22,163,74,0.04)":"rgba(105,88,194,0.04)",cursor:"pointer",position:"relative"}}
-                  onClick={()=>{ const inp=document.getElementById('invoice-ocr-input'); if(inp) inp.click(); }}>
-                  <input id="invoice-ocr-input" type="file" accept="image/*,application/pdf" style={{display:"none"}} onChange={(e)=>{ const file = e.target.files && e.target.files[0]; if(file) handleInvoiceOcrFile(file); e.target.value=''; }} />
-                  <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-                    <div style={{fontSize:28}}>{f.ocrLoading?"⏳":f.ocrSource?"✓":"📄"}</div>
-                    <div style={{flex:1,minWidth:200}}>
-                      {f.ocrLoading
-                        ? <div style={{fontSize:13,color:"#4D3FA0",fontWeight:600}}>Reading invoice…</div>
-                        : f.ocrError
-                          ? <div><div style={{fontSize:13,color:"#dc2626",fontWeight:600}}>Could not read invoice</div><div style={{fontSize:11,color:"#dc2626"}}>{f.ocrError}</div></div>
-                          : f.ocrSource
-                            ? <div>
-                                <div style={{fontSize:13,color:"#16a34a",fontWeight:600}}>Invoice auto-filled · vendor confidence {f.ocrConfidence||"?"}%</div>
-                                {f.ocrMatchedCustomer && <div style={{fontSize:11,color:"#555555",marginTop:2}}>
-                                  Matched customer: <strong style={{color:"#0891b2"}}>{f.ocrMatchedCustomer.name}</strong> ({Math.round(f.ocrMatchedCustomer.score*100)}% match){f.ocrMatchedCustomer.hasId?" · already in Zoho":" · will be created"}
-                                </div>}
-                                <div style={{fontSize:10,color:"#888888",marginTop:3}}>Review the fields below — click anywhere to upload a different file.</div>
-                              </div>
-                            : <div>
-                                <div style={{fontSize:13,color:"#4D3FA0",fontWeight:600}}>📎 Drop the customer's invoice here</div>
-                                <div style={{fontSize:11,color:"#777777",marginTop:2}}>PDF, JPG, or PNG up to 10 MB. We'll read the vendor, dates, line items, totals, and TRN (if any).</div>
-                              </div>}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Customer */}
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-                  <div>
-                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Customer{f.needsCustomerCreate&&<span style={{color:"#d97706",marginLeft:6}}>↗ will be created in Zoho</span>}</label>
-                    <input type="text" value={f.customerName} onChange={(e)=>{ const v=e.target.value; const m=findCustomerMatch(v); set({customerName:v, customerId: m&&m.score>=0.85?m.customerId:"", needsCustomerCreate: !(m&&m.score>=0.85&&m.customerId)}); }} placeholder="Customer name" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} list="invoice-customer-list" />
-                    <datalist id="invoice-customer-list">{(customers||[]).map(c=><option key={c} value={c} />)}</datalist>
-                  </div>
-                  <div>
-                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Customer TRN (optional)</label>
-                    <input type="text" value={f.customerTrn} onChange={(e)=>set({customerTrn:e.target.value})} placeholder="15-digit VAT TRN" style={{width:"100%",padding:"8px 10px",border:"1px solid "+(f.customerTrn?"rgba(22,163,74,0.4)":"#e2e2ea"),borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
-                    <div style={{fontSize:9,color:"#888888",marginTop:3}}>Setting a TRN switches tax_treatment to <code>vat_registered</code>.</div>
-                  </div>
-                </div>
-
-                {/* Dates + invoice number */}
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
-                  <div>
-                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Invoice date</label>
-                    <input type="date" value={f.date} onChange={(e)=>set({date:e.target.value, dueDate:f.dueDate<e.target.value?e.target.value:f.dueDate})} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
-                  </div>
-                  <div>
-                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Due date</label>
-                    <input type="date" value={f.dueDate} onChange={(e)=>set({dueDate:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
-                  </div>
-                  <div>
-                    <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Invoice # (optional)</label>
-                    <input type="text" value={f.invoiceNumber} onChange={(e)=>set({invoiceNumber:e.target.value})} placeholder="auto" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,fontFamily:"'IBM Plex Mono',monospace"}} />
-                  </div>
-                </div>
-
-                {/* Line items — multi */}
-                <div style={{padding:14,background:"#f8f9fc",borderRadius:8,border:"1px solid #f0f0f4"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",letterSpacing:"0.04em",textTransform:"uppercase"}}>Line items</div>
-                    <div style={{fontSize:10,color:"#888888"}}>VAT applies to the whole invoice — set below</div>
-                  </div>
-                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                    {lines.map((l,i)=>(
-                      <div key={i} style={{padding:10,background:"#ffffff",border:"1px solid #f0f0f4",borderRadius:8}}>
-                        <div style={{display:"grid",gridTemplateColumns:"2fr 80px 1fr",gap:8}}>
-                          <div>
-                            <label style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Description</label>
-                            <input type="text" value={l.description} onChange={(e)=>updateLine(i,{description:e.target.value})} placeholder="e.g. Consulting fee — March 2026" style={{width:"100%",padding:"7px 9px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:12,marginTop:3}} />
-                          </div>
-                          <div>
-                            <label style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Qty</label>
-                            <input type="number" step="0.01" min="0" value={l.quantity} onChange={(e)=>updateLine(i,{quantity:e.target.value})} style={{width:"100%",padding:"7px 9px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
-                          </div>
-                          <div>
-                            <label style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Rate (AED, excl. VAT)</label>
-                            <input type="number" step="0.01" value={l.rate} onChange={(e)=>updateLine(i,{rate:e.target.value})} style={{width:"100%",padding:"7px 9px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
-                          </div>
-                        </div>
-                        <div style={{display:"grid",gridTemplateColumns:"3fr 100px 32px",gap:8,marginTop:8,alignItems:"end"}}>
-                          <div>
-                            <label style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Sales account (Chart of Accounts)</label>
-                            <select value={l.accountId} onChange={(e)=>{ const opt=sortedAccts.find(a=>a.id===e.target.value); updateLine(i,{accountId:e.target.value,accountName:opt?.name||""}); }} style={{width:"100%",padding:"7px 9px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:12,marginTop:3}}>
-                              <option value="">— Choose account —</option>
-                              {sortedAccts.map(a=><option key={a.id||a.name} value={a.id||""}>{a.name}{a.type?(" — "+a.type):""}</option>)}
-                            </select>
-                          </div>
-                          <div>
-                            <div style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Line total</div>
-                            <div style={{padding:"7px 9px",fontFamily:"'IBM Plex Mono',monospace",fontSize:12,color:"#1a1a2e",fontWeight:600}}>{fmt(Number(l.rate||0)*Number(l.quantity||1))}</div>
-                          </div>
-                          {lines.length>1 && <button onClick={()=>removeLine(i)} title="Remove line" style={{height:32,background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:5,color:"#dc2626",fontSize:14,cursor:"pointer"}}>✕</button>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <button onClick={addLine} style={{marginTop:10,background:"#ffffff",border:"1px dashed rgba(77,63,160,0.4)",borderRadius:6,padding:"6px 14px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer"}}>+ Add line item</button>
-                  <div style={{marginTop:14,padding:"10px 12px",background:"#ffffff",borderRadius:6,border:"1px solid #f0f0f4",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-                    <label style={{fontSize:11,color:"#888888"}}>VAT applied to whole invoice:</label>
-                    <select value={f.vatPercent} onChange={(e)=>{ const v=Number(e.target.value); const match=(zohoTaxes||[]).find(t=>Number(t.percentage)===v); set({vatPercent:v,taxId:match?match.id:""}); }} style={{padding:"6px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11}}>
-                      <option value="5">5% — Standard Rate</option>
-                      <option value="0">0% — Zero Rated / Exempt</option>
-                    </select>
-                    <span style={{fontSize:10,color:"#888888"}}>{zohoTaxesLoading?"Loading taxes…":zohoTaxes.length>0?("Tax: "+(zohoTaxes.find(t=>Number(t.percentage)===Number(f.vatPercent))?.name||"(none)")):"Tax list fetches on submit."}</span>
-                  </div>
-                </div>
-
-                {/* Totals */}
-                <div style={{padding:"10px 14px",background:"rgba(22,163,74,0.04)",border:"1px solid rgba(22,163,74,0.18)",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,color:"#555555",flexWrap:"wrap",gap:8}}>
-                  <span>Subtotal: <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(subTotal)}</strong></span>
-                  <span>VAT ({f.vatPercent}%): <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(vatAmount)}</strong></span>
-                  <span style={{fontSize:13}}>Total: <strong style={{color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(grandTotal)}</strong></span>
-                </div>
-
-                {/* Notes */}
-                <div>
-                  <label style={{fontSize:10,fontWeight:600,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Notes (optional)</label>
-                  <textarea value={f.notes} onChange={(e)=>set({notes:e.target.value})} rows={2} style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4,resize:"vertical",fontFamily:"inherit"}} placeholder="Anything to show on the printed invoice…" />
-                </div>
-
-                {invoiceCreatorError && <div style={{padding:"10px 12px",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.25)",borderRadius:6,color:"#dc2626",fontSize:12}}>{invoiceCreatorError}</div>}
-              </div>
-              <div style={{padding:"14px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
-                <div style={{fontSize:10,color:"#888888"}}>This will {f.needsCustomerCreate?"create the customer and the invoice in Zoho.":"create only the invoice in Zoho."} Reverting is possible from the push report.</div>
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>setInvoiceCreatorOpen(false)} disabled={invoiceCreatorSubmitting} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"8px 16px",color:"#1a1a2e",fontSize:12,fontWeight:600,cursor:invoiceCreatorSubmitting?"default":"pointer"}}>Cancel</button>
-                  <button onClick={submitInvoiceCreator} disabled={invoiceCreatorSubmitting} style={{background:invoiceCreatorSubmitting?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:12,fontWeight:700,cursor:invoiceCreatorSubmitting?"default":"pointer"}}>{invoiceCreatorSubmitting?"Creating…":"Create invoice"}</button>
-                </div>
-              </div>
-            </div>
-          </div>;
-        })()}
 
         {/* ═══════════════ BILL ENTRY MODE — disabled in this build ═══════════════ */}
         {false&&appMode==="bills"&&isPaid&&(<div style={{display:"flex",flexDirection:"column",gap:20}}>
