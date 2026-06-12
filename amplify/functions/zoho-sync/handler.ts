@@ -454,10 +454,32 @@ export const handler = async (event: Event) => {
       let p: any;
       try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
       if (!p.contact_name) return JSON.stringify({ error: 'contact_name is required' });
+      // Resolve currency_id from currency_code. Zoho's Contact API
+      // silently ignores currency_code when no currency_id is supplied
+      // and falls back to the org's base currency — that's why USD
+      // invoices were creating AED contacts. Fetch the org's enabled
+      // currencies and map the code; fail loudly if the currency isn't
+      // enabled so the user knows to add it in Zoho first.
+      const wantedCode = (p.currency_code || 'AED').toUpperCase();
+      let resolvedCurrencyId: string | null = null;
+      try {
+        const curList = await zohoGet('settings/currencies', accessToken, region, { organization_id: orgId! });
+        const all = (curList?.currencies || []) as any[];
+        const hit = all.find(c => String(c.currency_code || '').toUpperCase() === wantedCode);
+        if (hit) resolvedCurrencyId = String(hit.currency_id);
+        else {
+          const enabled = all.map(c => c.currency_code).join(', ');
+          throw new Error(`Currency ${wantedCode} is not enabled in this Zoho organisation. Enabled: ${enabled || '(none)'}. Add it in Zoho → Settings → Currencies, then retry.`);
+        }
+      } catch (e: any) {
+        // Hard fail — otherwise Zoho silently downgrades to AED.
+        return JSON.stringify({ error: e?.message || String(e) });
+      }
       const body: any = {
         contact_name: p.contact_name,
         contact_type: 'customer',
-        currency_code: p.currency_code || 'AED'
+        currency_id: resolvedCurrencyId,
+        currency_code: wantedCode
       };
       if (p.email) body.email = p.email;
       if (p.phone) body.phone = p.phone;
