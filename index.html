@@ -1794,12 +1794,12 @@ function alNameSimilarity(a,b){
 }
 
 function alValidateOcrInvoice(item, ctx){
-  // item: the OCR result + any user edits (customerName, invoiceNumber,
-  //       date, subtotal, tax, total, currency, lineItems, receiverName,
-  //       receiverTrn, docType, isInvoice, isCreditNote, confidences, vatFlags)
-  // ctx:  { project: {legalName, tradeName, trn, currency},
-  //         customers: [names], zohoDupMatches: [], localDupKeys: Set,
-  //         fx: { rate, source, error } | null }
+  // For a REVENUE invoice the project is the supplier (issuer) and the
+  // customer is the receiver (bill-to). Fields used:
+  //   item.supplierName  — issuer of the invoice == this project
+  //   item.supplierTrn   — issuer's TRN          == this project's TRN
+  //   item.customerName  — recipient             == Zoho customer
+  //   item.customerTrn   — recipient's TRN       (optional, sets tax_treatment)
   const out=[];
   const push=(key,label,status,message)=>out.push({key,label,status,message});
 
@@ -1812,36 +1812,36 @@ function alValidateOcrInvoice(item, ctx){
     push('classification','Document type','pass','Detected: '+(item.docType||'invoice').replace(/_/g,' ')+'.');
   }
 
-  // 2 · Project ownership (receiver vs project legal/trade name)
+  // 2 · Project ownership — supplier (issuer) name must match the project
   const projNames=[ctx.project.legalName, ctx.project.tradeName].filter(Boolean);
   if(projNames.length===0){
     push('ownership','Project match','warn','No legal/trade name configured in Settings — ownership could not be verified.');
-  } else if(!item.receiverName){
-    push('ownership','Project match','warn','No Bill-To / receiver name detected on the invoice.');
+  } else if(!item.supplierName){
+    push('ownership','Project match','warn','No supplier name detected on the invoice.');
   } else {
-    const best=Math.max(...projNames.map(n=>alNameSimilarity(n,item.receiverName)));
-    if(best>=0.85) push('ownership','Project match','pass','Receiver "'+item.receiverName+'" matches the project ('+Math.round(best*100)+'%).');
-    else push('ownership','Project match','fail','This invoice does not appear to belong to the selected project. Receiver: "'+item.receiverName+'" — best match '+Math.round(best*100)+'%.');
+    const best=Math.max(...projNames.map(n=>alNameSimilarity(n,item.supplierName)));
+    if(best>=0.85) push('ownership','Project match','pass','Supplier "'+item.supplierName+'" matches the project ('+Math.round(best*100)+'%).');
+    else push('ownership','Project match','fail','This invoice does not appear to belong to the selected project. Supplier on invoice: "'+item.supplierName+'" — best match '+Math.round(best*100)+'%.');
   }
 
-  // 3 · Project TRN (mandatory when configured)
+  // 3 · Project TRN — must match the SUPPLIER TRN (the project is the issuer)
   if(!ctx.project.trn){
     push('trn','Project TRN','warn','No TRN configured for this project in Settings — TRN check skipped.');
-  } else if(!item.receiverTrn){
-    push('trn','Project TRN','fail','Customer VAT TRN could not be identified on the uploaded invoice. Project VAT TRN could not be verified.');
-  } else if(item.receiverTrn!==ctx.project.trn){
-    push('trn','Project TRN','fail','Customer VAT TRN identified on invoice does not match the VAT TRN configured for this project. Expected: '+ctx.project.trn+' · Detected: '+item.receiverTrn+'.');
+  } else if(!item.supplierTrn){
+    push('trn','Project TRN','fail','Supplier TRN could not be identified on the uploaded invoice. Project VAT TRN could not be verified.');
+  } else if(item.supplierTrn!==ctx.project.trn){
+    push('trn','Project TRN','fail','Supplier TRN on invoice does not match the VAT TRN configured for this project. Expected: '+ctx.project.trn+' · Detected: '+item.supplierTrn+'.');
   } else {
-    push('trn','Project TRN','pass','TRN '+item.receiverTrn+' matches the project.');
+    push('trn','Project TRN','pass','TRN '+item.supplierTrn+' matches the project.');
   }
 
   // 4 · UAE tax-invoice compliance — mandatory fields
   const missing=[];
-  if(!item.customerName) missing.push('Supplier Name');
+  if(!item.supplierName) missing.push('Supplier Name');
   if(!item.supplierTrn) missing.push('Supplier TRN');
   if(!item.invoiceNumber) missing.push('Invoice Number');
   if(!item.date) missing.push('Invoice Date');
-  if(!item.receiverName) missing.push('Customer Name');
+  if(!item.customerName) missing.push('Customer Name');
   if(!(Number(item.subtotal)>0)) missing.push('Taxable Amount');
   if(item.tax==null||item.tax==='') missing.push('VAT Amount');
   if(!(Number(item.total)>0)) missing.push('Total Amount');
@@ -3285,11 +3285,13 @@ function App(){
         const ocr=await window.invoiceOcr(b64,f.type);
         let item={
           id, fileName:f.name, uploadedAt:Date.now(),
-          // The supplier on the invoice == our user's CUSTOMER.
-          customerName:(ocr.vendor_name||'').trim(),
+          // Revenue invoice direction: the issuer (Textract VENDOR_*) is
+          // the SUPPLIER == this project. The receiver (Textract
+          // RECEIVER_*) is the CUSTOMER we're invoicing.
+          supplierName:(ocr.vendor_name||'').trim(),
           supplierTrn: ocr.vendor_trn||'',
-          receiverName:(ocr.receiver_name||'').trim(),
-          receiverTrn: ocr.receiver_trn||'',
+          customerName:(ocr.receiver_name||'').trim(),
+          customerTrn: ocr.receiver_trn||'',
           invoiceNumber: ocr.invoice_number||'',
           date: ocr.invoice_date||'',
           dueDate: ocr.due_date||'',
@@ -5056,16 +5058,16 @@ td,th{padding:8px 12px;vertical-align:middle}
                             </div>; })()}
                           <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em"}}>OCR extraction (edit to correct)</div>
                           {[
-                            {k:'customerName',l:'Customer (supplier on invoice)',list:true},
-                            {k:'invoiceNumber',l:'Invoice number',mono:true},
-                            {k:'date',l:'Invoice date',type:'date'},
+                            {k:'supplierName',l:'Supplier',confKey:'vendor'},
+                            {k:'supplierTrn',l:'Supplier TRN',mono:true},
+                            {k:'invoiceNumber',l:'Invoice number',mono:true,confKey:'invoice_number'},
+                            {k:'date',l:'Invoice date',type:'date',confKey:'date'},
                             {k:'dueDate',l:'Due date',type:'date'},
-                            {k:'receiverName',l:'Bill To / receiver (should be this project)'},
-                            {k:'receiverTrn',l:'Receiver TRN (validated against project TRN)',mono:true},
-                            {k:'supplierTrn',l:'Supplier TRN (customer’s TRN)',mono:true},
+                            {k:'customerName',l:'Invoice to (customer)',list:true,confKey:'receiver'},
+                            {k:'customerTrn',l:'Customer TRN (optional)',mono:true},
                           ].map(fdef=>(
                             <div key={fdef.k}>
-                              <label style={{fontSize:10,color:"#888888"}}>{fdef.l}{q.confidences&&q.confidences[fdef.k==='customerName'?'vendor':fdef.k==='receiverName'?'receiver':fdef.k==='invoiceNumber'?'invoice_number':fdef.k==='date'?'date':'']!=null?(" · conf "+Math.round(q.confidences[fdef.k==='customerName'?'vendor':fdef.k==='receiverName'?'receiver':fdef.k==='invoiceNumber'?'invoice_number':'date']||0)+"%"):""}</label>
+                              <label style={{fontSize:10,color:"#888888"}}>{fdef.l}{fdef.confKey && q.confidences && q.confidences[fdef.confKey]!=null?(" · conf "+Math.round(q.confidences[fdef.confKey])+"%"):""}</label>
                               <input type={fdef.type||'text'} value={q[fdef.k]||''} onChange={(e)=>setQ({[fdef.k]:e.target.value})} list={fdef.list?'rev-ocr-customer-list':undefined} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:fdef.mono?"'IBM Plex Mono',monospace":"inherit"}} />
                             </div>
                           ))}

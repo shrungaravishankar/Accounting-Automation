@@ -189,8 +189,21 @@ export const handler = async (event: Event) => {
     // VAT percent — Textract gives us the TAX amount, not the rate. Derive
     // from total/subtotal when possible. For UAE this usually rounds to 5.
     let vatPercent: number | null = null;
-    const subtotalN = parseAmount(subtotal?.value);
+    let subtotalN = parseAmount(subtotal?.value);
     const taxN = parseAmount(tax?.value);
+    const totalN = parseAmount(total?.value);
+    // Reconciliation: when Textract returns a subtotal that clearly does not
+    // match total/VAT (busy invoice layouts often grab a stray figure from
+    // another column), prefer total − VAT. Threshold: ≥ AED 1 OR 5 % of total.
+    if (totalN > 0 && taxN >= 0) {
+      const expected = subtotalN + taxN;
+      const drift = Math.abs(expected - totalN);
+      const tolerance = Math.max(1, totalN * 0.05);
+      if (subtotalN <= 0 || drift > tolerance) {
+        const derived = totalN - taxN;
+        if (derived > 0) subtotalN = Math.round(derived * 100) / 100;
+      }
+    }
     if (subtotalN > 0 && taxN > 0) {
       const pct = (taxN / subtotalN) * 100;
       vatPercent = Math.round(pct * 100) / 100;
