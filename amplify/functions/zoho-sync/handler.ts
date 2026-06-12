@@ -448,7 +448,7 @@ export const handler = async (event: Event) => {
     // mobile?, gst_treatment?, trn? }. Used by the Revenue flow when a
     // bank-statement row references a customer that doesn't exist yet in
     // Zoho. UAE-specific: VAT/TRN goes onto the contact via tax_treatment
-    // = 'vat_registered' / 'non_vat_registered' and trn field.
+    // = 'vat_registered' / 'vat_not_registered' and trn field.
     if (kind === 'createCustomer') {
       const payloadStr = event.arguments?.payload || '';
       let p: any;
@@ -465,7 +465,7 @@ export const handler = async (event: Event) => {
         body.tax_treatment = 'vat_registered';
         body.tax_reg_no = p.trn;
       } else {
-        body.tax_treatment = p.tax_treatment || 'non_vat_registered';
+        body.tax_treatment = p.tax_treatment || 'vat_not_registered';
       }
       if (p.country_code) body.country_code = p.country_code;
       // Billing / shipping address — Zoho stores them as structured

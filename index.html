@@ -1796,17 +1796,19 @@ function saveRefDB(db) {
   try { localStorage.setItem("autoledger_refdb", JSON.stringify(db)); } catch(e) {}
 }
 
-// UAE emirate names that Zoho UAE displays in its own Place-of-Supply
-// dropdown — strings here mirror Zoho's UI exactly (note lowercase
-// "al-" in Ras al-Khaimah / Umm al-Quwain).
+// Zoho UAE's API uses 2-letter emirate codes for `place_of_supply`
+// (confirmed by reading back a stored invoice from Z2 Tech LLC — Zoho
+// returned place_of_supply="DU" even though its UI dropdown shows
+// "Dubai"). The `label` is for our review-modal UI; `code` is what gets
+// sent to Zoho.
 const AL_UAE_EMIRATES = [
-  { code: 'Abu Dhabi',      label: 'Abu Dhabi' },
-  { code: 'Dubai',          label: 'Dubai' },
-  { code: 'Sharjah',        label: 'Sharjah' },
-  { code: 'Ajman',          label: 'Ajman' },
-  { code: 'Umm al-Quwain',  label: 'Umm al-Quwain' },
-  { code: 'Ras al-Khaimah', label: 'Ras al-Khaimah' },
-  { code: 'Fujairah',       label: 'Fujairah' }
+  { code: 'AB', label: 'Abu Dhabi' },
+  { code: 'DU', label: 'Dubai' },
+  { code: 'SH', label: 'Sharjah' },
+  { code: 'AJ', label: 'Ajman' },
+  { code: 'UM', label: 'Umm al-Quwain' },
+  { code: 'RA', label: 'Ras al-Khaimah' },
+  { code: 'FU', label: 'Fujairah' }
 ];
 
 // Map a customer address blob to a UAE Emirate code that Zoho's UAE
@@ -1818,13 +1820,13 @@ const AL_UAE_EMIRATES = [
 function alDetectEmirate(addr){
   const a = (addr||'').toLowerCase();
   if (!a) return null;
-  if (/\babu\s*dhabi\b|adgm|saadiyat|yas\s*island|khalifa\s*city|musaffah|reem\s*island|al\s*ain\b/.test(a)) return 'Abu Dhabi';
-  if (/\bdubai\b|jumeirah|\bjbr\b|\bjlt\b|business\s*bay|downtown\s*dubai|deira|bur\s*dubai|al\s*barsha|tecom|dafza|jafza|dubai\s*marina|jvc|jumeirah\s*village|al\s*quoz/.test(a)) return 'Dubai';
-  if (/\bsharjah\b|hamriyah|saif\s*zone/.test(a)) return 'Sharjah';
-  if (/\bajman\b/.test(a)) return 'Ajman';
-  if (/\bfujairah\b/.test(a)) return 'Fujairah';
-  if (/ras\s*al\s*khaimah|\brak\b/.test(a)) return 'Ras al-Khaimah';
-  if (/umm\s*al\s*quwain|\buaq\b/.test(a)) return 'Umm al-Quwain';
+  if (/\babu\s*dhabi\b|adgm|saadiyat|yas\s*island|khalifa\s*city|musaffah|reem\s*island|al\s*ain\b/.test(a)) return 'AB';
+  if (/\bdubai\b|jumeirah|\bjbr\b|\bjlt\b|business\s*bay|downtown\s*dubai|deira|bur\s*dubai|al\s*barsha|tecom|dafza|jafza|dubai\s*marina|jvc|jumeirah\s*village|al\s*quoz/.test(a)) return 'DU';
+  if (/\bsharjah\b|hamriyah|saif\s*zone/.test(a)) return 'SH';
+  if (/\bajman\b/.test(a)) return 'AJ';
+  if (/\bfujairah\b/.test(a)) return 'FU';
+  if (/ras\s*al\s*khaimah|\brak\b/.test(a)) return 'RA';
+  if (/umm\s*al\s*quwain|\buaq\b/.test(a)) return 'UM';
   return null;
 }
 
@@ -3612,22 +3614,19 @@ function App(){
         const placeOfSupply = item.placeOfSupply
           || (alResolvePlaceOfSupply({customerAddress:item.customerAddress,customerTrn:item.customerTrn,supplierEmirate})||{}).code
           || supplierEmirate
-          || 'Dubai';
+          || 'DU';
         const body={
           customer_id:custId,
           date:item.date,
           due_date:item.dueDate||item.date,
           invoice_number:item.invoiceNumber,
-          // tax_treatment is INHERITED from the Zoho contact record — every
-          // contact in UAE edition already has one set (vat_registered /
-          // vat_not_registered / non_gcc / dz_* / gcc_* depending on how
-          // the contact was created). Sending tax_treatment on the invoice
-          // payload fights the saved value and Zoho rejects with "Invalid
-          // value passed for tax_treatment [zoho code 2]" whenever our
-          // guess (TRN-yes/no) disagrees with what the contact actually is
-          // (e.g. ATCOM is set up as 'non_gcc' because its base currency
-          // is USD even though the address is Dubai). Don't second-guess
-          // the contact — let Zoho derive it.
+          // tax_treatment follows the CUSTOMER's TRN status. Ground truth
+          // from Zoho UAE (read back from a real Z2 Tech invoice):
+          //   has TRN → 'vat_registered'
+          //   no TRN  → 'vat_not_registered'
+          // 'non_vat_registered' is NOT a valid Zoho enum — sending it
+          // returned "Invalid value passed for tax_treatment [zoho code 2]".
+          tax_treatment: item.customerTrn ? 'vat_registered' : 'vat_not_registered',
           place_of_supply: placeOfSupply,
           line_items:lines,
           notes:'Imported via AutoLedger OCR — source file: '+item.fileName
