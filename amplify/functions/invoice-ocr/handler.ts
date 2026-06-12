@@ -351,6 +351,31 @@ export const handler = async (event: Event) => {
     if (/designated\s*zone/i.test(corpus)) vatFlags.push('designated_zone');
     if (/exempt/i.test(corpus)) vatFlags.push('exempt');
 
+    // ---- Corporate Tax (CT) TRN misuse detection ----
+    // UAE FTA issues two separate registration numbers: a VAT TRN (only
+    // for VAT-registered entities) and a CT TRN (Corporate Tax, issued
+    // to most businesses regardless of VAT status). Some clients print
+    // the CT TRN on their sales invoices as an identifier — this is
+    // incorrect, because:
+    //   • Tax invoices may only show a VAT TRN, and only when the issuer
+    //     is VAT-registered.
+    //   • A CT TRN on the invoice does NOT make the supplier/customer
+    //     VAT-registered; the receiver cannot reclaim VAT against it.
+    // We detect a CT-TRN label here and surface a flag. When the label
+    // present is CT only (no VAT TRN label), we also null the picked-up
+    // 15-digit TRNs so the invoice is processed as if neither party
+    // were VAT-registered (booked as Sales without VAT TRN).
+    const hasCtTrnLabel = /\b(?:ct[\s\-_]*trn|corporate[\s\-_]*tax(?:[\s\-_]*trn|[\s\-_]*registration)?|trn\s*\(\s*ct\s*\)|tax\s*registration\s*number\s*\(\s*(?:ct|corporate))/i.test(corpus);
+    const hasVatTrnLabel = /\b(?:vat[\s\-_]*trn|trn\s*\(\s*vat\s*\)|vat\s*registration\s*(?:no\.?|number))/i.test(corpus);
+    if (hasCtTrnLabel) {
+      vatFlags.push('ct_trn_on_document');
+      if (!hasVatTrnLabel) {
+        vatFlags.push('ct_trn_only');
+        vendorTrn = null;
+        receiverTrn = null;
+      }
+    }
+
     return JSON.stringify({
       error: null,
       // The vendor on the invoice is the *issuer* (the AutoLedger user's customer);

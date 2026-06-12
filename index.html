@@ -2098,9 +2098,25 @@ function alValidateOcrInvoice(item, ctx){
   else if(mids.length>0) push('confidence','OCR confidence','warn','Needs review — medium confidence on: '+mids.join(', ')+'.');
   else push('confidence','OCR confidence','pass','All extracted fields ≥90% confidence.');
 
-  // 15 · VAT intelligence
-  if((item.vatFlags||[]).length>0){
-    push('vatintel','VAT treatment hints','warn','Detected: '+(item.vatFlags||[]).map(f=>f.replace(/_/g,' ')).join(', ')+' — confirm VAT treatment before pushing.');
+  // 15 · Corporate Tax (CT) TRN misuse — dedicated, prominent warning
+  // because clients often print the CT TRN on their sales invoices as
+  // a generic identifier, which is incorrect under UAE FTA rules.
+  const flags = item.vatFlags||[];
+  const ctOnDoc = flags.includes('ct_trn_on_document');
+  const ctOnly = flags.includes('ct_trn_only');
+  if(ctOnDoc){
+    const base = 'Corporate Tax (CT) TRN appears on this invoice as an identifier. CT TRN is NOT a VAT identifier and must not be printed on tax invoices — only the VAT TRN may be shown, and only when the issuer is VAT-registered. Please ask the client to remove the CT TRN from invoice templates.';
+    if(ctOnly){
+      push('cttrn','Corporate Tax TRN misuse','warn', base+' No VAT TRN label was found alongside the CT TRN, so this invoice is being booked as Sales with both supplier and customer treated as Non VAT Registered.');
+    } else {
+      push('cttrn','Corporate Tax TRN misuse','warn', base+' A VAT TRN label was also detected — verify the TRN captured above is the VAT TRN, not the CT TRN.');
+    }
+  }
+
+  // 16 · VAT intelligence (excludes CT-TRN flags, which have their own row above)
+  const intelFlags = flags.filter(f=>f!=='ct_trn_on_document' && f!=='ct_trn_only');
+  if(intelFlags.length>0){
+    push('vatintel','VAT treatment hints','warn','Detected: '+intelFlags.map(f=>f.replace(/_/g,' ')).join(', ')+' — confirm VAT treatment before pushing.');
   } else {
     push('vatintel','VAT treatment hints','pass','No special VAT indicators detected (standard domestic supply assumed).');
   }
