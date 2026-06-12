@@ -1796,11 +1796,9 @@ function saveRefDB(db) {
   try { localStorage.setItem("autoledger_refdb", JSON.stringify(db)); } catch(e) {}
 }
 
-// Canonical UAE emirate names that Zoho UAE editions accept verbatim
-// for the place_of_supply field on invoices. Strings here MUST match
-// Zoho's own dropdown — sending an ISO code (AE-DU etc.) returns
-// "Invalid value passed for place_of_supply [zoho code 2]". Casing of
-// "al-" in Ras al-Khaimah / Umm al-Quwain mirrors Zoho exactly.
+// UAE emirate names that Zoho UAE displays in its own Place-of-Supply
+// dropdown — strings here mirror Zoho's UI exactly (note lowercase
+// "al-" in Ras al-Khaimah / Umm al-Quwain).
 const AL_UAE_EMIRATES = [
   { code: 'Abu Dhabi',      label: 'Abu Dhabi' },
   { code: 'Dubai',          label: 'Dubai' },
@@ -5414,7 +5412,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                             </div>
                             <select value={q.placeOfSupply||''} onChange={(e)=>setQ({placeOfSupply:e.target.value,placeOfSupplyAuto:false,placeOfSupplyReason:'Manual override.'})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,background:"#ffffff"}}>
                               <option value="">— Choose emirate —</option>
-                              {AL_UAE_EMIRATES.map(em=><option key={em.code} value={em.code}>{em.label} ({em.code})</option>)}
+                              {AL_UAE_EMIRATES.map(em=><option key={em.code} value={em.code}>{em.label}</option>)}
                             </select>
                             {q.placeOfSupplyReason && <div style={{fontSize:10,color:"#666666",marginTop:5,lineHeight:1.5}}>{q.placeOfSupplyReason}</div>}
                           </div>

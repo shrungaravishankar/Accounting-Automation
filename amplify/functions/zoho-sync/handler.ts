@@ -531,7 +531,29 @@ export const handler = async (event: Event) => {
         if (p.currency_code !== undefined)   hints.push(`currency_code="${p.currency_code}"`);
         if (p.gst_treatment !== undefined)   hints.push(`gst_treatment="${p.gst_treatment}"`);
         if (p.vat_treatment !== undefined)   hints.push(`vat_treatment="${p.vat_treatment}"`);
-        const suffix = hints.length ? ' · sent: ' + hints.join(', ') : '';
+        let suffix = hints.length ? ' · sent: ' + hints.join(', ') : '';
+        // When Zoho rejects place_of_supply / tax_treatment, fetch the
+        // most recent existing invoice in the org and append the actual
+        // values it has stored — that's ground truth for what Zoho's API
+        // accepts for this organisation, no more guessing.
+        const msg = String(e?.message || '');
+        const wantsGroundTruth = /place_of_supply|tax_treatment|gst_treatment|vat_treatment/i.test(msg) || /\[zoho code (?:2|6|7)\]/.test(msg);
+        if (wantsGroundTruth) {
+          try {
+            const list = await zohoGet('invoices', accessToken, region, { organization_id: orgId!, per_page: '1', sort_column: 'date', sort_order: 'D' });
+            const recent = (list?.invoices || [])[0];
+            if (recent && recent.invoice_id) {
+              const full = await zohoGet(`invoices/${recent.invoice_id}`, accessToken, region, { organization_id: orgId! });
+              const inv = full?.invoice || {};
+              const truth: string[] = [];
+              if (inv.place_of_supply !== undefined) truth.push(`place_of_supply="${inv.place_of_supply}"`);
+              if (inv.tax_treatment !== undefined)   truth.push(`tax_treatment="${inv.tax_treatment}"`);
+              if (inv.gst_treatment !== undefined)   truth.push(`gst_treatment="${inv.gst_treatment}"`);
+              if (inv.vat_treatment !== undefined)   truth.push(`vat_treatment="${inv.vat_treatment}"`);
+              if (truth.length) suffix += ' · Zoho stores on a real invoice: ' + truth.join(', ');
+            }
+          } catch (_) { /* best-effort */ }
+        }
         console.error('[zoho-sync] createInvoice failed', { message: e?.message, payload: p });
         throw new Error((e?.message || String(e)) + suffix);
       }
