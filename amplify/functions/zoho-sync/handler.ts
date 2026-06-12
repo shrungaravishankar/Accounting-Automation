@@ -330,11 +330,19 @@ export const handler = async (event: Event) => {
         const m = blob.match(/\b1\d{14}\b/);
         trn = m ? m[0] : '';
       }
+      // Org address — used to infer the supplier's emirate so the
+      // frontend can default Place of Supply for B2C invoices.
+      const a = o.address || {};
+      const addressBlob = [a.address, a.street2, a.city, a.state, a.country].filter(Boolean).join(', ');
       return JSON.stringify({
         error: null,
         name: o.name || '',
         currency_code: o.currency_code || 'AED',
         trn,
+        address: addressBlob,
+        city: a.city || '',
+        state: a.state || '',
+        country: a.country || '',
         apiUsage: lastApiUsage
       });
     }

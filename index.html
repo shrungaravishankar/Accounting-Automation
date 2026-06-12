@@ -1002,7 +1002,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','ocrDrafts'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -1796,6 +1796,19 @@ function saveRefDB(db) {
   try { localStorage.setItem("autoledger_refdb", JSON.stringify(db)); } catch(e) {}
 }
 
+// Canonical UAE emirate codes used by Zoho UAE editions for the
+// place_of_supply field. Exposed here so the review-modal dropdown and
+// the push body stay in lock-step.
+const AL_UAE_EMIRATES = [
+  { code: 'AE-AZ', label: 'Abu Dhabi' },
+  { code: 'AE-DU', label: 'Dubai' },
+  { code: 'AE-SH', label: 'Sharjah' },
+  { code: 'AE-AJ', label: 'Ajman' },
+  { code: 'AE-UQ', label: 'Umm Al Quwain' },
+  { code: 'AE-RK', label: 'Ras Al Khaimah' },
+  { code: 'AE-FU', label: 'Fujairah' }
+];
+
 // Map a customer address blob to a UAE Emirate code that Zoho's UAE
 // edition expects on invoices (place_of_supply). Returns null when the
 // address doesn't look UAE — caller can fall back to the project's
@@ -1812,6 +1825,34 @@ function alDetectEmirate(addr){
   if (/\bfujairah\b/.test(a)) return 'AE-FU';
   if (/ras\s*al\s*khaimah|\brak\b/.test(a)) return 'AE-RK';
   if (/umm\s*al\s*quwain|\buaq\b/.test(a)) return 'AE-UQ';
+  return null;
+}
+
+// Determine the place of supply for a UAE revenue invoice per UAE VAT
+// Decree-Law No. 8 / Executive Reg. Article 27 — summarised:
+//   • B2B, customer VAT-registered in UAE → customer's emirate of
+//     establishment (where goods/services are received).
+//   • B2C UAE customer (no TRN) → supplier's emirate of establishment.
+//   • Customer outside the UAE → out of scope / zero-rated export; for
+//     Zoho UAE this still posts to the supplier's emirate.
+// Returns { code, reason } so the UI can explain the choice; null if no
+// emirate is configured anywhere (then the user must pick manually).
+function alResolvePlaceOfSupply(opts){
+  const customerAddr = opts && opts.customerAddress;
+  const customerTrn = opts && opts.customerTrn;
+  const supplierEmirate = opts && opts.supplierEmirate;
+  const customerEmirate = alDetectEmirate(customerAddr);
+  // B2B with UAE-registered customer: customer's emirate wins.
+  if (customerTrn && customerEmirate) {
+    return { code: customerEmirate, reason: 'Customer is VAT-registered in UAE — place of supply is the customer’s emirate (Art. 27).' };
+  }
+  // B2C: supplier's emirate.
+  if (!customerTrn && supplierEmirate) {
+    return { code: supplierEmirate, reason: 'Customer is not VAT-registered — place of supply is the supplier’s emirate.' };
+  }
+  // Mixed cases: address known but not the project's emirate.
+  if (customerEmirate) return { code: customerEmirate, reason: 'Inferred from customer billing address.' };
+  if (supplierEmirate) return { code: supplierEmirate, reason: 'Customer address unclear — falling back to the project’s emirate.' };
   return null;
 }
 
@@ -2755,6 +2796,7 @@ function App(){
           const prof = await window.zohoFetch('orgProfile', org.organization_id);
           if(prof && prof.name) setClientData(created.id,'legal_name',prof.name);
           if(prof) setClientData(created.id,'trn',prof.trn||'');
+          if(prof && prof.address) setClientData(created.id,'address',prof.address);
           setClientData(created.id,'currency','AED');
         } catch(_){}
         setZohoPickerOpen(false);
@@ -2792,6 +2834,7 @@ function App(){
         const prof = await window.zohoFetch('orgProfile', orgId);
         if(prof && prof.name) setClientData(activeClientId,'legal_name',prof.name);
         if(prof) setClientData(activeClientId,'trn',prof.trn||'');
+        if(prof && prof.address) setClientData(activeClientId,'address',prof.address);
         setClientData(activeClientId,'currency','AED');
       } catch(_){}
       alert('Synced from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
@@ -3315,7 +3358,20 @@ function App(){
     });
     const status = item.status==='Pushed To Zoho'||item.status==='Sent'||item.status==='Partially Paid'||item.status==='Paid'
       ? item.status : alOcrOverallStatus(validations);
-    return {...item, validations, status};
+    // Auto-refresh Place of Supply when the user is still letting the
+    // tool decide. A manual pick from the dropdown (placeOfSupplyAuto=false)
+    // is left alone.
+    let placeOfSupply = item.placeOfSupply;
+    let placeOfSupplyReason = item.placeOfSupplyReason;
+    if (item.placeOfSupplyAuto !== false) {
+      const r = alResolvePlaceOfSupply({
+        customerAddress: item.customerAddress,
+        customerTrn: item.customerTrn,
+        supplierEmirate: alDetectEmirate(getClientData(activeClientId,'address',''))
+      });
+      if (r) { placeOfSupply = r.code; placeOfSupplyReason = r.reason; }
+    }
+    return {...item, validations, status, placeOfSupply, placeOfSupplyReason};
   },[activeClientId,activeClientName,customers]);
 
   // Process a batch of files: each file is OCR'd, validated, and added to
@@ -3355,6 +3411,20 @@ function App(){
           customerName:(ocr.receiver_name||'').trim(),
           customerTrn: ocr.receiver_trn||'',
           customerAddress:(ocr.receiver_address||'').trim(),
+          // Place of supply — auto-detected per UAE VAT law (Art. 27).
+          // Recomputed any time the customer address / TRN changes, but
+          // the user can override it in the review modal.
+          placeOfSupply: (alResolvePlaceOfSupply({
+            customerAddress: (ocr.receiver_address||'').trim(),
+            customerTrn: ocr.receiver_trn||'',
+            supplierEmirate: alDetectEmirate(getClientData(activeClientId,'address',''))
+          })||{}).code || '',
+          placeOfSupplyReason: (alResolvePlaceOfSupply({
+            customerAddress: (ocr.receiver_address||'').trim(),
+            customerTrn: ocr.receiver_trn||'',
+            supplierEmirate: alDetectEmirate(getClientData(activeClientId,'address',''))
+          })||{}).reason || '',
+          placeOfSupplyAuto: true,
           invoiceNumber: ocr.invoice_number||'',
           date: ocr.invoice_date||'',
           dueDate: ocr.due_date||'',
@@ -3514,12 +3584,13 @@ function App(){
           if(taxMatch) li.tax_id=taxMatch.id; else if(vat>0) li.tax_percentage=vat;
           return li;
         });
-        // Place of supply is the CUSTOMER's emirate — Zoho UAE expects a
-        // 5-letter code (AE-DU, AE-AZ, …), not just 'AE'. Falls back to
-        // the project's own emirate when the customer address is missing
-        // or non-UAE; ultimately defaults to Dubai (the most common case).
-        const projEmirate = alDetectEmirate(getClientData(activeClientId,'address',''));
-        const placeOfSupply = alDetectEmirate(item.customerAddress) || projEmirate || 'AE-DU';
+        // Place of supply: respect the user's explicit pick from the
+        // review modal. Fall back to the UAE-VAT-law resolver if blank.
+        const supplierEmirate = alDetectEmirate(getClientData(activeClientId,'address',''));
+        const placeOfSupply = item.placeOfSupply
+          || (alResolvePlaceOfSupply({customerAddress:item.customerAddress,customerTrn:item.customerTrn,supplierEmirate})||{}).code
+          || supplierEmirate
+          || 'AE-DU';
         const body={
           customer_id:custId,
           date:item.date,
@@ -5299,6 +5370,24 @@ td,th{padding:8px 12px;vertical-align:middle}
                               })()}
                             </div>
                           ))}
+                          {/* Place of supply — auto-detected per UAE VAT Art. 27,
+                              overridable. Auto badge clears the moment the user
+                              picks manually; Auto-detect button restores it. */}
+                          <div style={{padding:"10px 12px",background:"rgba(105,88,194,0.04)",border:"1px solid rgba(105,88,194,0.15)",borderRadius:8}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,gap:8,flexWrap:"wrap"}}>
+                              <label style={{fontSize:10,fontWeight:600,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em"}}>Place of Supply (UAE) {q.placeOfSupplyAuto===false?<span style={{marginLeft:6,fontSize:9,color:"#d97706",fontWeight:600,textTransform:"none",letterSpacing:0}}>· manual</span>:<span style={{marginLeft:6,fontSize:9,color:"#16a34a",fontWeight:600,textTransform:"none",letterSpacing:0}}>· auto</span>}</label>
+                              <button onClick={()=>{
+                                const r=alResolvePlaceOfSupply({customerAddress:q.customerAddress,customerTrn:q.customerTrn,supplierEmirate:alDetectEmirate(getClientData(activeClientId,'address',''))});
+                                if(r) setQ({placeOfSupply:r.code,placeOfSupplyReason:r.reason,placeOfSupplyAuto:true});
+                                else alert("Couldn't infer — the customer address doesn't look UAE. Pick an emirate manually.");
+                              }} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:5,padding:"3px 10px",color:"#4D3FA0",fontSize:10,fontWeight:600,cursor:"pointer"}}>↻ Auto-detect</button>
+                            </div>
+                            <select value={q.placeOfSupply||''} onChange={(e)=>setQ({placeOfSupply:e.target.value,placeOfSupplyAuto:false,placeOfSupplyReason:'Manual override.'})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,background:"#ffffff"}}>
+                              <option value="">— Choose emirate —</option>
+                              {AL_UAE_EMIRATES.map(em=><option key={em.code} value={em.code}>{em.label} ({em.code})</option>)}
+                            </select>
+                            {q.placeOfSupplyReason && <div style={{fontSize:10,color:"#666666",marginTop:5,lineHeight:1.5}}>{q.placeOfSupplyReason}</div>}
+                          </div>
                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 80px",gap:8}}>
                             <div><label style={{fontSize:10,color:"#888888"}}>Taxable (subtotal)</label><input type="number" step="0.01" value={q.subtotal||0} onChange={(e)=>setQ({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
                             <div><label style={{fontSize:10,color:"#888888"}}>VAT amount</label><input type="number" step="0.01" value={q.tax||0} onChange={(e)=>setQ({tax:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
@@ -5452,6 +5541,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                       const prof=await window.zohoFetch('orgProfile',c.zohoOrgId);
                       if(prof.name) setClientData(c.id,'legal_name',prof.name);
                       setClientData(c.id,'trn',prof.trn||'');
+                      if(prof.address) setClientData(c.id,'address',prof.address);
                       setClientData(c.id,'currency','AED');
                       alert('Synced from Zoho ✓\n\nLegal name: '+(prof.name||'—')+'\nVAT TRN: '+(prof.trn||'not configured in Zoho — set it under Zoho Books Settings → Taxes'));
                       setClientDetailTab('projects'); setClientDetailTab('settings'); // force re-render of defaultValues
