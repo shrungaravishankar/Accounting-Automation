@@ -213,9 +213,13 @@ export const handler = async (event: Event) => {
       const all: any[] = [];
       let page = 1;
       while (true) {
+        // Zoho's `status` param only takes a single value — a comma list
+        // returns 'Invalid value passed for status'. filter_by=Status.Unpaid
+        // covers unpaid + partially paid + overdue in one call; the
+        // balance>0 filter below drops anything else.
         const j = await zohoGet('invoices', accessToken, region, {
           organization_id: orgId,
-          status: 'unpaid,partially_paid,overdue,sent',
+          filter_by: 'Status.Unpaid',
           per_page: '200',
           page: String(page)
         });
