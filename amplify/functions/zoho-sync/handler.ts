@@ -1,4 +1,5 @@
 declare const process: { env: Record<string, string | undefined> };
+declare const Buffer: { from(input: string, encoding: string): Uint8Array };
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -520,6 +521,39 @@ export const handler = async (event: Event) => {
         raw: j,
         apiUsage: lastApiUsage
       });
+    }
+
+    // Attach a file (PDF / image) to an existing Zoho invoice. Zoho's
+    // endpoint is /invoices/{id}/attachment with multipart/form-data,
+    // field name "attachment". Frontend sends a base64 blob; we decode
+    // and post via Node's built-in FormData + fetch.
+    if (kind === 'attachToInvoice') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      const invoiceId = (p.invoiceId || '').trim();
+      const fileBase64 = p.fileBase64 || '';
+      const fileName = (p.fileName || 'invoice.pdf').replace(/[^\w.\-]/g, '_');
+      const mimeType = p.mimeType || 'application/pdf';
+      if (!invoiceId) return JSON.stringify({ error: 'invoiceId is required' });
+      if (!fileBase64) return JSON.stringify({ error: 'fileBase64 is required' });
+      const idx = fileBase64.indexOf(',');
+      const raw = idx >= 0 && fileBase64.slice(0, idx).startsWith('data:') ? fileBase64.slice(idx + 1) : fileBase64;
+      const bytes = (Buffer as any).from(raw, 'base64');
+      const form = new FormData();
+      form.append('attachment', new Blob([bytes], { type: mimeType }), fileName);
+      const url = `https://www.zohoapis.${region}/books/v3/invoices/${invoiceId}/attachment?organization_id=${orgId}`;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { Authorization: 'Zoho-oauthtoken ' + accessToken },
+        body: form as any
+      });
+      captureApiUsage(r.headers);
+      const j: any = await r.json();
+      if (!r.ok || j.code !== 0) {
+        throw new Error((j.message || r.statusText) + (j.code ? ' [zoho code ' + j.code + ']' : ''));
+      }
+      return JSON.stringify({ error: null, success: true, message: j.message || 'Attached', apiUsage: lastApiUsage });
     }
 
     if (kind === 'pushExpense' || kind === 'pushJournal' || kind === 'pushPayment') {

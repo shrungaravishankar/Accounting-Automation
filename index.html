@@ -951,6 +951,21 @@ window.invoiceOcr = async (fileBase64, mimeType) => {
   return d;
 };
 
+// Attach a file (PDF / image) to an existing Zoho invoice. Used by the
+// OCR push to keep the original document next to the created invoice.
+window.zohoAttachToInvoice = async (organizationId, invoiceId, fileBase64, fileName, mimeType) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('attachToInvoice');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'attachToInvoice', organizationId,
+    payload: JSON.stringify({ invoiceId, fileBase64, fileName, mimeType: mimeType || 'application/pdf' })
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response.');
+  __recordApiUsage(d.apiUsage);
+  if (d.error) throw new Error(d.error);
+  return d;
+};
+
 // Create an invoice in Zoho Books. body is the Zoho-shaped invoice
 // payload (customer_id + line_items at minimum). Returns the created
 // invoice_id and number on success.
@@ -1779,6 +1794,25 @@ function loadRefDB() {
 
 function saveRefDB(db) {
   try { localStorage.setItem("autoledger_refdb", JSON.stringify(db)); } catch(e) {}
+}
+
+// Map a customer address blob to a UAE Emirate code that Zoho's UAE
+// edition expects on invoices (place_of_supply). Returns null when the
+// address doesn't look UAE — caller can fall back to the project's
+// emirate. Recognises common landmarks/free-zones in each emirate so a
+// raw OCR address like "Jumeirah Lakes Towers Dubai UAE" resolves
+// cleanly to AE-DU.
+function alDetectEmirate(addr){
+  const a = (addr||'').toLowerCase();
+  if (!a) return null;
+  if (/\babu\s*dhabi\b|adgm|saadiyat|yas\s*island|khalifa\s*city|musaffah|reem\s*island|al\s*ain\b/.test(a)) return 'AE-AZ';
+  if (/\bdubai\b|jumeirah|\bjbr\b|\bjlt\b|business\s*bay|downtown\s*dubai|deira|bur\s*dubai|al\s*barsha|tecom|dafza|jafza|dubai\s*marina|jvc|jumeirah\s*village|al\s*quoz/.test(a)) return 'AE-DU';
+  if (/\bsharjah\b|hamriyah|saif\s*zone/.test(a)) return 'AE-SH';
+  if (/\bajman\b/.test(a)) return 'AE-AJ';
+  if (/\bfujairah\b/.test(a)) return 'AE-FU';
+  if (/ras\s*al\s*khaimah|\brak\b/.test(a)) return 'AE-RK';
+  if (/umm\s*al\s*quwain|\buaq\b/.test(a)) return 'AE-UQ';
+  return null;
 }
 
 // ═══════════════ Invoice OCR validation engine (UAE) ═══════════════
@@ -3448,26 +3482,74 @@ function App(){
         // Income account: reviewer's pick on the draft, else the default
         // sales account from the CoA.
         const lineAccountId=item.accountId||defaultSalesAccount?.id||'';
-        const lines=(item.lineItems&&item.lineItems.length>0?item.lineItems:[{description:'Sales — '+(item.invoiceNumber||item.fileName),quantity:1,rate:item.subtotal||item.total}])
-          .map(l=>{
-            const li={name:(l.description||'Item').slice(0,100),description:l.description||'',rate:Number(l.rate||0),quantity:Number(l.quantity||1)};
-            if(lineAccountId) li.account_id=lineAccountId;
-            if(taxMatch) li.tax_id=taxMatch.id; else if(vat>0) li.tax_percentage=vat;
-            return li;
-          });
+        const sourceLines = item.lineItems && item.lineItems.length>0
+          ? item.lineItems
+          : [{description:'Sales — '+(item.invoiceNumber||item.fileName), quantity:1, rate:item.subtotal||item.total, amount:item.subtotal||item.total}];
+        // Line-amount reconciliation. When Textract sees a percentage qty
+        // (e.g. "20% × $60,000") it yields quantity=20, rate=60000 which
+        // Zoho would multiply to 1,200,000. The real line total on the
+        // invoice (carried in l.amount when present) is what should hit
+        // Zoho. Pick whichever sum matches the invoice subtotal better
+        // and reshape lines to qty=1 / rate=amount when amount wins.
+        const subN=Number(item.subtotal||0);
+        const sumQR=sourceLines.reduce((s,l)=>s + (Number(l.quantity)||1)*(Number(l.rate)||0), 0);
+        const sumA=sourceLines.reduce((s,l)=>s + (Number(l.amount)||0), 0);
+        const useAmount = subN>0 && sumA>0 && Math.abs(sumA - subN) < Math.abs(sumQR - subN);
+        const lines = sourceLines.map(l=>{
+          const amt = Number(l.amount||0);
+          const qty = Number(l.quantity||1);
+          const rate = Number(l.rate||0);
+          // Preserve the original qty/rate context inside the description
+          // when we collapse to qty=1, so the printed invoice still
+          // explains "20% × $60,000" etc.
+          const original = (qty && rate && (qty!==1 || amt!==rate)) ? ` (${qty} × ${rate})` : '';
+          const li = useAmount
+            ? { name:(l.description||'Item').slice(0,100),
+                description: (l.description||'') + (original && amt && Math.abs(qty*rate-amt)>0.5 ? '' : ''),
+                rate: amt, quantity: 1 }
+            : { name:(l.description||'Item').slice(0,100),
+                description: l.description||'',
+                rate: rate, quantity: qty || 1 };
+          if(lineAccountId) li.account_id=lineAccountId;
+          if(taxMatch) li.tax_id=taxMatch.id; else if(vat>0) li.tax_percentage=vat;
+          return li;
+        });
+        // Place of supply is the CUSTOMER's emirate — Zoho UAE expects a
+        // 5-letter code (AE-DU, AE-AZ, …), not just 'AE'. Falls back to
+        // the project's own emirate when the customer address is missing
+        // or non-UAE; ultimately defaults to Dubai (the most common case).
+        const projEmirate = alDetectEmirate(getClientData(activeClientId,'address',''));
+        const placeOfSupply = alDetectEmirate(item.customerAddress) || projEmirate || 'AE-DU';
         const body={
           customer_id:custId,
           date:item.date,
           due_date:item.dueDate||item.date,
           invoice_number:item.invoiceNumber,
-          tax_treatment: item.supplierTrn?'vat_registered':'vat_not_registered',
-          place_of_supply:'AE',
+          // tax_treatment is the CUSTOMER's status. The project is always
+          // VAT-registered (it's our entity); what matters here is whether
+          // the buyer has a TRN. No TRN → vat_not_registered (B2C-style).
+          tax_treatment: item.customerTrn ? 'vat_registered' : 'vat_not_registered',
+          place_of_supply: placeOfSupply,
           line_items:lines,
           notes:'Imported via AutoLedger OCR — source file: '+item.fileName
         };
         if(item.fx&&item.fx.rate) body.exchange_rate=item.fx.rate;
         const res=await window.zohoCreateInvoice(orgId,body);
         queue=queue.map(q=>q.id===item.id?{...q,status:'Pushed To Zoho',zohoInvoiceId:res.id,zohoInvoiceNumber:res.invoice_number||item.invoiceNumber,pushedAt:Date.now()}:q);
+        // Best-effort: attach the original PDF/image to the newly-created
+        // Zoho invoice. Doesn't fail the push if attachment errors —
+        // surfaces a yellow warning row on the draft instead so the user
+        // can re-attach manually if needed.
+        if(item.previewPath && res.id){
+          try{
+            const blob=await window.ocrFileLoad(item.previewPath);
+            const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result||''));r.onerror=()=>reject(new Error('Could not read file.'));r.readAsDataURL(blob);});
+            const ext=(item.previewType&&/pdf/i.test(item.previewType))?'pdf':(/png/i.test(item.previewType||'')?'png':'jpg');
+            await window.zohoAttachToInvoice(orgId,res.id,b64,(item.fileName||('invoice.'+ext)),item.previewType||('image/'+ext));
+          }catch(e){
+            queue=queue.map(q=>q.id===item.id?{...q,validations:[...(q.validations||[]).filter(v=>v.key!=='attach'),{key:'attach',label:'Invoice attachment',status:'warn',message:'Invoice was created but the original file could not be attached: '+(e.message||e)+'. You can re-attach manually in Zoho.'}]}:q);
+          }
+        }
       }catch(e){
         queue=queue.map(q=>q.id===item.id?{...q,status:'Error',validations:[...(q.validations||[]).filter(v=>v.key!=='push'),{key:'push',label:'Zoho push',status:'fail',message:e.message||String(e)}]}:q);
       }
