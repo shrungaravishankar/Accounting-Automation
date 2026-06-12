@@ -249,26 +249,25 @@ export const handler = async (event: Event) => {
     const corpus = rawText.join(' \n ').toLowerCase();
 
     // ---- Document classification ----
-    // Rejected types take precedence over accepted: a "Quotation" that
-    // happens to contain the word invoice in its footer must still be
-    // rejected. Credit notes are detected separately so the frontend can
-    // route them to the (future) credit-note workflow.
+    // Acceptance rule: if the document carries 'invoice' wording OR has
+    // the structural shape of one (invoice number + total), accept it.
+    // Reject ONLY when the document is unambiguously a quotation, a
+    // proforma, or a credit note — supporting paperwork that wraps an
+    // invoice (contracts, agreements, POs attached as cover sheets) is
+    // not grounds to reject. Credit notes are still routed separately.
     const isCreditNote = /credit\s*note|tax\s*credit\s*note|\bcn[-\s]?\d/i.test(corpus);
-    const rejectedMatch = corpus.match(/quotation|proforma|pro[-\s]forma|purchase\s*order|delivery\s*note|\breceipt\s*voucher|statement\s*of\s*account|agreement|contract|debit\s*note/i);
+    const rejectedMatch = corpus.match(/quotation|proforma|pro[-\s]forma\s*invoice/i);
     const acceptedMatch = corpus.match(/simplified\s*tax\s*invoice|tax\s*invoice|commercial\s*invoice|\binvoice\b/i);
+    const looksLikeInvoice = !!(invoiceNumber?.value) && parseAmount(total?.value) > 0;
     let docType = 'unknown';
     if (isCreditNote) docType = 'credit_note';
-    else if (rejectedMatch) docType = rejectedMatch[0].replace(/\s+/g, '_');
     else if (acceptedMatch) {
       const m = acceptedMatch[0];
       docType = /simplified/.test(m) ? 'simplified_tax_invoice' : /tax/.test(m) ? 'tax_invoice' : /commercial/.test(m) ? 'commercial_invoice' : 'invoice';
     }
-    // Accept when invoice wording is present OR when the document has the
-    // structural shape of an invoice (number + total) and nothing matched
-    // a rejected type — many ERP/POS layouts lose the title to OCR noise.
-    const looksLikeInvoice = !!(invoiceNumber?.value) && parseAmount(total?.value) > 0;
-    const isInvoice = !isCreditNote && !rejectedMatch && (!!acceptedMatch || looksLikeInvoice);
-    if (docType === 'unknown' && isInvoice) docType = 'invoice';
+    else if (rejectedMatch && !looksLikeInvoice) docType = rejectedMatch[0].replace(/\s+/g, '_');
+    else if (looksLikeInvoice) docType = 'invoice';
+    const isInvoice = !isCreditNote && (!!acceptedMatch || (looksLikeInvoice && !rejectedMatch));
 
     // ---- Currency detection ----
     // Count currency-code mentions; the most frequent wins. Default AED.

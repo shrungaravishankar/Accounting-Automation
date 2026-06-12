@@ -46,5 +46,13 @@ export const storage = defineStorage({
       allow.authenticated.to(['read']),
       allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
     ],
+    // Invoice OCR uploads — the original PDF / image behind every OCR'd
+    // draft, at ocr/{clientId}/{draftId}.{ext}. Same shared-team pattern
+    // as 'clients/*' so any assigned user can see the source document
+    // next to the extracted draft.
+    'ocr/*': [
+      allow.authenticated.to(['read']),
+      allow.groups(['admin', 'staff']).to(['read', 'write', 'delete']),
+    ],
   }),
 });

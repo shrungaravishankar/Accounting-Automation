@@ -618,6 +618,24 @@ window.projectLoad = async (dataPath) => {
   return JSON.parse(text);
 };
 
+// Upload an OCR invoice file (PDF / image) so the review modal can show
+// the original document later — even after a reload or on another machine.
+// Lives under per-client/per-id key so cleanup is straightforward.
+window.ocrFileUpload = async (clientId, draftId, file) => {
+  const ext = (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) ? 'pdf'
+    : /png/i.test(file.type) ? 'png' : /webp/i.test(file.type) ? 'webp' : 'jpg';
+  const path = `ocr/${clientId}/${draftId}.${ext}`;
+  await uploadData({ path, data: file, options: { contentType: file.type || 'application/octet-stream' } }).result;
+  return { path, contentType: file.type || '' };
+};
+window.ocrFileLoad = async (path) => {
+  const { body } = await downloadData({ path }).result;
+  return await body.blob();
+};
+window.ocrFileRemove = async (path) => {
+  try { await removeFromStorage({ path }); } catch (_) {}
+};
+
 window.projectRename = async (id, name) => {
   const res = await dataClient.models.Project.update({ id, name });
   if (res.errors?.length) throw new Error(res.errors[0].message);
@@ -2357,7 +2375,10 @@ function App(){
   const[ocrProcessing,setOcrProcessing]=useState(false);
   const[ocrProgress,setOcrProgress]=useState({done:0,total:0});
   const[ocrReviewId,setOcrReviewId]=useState("");   // draft being reviewed in the modal
+  const[ocrBulkReviewIds,setOcrBulkReviewIds]=useState([]); // [] = off; non-empty = bulk-review mode (subset queue)
+  const[ocrBulkIndex,setOcrBulkIndex]=useState(0);
   const[ocrSelected,setOcrSelected]=useState(()=>new Set());
+  const[ocrCustomerCreating,setOcrCustomerCreating]=useState(false);
   const[ocrPushing,setOcrPushing]=useState(false);
   const[revenueSub,setRevenueSub]=useState("ocr");  // 'invoices' | 'ocr' | 'payments'
   // Load the persisted queue when the client changes.
@@ -3278,6 +3299,10 @@ function App(){
       const f=files[i];
       const id=crypto.randomUUID();
       try{ ocrPreviewUrls.current[id]={url:URL.createObjectURL(f),type:f.type||''}; }catch(_){}
+      // Persist the original file to S3 so the review preview survives
+      // reloads, client switches, and works for other team members.
+      let previewMeta=null;
+      try{ previewMeta = await window.ocrFileUpload(activeClientId, id, f); }catch(_){/* best-effort */}
       // OCR
       try{
         if(f.size>10*1024*1024) throw new Error('File exceeds 10 MB.');
@@ -3285,6 +3310,8 @@ function App(){
         const ocr=await window.invoiceOcr(b64,f.type);
         let item={
           id, fileName:f.name, uploadedAt:Date.now(),
+          previewPath: previewMeta?previewMeta.path:'',
+          previewType: previewMeta?previewMeta.contentType:(f.type||''),
           // Revenue invoice direction: the issuer (Textract VENDOR_*) is
           // the SUPPLIER == this project. The receiver (Textract
           // RECEIVER_*) is the CUSTOMER we're invoicing.
@@ -3327,7 +3354,9 @@ function App(){
         item=revalidateOcrItem(item,queue);
         queue=[...queue,item];
       }catch(e){
-        queue=[...queue,{id,fileName:f.name,uploadedAt:Date.now(),status:'Error',
+        queue=[...queue,{id,fileName:f.name,uploadedAt:Date.now(),
+          previewPath:previewMeta?previewMeta.path:'', previewType:previewMeta?previewMeta.contentType:(f.type||''),
+          status:'Error',
           validations:[{key:'ocr',label:'OCR extraction',status:'fail',message:e.message||String(e)}],
           customerName:'',invoiceNumber:'',date:'',subtotal:0,tax:0,total:0,currency:'AED',lineItems:[],confidences:{},vatFlags:[]}];
       }
@@ -3349,7 +3378,13 @@ function App(){
 
   const deleteOcrItems = useCallback((ids)=>{
     if(!confirm("Remove "+ids.length+" draft(s) from the OCR queue? Pushed invoices stay in Zoho.")) return;
-    setOcrQueue(prev=>{ const next=prev.filter(q=>!ids.includes(q.id)); persistOcrQueue(next); return next; });
+    setOcrQueue(prev=>{
+      const next=prev.filter(q=>!ids.includes(q.id));
+      // Clean up S3 previews for the removed drafts — best-effort.
+      for(const q of prev){ if(ids.includes(q.id) && q.previewPath){ window.ocrFileRemove && window.ocrFileRemove(q.previewPath); } }
+      persistOcrQueue(next);
+      return next;
+    });
     setOcrSelected(new Set());
   },[persistOcrQueue]);
 
@@ -3429,6 +3464,59 @@ function App(){
   },[ocrPushing,ocrQueue,clients,activeClientId,zohoTaxes,loadZohoTaxes,findCustomerMatch,defaultSalesAccount,persistOcrQueue]);
 
   // Mark a pushed invoice as Sent (dispatch tracking).
+  // Load the original invoice from S3 when the review modal opens and
+  // the in-memory object URL is missing (after a reload, client switch,
+  // or another team member opening the draft). Stored as an object URL
+  // in the same ref, keyed by draft id.
+  const[ocrPreviewTick,setOcrPreviewTick]=useState(0);
+  useEffect(()=>{
+    const id = ocrReviewId;
+    if(!id) return;
+    if(ocrPreviewUrls.current[id] && ocrPreviewUrls.current[id].url) return;
+    const item = ocrQueue.find(q=>q.id===id);
+    if(!item || !item.previewPath) return;
+    (async()=>{
+      try{
+        const blob = await window.ocrFileLoad(item.previewPath);
+        const url = URL.createObjectURL(blob);
+        ocrPreviewUrls.current[id] = { url, type: item.previewType || blob.type || '' };
+        setOcrPreviewTick(t=>t+1);
+      }catch(_){ /* keep the fallback message */ }
+    })();
+  },[ocrReviewId,ocrQueue]);
+
+  // Inline customer creation from the review modal — when the customer
+  // detected on the invoice doesn't exist in Zoho yet. Creates the
+  // contact, persists the id, refreshes the local customers list, and
+  // re-validates the draft.
+  const createOcrDraftCustomer = useCallback(async (id)=>{
+    if(ocrCustomerCreating) return;
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
+    const item=ocrQueue.find(q=>q.id===id);
+    if(!item || !item.customerName){ alert("Pick a customer name first."); return; }
+    setOcrCustomerCreating(true);
+    try{
+      const res = await window.zohoCreateCustomer(orgId, {
+        contact_name: item.customerName.trim(),
+        trn: item.customerTrn ? item.customerTrn.trim() : undefined,
+        country_code: 'AE',
+        currency_code: 'AED'
+      });
+      const cur = getClientData(activeClientId,'customerIds',{}) || {};
+      cur[res.name || item.customerName.trim()] = res.id;
+      setClientData(activeClientId,'customerIds',cur);
+      setCustomers(prev => prev.includes(item.customerName.trim()) ? prev : [...prev, item.customerName.trim()]);
+      // Touching the item re-runs validation (Customer-in-Zoho flips to PASS).
+      updateOcrItem(id,{ customerName: res.name || item.customerName });
+    }catch(e){
+      alert("Could not create customer in Zoho: "+(e.message||e));
+    }finally{
+      setOcrCustomerCreating(false);
+    }
+  },[ocrCustomerCreating,clients,activeClientId,ocrQueue,updateOcrItem]);
+
   // Fetch (or refresh) the historical FX rate for an OCR'd invoice. Called
   // from the review modal when the invoice currency differs from the
   // project's base currency. Used both for retrying a failed auto-fetch
@@ -4953,6 +5041,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   {drafts.length>0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:10,flexWrap:"wrap"}}>
                     <div style={{fontSize:11,color:"#888888"}}>{drafts.length} in queue · {drafts.filter(q=>q.status==='Ready To Push').length} ready · {drafts.filter(q=>q.status==='Error').length} blocked</div>
                     <div style={{display:"flex",gap:8}}>
+                      {(()=>{ const ids = ocrSelected.size>0 ? Array.from(ocrSelected) : drafts.filter(q=>q.status!=='Pushed To Zoho'&&q.status!=='Sent'&&q.status!=='Partially Paid'&&q.status!=='Paid').map(q=>q.id); return ids.length>1 && <button onClick={()=>{ setOcrBulkReviewIds(ids); setOcrBulkIndex(0); setOcrReviewId(ids[0]); }} style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:7,padding:"7px 14px",color:"#4D3FA0",fontSize:11,fontWeight:700,cursor:"pointer"}}>📑 Bulk review ({ids.length})</button>; })()}
                       {(()=>{ const ready=drafts.filter(q=>q.status==='Ready To Push'||q.status==='Validated').map(q=>q.id); return ready.length>0 && <button onClick={()=>pushOcrItems(ready)} disabled={ocrPushing} style={{background:ocrPushing?"#cccccc":"#ffffff",border:"1.5px solid #16a34a",borderRadius:7,padding:"7px 16px",color:ocrPushing?"#777777":"#16a34a",fontSize:11,fontWeight:700,cursor:ocrPushing?"default":"pointer"}}>⚡ Push all eligible ({ready.length})</button>; })()}
                       <button onClick={()=>pushOcrItems(Array.from(ocrSelected))} disabled={ocrPushing||ocrSelected.size===0} style={{background:(ocrPushing||ocrSelected.size===0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",fontSize:11,fontWeight:700,cursor:(ocrPushing||ocrSelected.size===0)?"default":"pointer"}}>{ocrPushing?"Pushing…":"⚡ Push selected ("+ocrSelected.size+")"}</button>
                       <button onClick={()=>deleteOcrItems(Array.from(ocrSelected))} disabled={ocrPushing||ocrSelected.size===0} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:(ocrPushing||ocrSelected.size===0)?"default":"pointer"}}>Remove</button>
@@ -5066,15 +5155,15 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <div style={{padding:"16px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(22,163,74,0.04)"}}>
                         <div>
                           <h3 style={{fontSize:15,fontWeight:700,color:"#1a1a2e"}}>Review draft — {q.fileName}</h3>
-                          <div style={{fontSize:11,color:"#888888",marginTop:2,display:"flex",gap:8,alignItems:"center"}}>{statusBadge(q.status)} <span>{(q.docType||'').replace(/_/g,' ')}</span></div>
+                          <div style={{fontSize:11,color:"#888888",marginTop:2,display:"flex",gap:8,alignItems:"center"}}>{statusBadge(q.status)} <span>{(q.docType||'').replace(/_/g,' ')}</span>{ocrBulkReviewIds.length>1 && <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#4D3FA0",fontWeight:600}}>· Bulk {ocrBulkIndex+1}/{ocrBulkReviewIds.length}</span>}</div>
                         </div>
-                        <button onClick={()=>setOcrReviewId("")} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
+                        <button onClick={()=>{ setOcrReviewId(""); setOcrBulkReviewIds([]); setOcrBulkIndex(0); }} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
                       </div>
                       <div style={{padding:"16px 22px",overflowY:"auto",flex:1,display:"grid",gridTemplateColumns:"1.2fr 1fr",gap:18}}>
                         {/* Left: extracted fields (editable) */}
                         <div style={{display:"flex",flexDirection:"column",gap:10}}>
                           {/* Original document preview (session-only object URL) */}
-                          {(()=>{ const pv=ocrPreviewUrls.current[q.id]; if(!pv) return <div style={{padding:"8px 10px",background:"#f8f9fc",border:"1px dashed #e2e2ea",borderRadius:6,fontSize:10,color:"#999999"}}>Original file preview is available in the session it was uploaded — re-upload to preview again.</div>;
+                          {(()=>{ void ocrPreviewTick; const pv=ocrPreviewUrls.current[q.id]; if(!pv) return <div style={{padding:"8px 10px",background:"#f8f9fc",border:"1px dashed #e2e2ea",borderRadius:6,fontSize:10,color:"#999999"}}>{q.previewPath?"Loading preview from storage…":"Original file preview will appear here once the upload finishes."}</div>;
                             return <div style={{border:"1px solid #e2e2ea",borderRadius:8,overflow:"hidden"}}>
                               <div style={{padding:"5px 10px",fontSize:9,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",background:"#f8f9fc",display:"flex",justifyContent:"space-between"}}>
                                 <span>Uploaded invoice</span>
@@ -5097,13 +5186,23 @@ td,th{padding:8px 12px;vertical-align:middle}
                             <div key={fdef.k}>
                               <label style={{fontSize:10,color:"#888888"}}>{fdef.l}{fdef.confKey && q.confidences && q.confidences[fdef.confKey]!=null?(" · conf "+Math.round(q.confidences[fdef.confKey])+"%"):""}</label>
                               <input type={fdef.type||'text'} value={q[fdef.k]||''} onChange={(e)=>setQ({[fdef.k]:e.target.value})} list={fdef.list?'rev-ocr-customer-list':undefined} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:fdef.mono?"'IBM Plex Mono',monospace":"inherit"}} />
+                              {/* Inline Create-Customer when the typed name isn't in Zoho yet */}
+                              {fdef.k==='customerName' && q.customerName && (()=>{
+                                const m = findCustomerMatch(q.customerName);
+                                const matched = m && m.score>=0.85;
+                                if(matched) return <div style={{fontSize:10,color:"#16a34a",marginTop:3}}>✓ Will use existing Zoho customer "{m.name}".</div>;
+                                return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:5,gap:8,flexWrap:"wrap"}}>
+                                  <span style={{fontSize:10,color:"#d97706"}}>Not found in Zoho — push will create them, or create now to validate first.</span>
+                                  <button onClick={()=>createOcrDraftCustomer(q.id)} disabled={ocrCustomerCreating} style={{background:ocrCustomerCreating?"#cccccc":"#ffffff",border:"1px solid rgba(22,163,74,0.4)",borderRadius:5,padding:"4px 10px",color:ocrCustomerCreating?"#777777":"#16a34a",fontSize:10,fontWeight:600,cursor:ocrCustomerCreating?"default":"pointer"}}>{ocrCustomerCreating?"Creating…":"➕ Create in Zoho"}</button>
+                                </div>;
+                              })()}
                             </div>
                           ))}
                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 80px",gap:8}}>
                             <div><label style={{fontSize:10,color:"#888888"}}>Taxable (subtotal)</label><input type="number" step="0.01" value={q.subtotal||0} onChange={(e)=>setQ({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
                             <div><label style={{fontSize:10,color:"#888888"}}>VAT amount</label><input type="number" step="0.01" value={q.tax||0} onChange={(e)=>setQ({tax:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
                             <div><label style={{fontSize:10,color:"#888888"}}>Total</label><input type="number" step="0.01" value={q.total||0} onChange={(e)=>setQ({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                            <div><label style={{fontSize:10,color:"#888888"}}>Currency</label><select value={q.currency||'AED'} onChange={(e)=>setQ({currency:e.target.value})} style={{width:"100%",padding:"7px 6px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select></div>
+                            <div><label style={{fontSize:10,color:"#888888"}}>Currency</label><select value={q.currency||'AED'} onChange={(e)=>{ const v=e.target.value; setQ({currency:v,fx:null}); const projCur=getClientData(activeClientId,'currency','AED'); if(v!==projCur){ setTimeout(()=>fetchOcrFxRate(q.id),120); } }} style={{width:"100%",padding:"7px 6px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select></div>
                           </div>
                           {/* Income account + VAT treatment for the Zoho invoice */}
                           <div style={{display:"grid",gridTemplateColumns:"2fr 90px 130px",gap:8}}>
@@ -5183,9 +5282,14 @@ td,th{padding:8px 12px;vertical-align:middle}
                       </div>
                       <div style={{padding:"12px 22px",borderTop:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
                         <div style={{fontSize:10,color:fails>0?"#dc2626":"#16a34a",fontWeight:600}}>{fails>0?fails+" failed validation(s) block pushing — edits above re-validate live.":"All validations clear — ready to push."}</div>
-                        <div style={{display:"flex",gap:8}}>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                          {ocrBulkReviewIds.length>1 && <>
+                            <button onClick={()=>{ const i=Math.max(0,ocrBulkIndex-1); setOcrBulkIndex(i); setOcrReviewId(ocrBulkReviewIds[i]); }} disabled={ocrBulkIndex===0} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:7,padding:"7px 12px",color:ocrBulkIndex===0?"#cccccc":"#1a1a2e",fontSize:11,fontWeight:600,cursor:ocrBulkIndex===0?"default":"pointer"}}>‹ Previous</button>
+                            <button onClick={()=>{ const last=ocrBulkIndex>=ocrBulkReviewIds.length-1; if(last){ setOcrReviewId(""); setOcrBulkReviewIds([]); setOcrBulkIndex(0); return;} const i=ocrBulkIndex+1; setOcrBulkIndex(i); setOcrReviewId(ocrBulkReviewIds[i]); }} style={{background:"#4D3FA0",border:"1px solid #4D3FA0",borderRadius:7,padding:"7px 14px",color:"#ffffff",fontSize:11,fontWeight:700,cursor:"pointer"}}>{ocrBulkIndex>=ocrBulkReviewIds.length-1 ? "Finish review" : "Save & Next ›"}</button>
+                            <div style={{width:1,height:24,background:"#e2e2ea",margin:"0 4px"}} />
+                          </>}
                           <button onClick={()=>deleteOcrItems([q.id])} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>Delete draft</button>
-                          <button onClick={()=>setOcrReviewId("")} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:7,padding:"7px 14px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>Close</button>
+                          <button onClick={()=>{ setOcrReviewId(""); setOcrBulkReviewIds([]); setOcrBulkIndex(0); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:7,padding:"7px 14px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>Close</button>
                           {q.status!=='Pushed To Zoho'&&<button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing||fails>0} style={{background:(ocrPushing||fails>0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:(ocrPushing||fails>0)?"default":"pointer"}}>{ocrPushing?"Pushing…":"⚡ Push to Zoho"}</button>}
                         </div>
                       </div>
