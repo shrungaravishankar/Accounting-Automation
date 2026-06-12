@@ -3429,6 +3429,34 @@ function App(){
   },[ocrPushing,ocrQueue,clients,activeClientId,zohoTaxes,loadZohoTaxes,findCustomerMatch,defaultSalesAccount,persistOcrQueue]);
 
   // Mark a pushed invoice as Sent (dispatch tracking).
+  // Fetch (or refresh) the historical FX rate for an OCR'd invoice. Called
+  // from the review modal when the invoice currency differs from the
+  // project's base currency. Used both for retrying a failed auto-fetch
+  // and for "refresh" after the user changes the invoice date.
+  const fetchOcrFxRate = useCallback(async (id)=>{
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ alert("This client is not linked to a Zoho organization."); return; }
+    const item=ocrQueue.find(q=>q.id===id);
+    if(!item) return;
+    const projCur=getClientData(activeClientId,'currency','AED');
+    if((item.currency||'AED')===projCur){
+      updateOcrItem(id,{fx:null});
+      return;
+    }
+    updateOcrItem(id,{fx:{loading:true}});
+    try{
+      const fx=await window.zohoFetch('fxRate',orgId,{from:item.currency,to:projCur,date:item.date});
+      if(fx&&fx.rate){
+        updateOcrItem(id,{fx:{rate:fx.rate,source:fx.source,dateUsed:fx.dateUsed}});
+      } else {
+        updateOcrItem(id,{fx:{error:(fx&&fx.error)||'No rate returned.'}});
+      }
+    }catch(e){
+      updateOcrItem(id,{fx:{error:e.message||String(e)}});
+    }
+  },[clients,activeClientId,ocrQueue,updateOcrItem]);
+
   const markOcrSent = useCallback((id)=>{
     const note=prompt("Mark as sent — optional note (e.g. emailed to client on …):","");
     if(note===null) return;
@@ -5101,12 +5129,31 @@ td,th{padding:8px 12px;vertical-align:middle}
                               </select>
                             </div>
                           </div>
-                          {q.fx&&<div style={{padding:"8px 10px",background:q.fx.rate?"rgba(22,163,74,0.05)":"rgba(220,38,38,0.05)",border:"1px solid "+(q.fx.rate?"rgba(22,163,74,0.2)":"rgba(220,38,38,0.2)"),borderRadius:6,fontSize:11}}>
-                            {q.fx.rate
-                              ? <span>FX: 1 {q.currency} = <strong>{q.fx.rate}</strong> {getClientData(activeClientId,'currency','AED')} · {q.fx.source}{q.fx.dateUsed?(" · "+q.fx.dateUsed):""}</span>
-                              : <span style={{color:"#dc2626"}}>{q.fx.error} </span>}
-                            <span onClick={()=>{const r=prompt("Manual exchange rate (1 "+q.currency+" = ? "+getClientData(activeClientId,'currency','AED')+"):",q.fx.rate||"");if(r&&Number(r)>0)setQ({fx:{rate:Number(r),source:'manual override',dateUsed:new Date().toISOString().slice(0,10)}});}} style={{color:"#4D3FA0",cursor:"pointer",fontWeight:600,marginLeft:6}}>✎ Override</span>
-                          </div>}
+                          {/* Exchange-rate panel — shown whenever the invoice currency differs from
+                              the project's base currency. Auto-fetched during OCR but the user can
+                              always retry or enter a manual rate. */}
+                          {(q.currency||'AED')!==getClientData(activeClientId,'currency','AED') && (()=>{
+                            const projCur=getClientData(activeClientId,'currency','AED');
+                            const loading=q.fx&&q.fx.loading;
+                            const ok=q.fx&&q.fx.rate;
+                            const bg=ok?"rgba(22,163,74,0.05)":q.fx&&q.fx.error?"rgba(220,38,38,0.05)":"rgba(217,119,6,0.05)";
+                            const br=ok?"rgba(22,163,74,0.2)":q.fx&&q.fx.error?"rgba(220,38,38,0.2)":"rgba(217,119,6,0.25)";
+                            return <div style={{padding:"10px 12px",background:bg,border:"1px solid "+br,borderRadius:6,fontSize:11,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                              <div style={{flex:1,minWidth:200}}>
+                                {loading
+                                  ? <span style={{color:"#4D3FA0"}}>Fetching exchange rate…</span>
+                                  : ok
+                                    ? <span>FX: 1 {q.currency} = <strong>{q.fx.rate}</strong> {projCur} · {q.fx.source}{q.fx.dateUsed?(" · "+q.fx.dateUsed):""}</span>
+                                    : q.fx&&q.fx.error
+                                      ? <span style={{color:"#dc2626"}}>{q.fx.error}</span>
+                                      : <span style={{color:"#92400e"}}>Foreign currency <strong>{q.currency}</strong> detected — fetch an exchange rate before pushing.</span>}
+                              </div>
+                              <div style={{display:"flex",gap:6}}>
+                                <button onClick={()=>fetchOcrFxRate(q.id)} disabled={loading} style={{background:"#ffffff",border:"1px solid "+(ok?"rgba(22,163,74,0.4)":"#4D3FA0"),borderRadius:5,padding:"5px 10px",color:ok?"#16a34a":"#4D3FA0",fontSize:10,fontWeight:600,cursor:loading?"default":"pointer"}}>{loading?"…":ok?"↻ Refresh":"⚡ Fetch rate"}</button>
+                                <button onClick={()=>{const r=prompt("Manual exchange rate (1 "+q.currency+" = ? "+projCur+"):",ok?q.fx.rate:"");if(r&&Number(r)>0)setQ({fx:{rate:Number(r),source:'manual override',dateUsed:new Date().toISOString().slice(0,10)}});}} disabled={loading} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"5px 10px",color:"#1a1a2e",fontSize:10,fontWeight:600,cursor:loading?"default":"pointer"}}>✎ Enter rate</button>
+                              </div>
+                            </div>;
+                          })()}
                           {(q.lineItems||[]).length>0&&<div>
                             <div style={{fontSize:10,fontWeight:700,color:"#4D3FA0",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Line items ({q.lineItems.length})</div>
                             <div style={{border:"1px solid #f0f0f4",borderRadius:6,maxHeight:140,overflowY:"auto"}}>
