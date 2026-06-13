@@ -99,6 +99,19 @@
    so its existing event listeners (Sign out, Connect Zoho, etc.)
    remain wired. */
 .auth-user-menu { display:none !important; }
+
+/* When the legacy modal sections (#invite-section, #users-list-section,
+   #unlock-section) are relocated inline onto the Admin page, hide the
+   redundant "Close" buttons (tab switching is the way out) and restyle
+   the Refresh action to match the AutoLedger button palette. */
+.admin-inline-host #invite-cancel,
+.admin-inline-host #users-close-btn,
+.admin-inline-host #unlock-close-btn { display:none !important; }
+.admin-inline-host .auth-row { padding:0 !important; margin-top:14px; border-top:1px solid #f0f0f4; padding-top:14px !important; justify-content:flex-end; }
+.admin-inline-host .auth-row .auth-btn { width:auto !important; background:linear-gradient(135deg,#6958C2,#4D3FA0); padding:8px 18px; font-size:12px; font-weight:600; border-radius:8px; }
+.admin-inline-host .auth-row .auth-btn:hover { filter:brightness(1.05); }
+.admin-inline-host h3 { font-size:14px; font-weight:700; color:#1a1a2e; margin:0 0 6px; letter-spacing:0.01em; }
+.admin-inline-host .sub { font-size:12px; color:#666666; margin:0 0 16px; line-height:1.55; }
 .auth-avatar { width:34px; height:34px; border-radius:50%; background:linear-gradient(135deg,#6958C2,#4D3FA0); color:#fff; border:1px solid #d0d0d8; font-size:13px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; letter-spacing:.5px; transition:transform .15s ease, box-shadow .15s ease; }
 .auth-avatar:hover { transform:scale(1.05); box-shadow:0 0 0 3px rgba(0,20,65,.25); }
 .auth-dropdown { position:absolute; top:42px; right:0; min-width:220px; background:#ffffff; border:1px solid #cccccc; border-radius:8px; box-shadow:0 8px 24px rgba(105,88,194,0.18); padding:6px; opacity:0; visibility:hidden; transform:translateY(-4px); transition:opacity .15s ease, transform .15s ease, visibility .15s; }
@@ -6134,7 +6147,24 @@ td,th{padding:8px 12px;vertical-align:middle}
             const emails=(c.assignedTo||"").split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
             for(const em of emails){ if(!clientsByEmail.has(em)) clientsByEmail.set(em,[]); clientsByEmail.get(em).push(c); }
           }
-          const sortedUsers = [...(adminUsers||[])].sort((a,b)=>{
+          // Include the viewer (window.AUTH_USER) in the list if listAppUsers
+          // omitted them — otherwise the Overview reads as "0 admins" while
+          // the viewer is clearly the team's admin. We tag the synthetic
+          // row with __isSelf so the table can render the "You" badge.
+          const rawUsers = [...(adminUsers||[])];
+          const __myEmail = ((window.AUTH_USER && window.AUTH_USER.email) || '').toLowerCase();
+          if(__myEmail && !rawUsers.some(u => (u.email||'').toLowerCase() === __myEmail)) {
+            rawUsers.push({
+              email: window.AUTH_USER.email,
+              name: window.AUTH_USER.name,
+              role: window.AUTH_USER.role,
+              team: window.AUTH_USER.team,
+              status: 'CONFIRMED',
+              enabled: true,
+              __isSelf: true,
+            });
+          }
+          const sortedUsers = rawUsers.sort((a,b)=>{
             const order = (r)=> r==='admin'?0 : r==='team-lead'?1 : 2;
             const ar=order(a.role), br=order(b.role); if(ar!==br) return ar-br;
             return (a.name||a.email||'').localeCompare(b.name||b.email||'');
@@ -6144,6 +6174,27 @@ td,th{padding:8px 12px;vertical-align:middle}
               : r==='team-lead' ? {label:'Admin',color:'#4D3FA0',bg:'rgba(105,88,194,0.1)',br:'rgba(105,88,194,0.3)'}
               : {label:'User',color:'#0891b2',bg:'rgba(8,145,178,0.08)',br:'rgba(8,145,178,0.25)'};
             return <span style={{fontSize:10,padding:"3px 8px",borderRadius:4,background:cfg.bg,color:cfg.color,border:"1px solid "+cfg.br,fontWeight:600}}>{cfg.label}</span>;
+          };
+          // Map team UUID → admin display name. The team admin is the
+          // user with role=team-lead or admin in that team; if the team
+          // matches the viewer's own team (and the viewer is an admin),
+          // fall back to window.AUTH_USER.name so the row reads as
+          // "Team - {your name}" even when the admin row isn't in
+          // sortedUsers (alListUsers can omit self depending on filter).
+          const myEmail = ((window.AUTH_USER && window.AUTH_USER.email) || '').toLowerCase();
+          const myRole = (window.AUTH_USER && window.AUTH_USER.role) || '';
+          const myTeam = (window.AUTH_USER && window.AUTH_USER.team) || '';
+          const myName = (window.AUTH_USER && (window.AUTH_USER.name || (window.AUTH_USER.email||'').split('@')[0])) || '';
+          const teamAdminName = (teamId)=>{
+            if(!teamId) return '—';
+            const lead = sortedUsers.find(u => u.team===teamId && (u.role==='team-lead' || u.role==='admin'));
+            if(lead) return lead.name || (lead.email||'').split('@')[0] || teamId;
+            if(teamId===myTeam && (myRole==='team-lead' || myRole==='admin') && myName) return myName;
+            return teamId;
+          };
+          const teamLabel = (teamId)=>{
+            const nm = teamAdminName(teamId);
+            return nm==='—' ? '—' : ('Team - ' + nm);
           };
           const ADMIN_TAB = (key,label,count)=>(
             <div onClick={()=>setAdminTab(key)} style={{padding:"10px 16px",fontSize:13,fontWeight:adminTab===key?700:500,color:adminTab===key?"#4D3FA0":"#666666",cursor:"pointer",borderBottom:"2px solid "+(adminTab===key?"#4D3FA0":"transparent"),display:"flex",alignItems:"center",gap:8,whiteSpace:"nowrap"}}>
@@ -6176,7 +6227,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 #invite-section / #users-list-section / #unlock-section DOM
                 node here while the tab is active. */}
             {(adminTab==="invite" || adminTab==="users" || adminTab==="unlock") && (
-              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"18px 22px",marginBottom:18}}>
+              <div className="admin-inline-host" style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"18px 22px",marginBottom:18}}>
                 <div ref={adminInlineRef} />
               </div>
             )}
@@ -6204,12 +6255,12 @@ td,th{padding:8px 12px;vertical-align:middle}
 
             {adminTab==="overview" && <>
 
-            {/* KPI strip */}
+            {/* KPI strip — sortedUsers already includes the viewer (see
+                rawUsers above), so a simple count is accurate. */}
             <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:18}}>
               {[
                 {label:"Team members",val:sortedUsers.length,color:"#4D3FA0",bg:"rgba(105,88,194,0.06)",icon:"👥"},
                 {label:"Admins",val:sortedUsers.filter(u=>u.role==='team-lead'||u.role==='admin').length,color:"#7c2d12",bg:"rgba(217,119,6,0.06)",icon:"🛡"},
-                {label:"Users (staff)",val:sortedUsers.filter(u=>u.role==='staff').length,color:"#0891b2",bg:"rgba(8,145,178,0.06)",icon:"👤"},
                 {label:"Clients",val:clients.length,color:"#16a34a",bg:"rgba(22,163,74,0.06)",icon:"🏢"},
               ].map(k=>(
                 <div key={k.label} style={{flex:"1 1 180px",minWidth:180,background:k.bg,border:"1px solid "+k.color+"33",borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -6250,7 +6301,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                         </div>
                       </td>
                       <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}>{roleBadge(u.role)}</td>
-                      <td style={{padding:"12px 14px",fontSize:11,color:"#777777",fontFamily:"'IBM Plex Mono',monospace",maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={u.team||''}>{u.team||'—'}</td>
+                      <td style={{padding:"12px 14px",fontSize:11,color:"#777777",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={u.team||''}>{teamLabel(u.team)}</td>
                       <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}>
                         {u.enabled===false ? <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)",color:"#dc2626"}}>Disabled</span>
                          : u.status==='UNCONFIRMED' || u.status==='FORCE_CHANGE_PASSWORD' ? <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(217,119,6,0.1)",color:"#d97706"}}>Pending</span>
