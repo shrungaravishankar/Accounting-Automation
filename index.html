@@ -5860,6 +5860,9 @@ td,th{padding:8px 12px;vertical-align:middle}
                                       : <span style={{color:"#92400e"}}>Foreign currency <strong>{q.currency}</strong> detected — fetch an exchange rate before pushing.</span>}
                               </div>
                               <div style={{display:"flex",gap:6}}>
+                                {q.fx && q.fx.error && /refresh token|access denied|connect to zoho/i.test(q.fx.error) && (
+                                  <button onClick={()=>{const b=document.getElementById('auth-zoho-connect-btn'); if(b) b.click(); else alert('Open the sidebar → click your name → Connect to Zoho.');}} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",border:"none",borderRadius:5,padding:"5px 12px",color:"#fff",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔗 Reconnect Zoho</button>
+                                )}
                                 <button onClick={()=>fetchOcrFxRate(q.id)} disabled={loading} style={{background:"#ffffff",border:"1px solid "+(ok?"rgba(22,163,74,0.4)":"#4D3FA0"),borderRadius:5,padding:"5px 10px",color:ok?"#16a34a":"#4D3FA0",fontSize:10,fontWeight:600,cursor:loading?"default":"pointer"}}>{loading?"…":ok?"↻ Refresh":"⚡ Fetch rate"}</button>
                                 <button onClick={()=>{const r=prompt("Manual exchange rate (1 "+q.currency+" = ? "+projCur+"):",ok?q.fx.rate:"");if(r&&Number(r)>0)setQ({fx:{rate:Number(r),source:'manual override',dateUsed:new Date().toISOString().slice(0,10)}});}} disabled={loading} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"5px 10px",color:"#1a1a2e",fontSize:10,fontWeight:600,cursor:loading?"default":"pointer"}}>✎ Enter rate</button>
                               </div>

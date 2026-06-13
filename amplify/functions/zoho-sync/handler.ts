@@ -11,7 +11,16 @@ type Event = {
   identity?: { username?: string; sub?: string; claims?: Record<string, any> };
 };
 
+// Tracks whether Zoho returned a rotated refresh_token in the last
+// refresh response. Zoho's docs say the refresh token is stable, but a
+// small number of flows (consent-prompt re-grants, scope changes) do
+// return a fresh token — when that happens we persist it so the
+// integration stays connected. The handler reads this after the call
+// and writes the new token back to DDB.
+let lastRotatedRefreshToken: string | null = null;
+
 async function getAccessToken(refreshToken: string, region: string): Promise<string> {
+  lastRotatedRefreshToken = null;
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     client_id: process.env.ZOHO_CLIENT_ID!,
@@ -34,9 +43,16 @@ async function getAccessToken(refreshToken: string, region: string): Promise<str
     console.error('[zoho-sync] Refresh failed. HTTP', r.status, 'body=', JSON.stringify(j));
     const msg = j.error || j.error_description || r.statusText;
     const hint = (msg === 'invalid_code' || msg === 'invalid_grant' || /denied/i.test(msg))
-      ? ' — your refresh token is no longer valid. Click avatar → Connect to Zoho again to re-authorise.'
+      ? ' — your Zoho refresh token is no longer valid. Open the sidebar → click your name → Connect to Zoho to re-authorise.'
       : '';
     throw new Error('Could not refresh Zoho access token: ' + msg + hint);
+  }
+  // Zoho usually keeps the refresh_token stable across refresh calls, but
+  // when it does rotate (consent re-grant, scope change), capture the new
+  // one so the caller can persist it — otherwise the next refresh would
+  // fail with "Access Denied" the moment Zoho's side rotates.
+  if (j.refresh_token && j.refresh_token !== refreshToken) {
+    lastRotatedRefreshToken = j.refresh_token;
   }
   return j.access_token;
 }
@@ -135,12 +151,19 @@ export const handler = async (event: Event) => {
     const region = cred.region || 'com';
     const accessToken = await getAccessToken(cred.refreshToken, region);
 
-    // Stamp lastUsedAt — best-effort.
+    // Stamp lastUsedAt — best-effort. Also persist a rotated
+    // refresh_token if Zoho returned one, so the integration stays
+    // connected without a manual reconnect.
+    const updateExpr = lastRotatedRefreshToken
+      ? 'SET lastUsedAt = :u, refreshToken = :t'
+      : 'SET lastUsedAt = :u';
+    const updateVals: any = { ':u': new Date().toISOString() };
+    if (lastRotatedRefreshToken) updateVals[':t'] = lastRotatedRefreshToken;
     ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { id: cred.id },
-      UpdateExpression: 'SET lastUsedAt = :u',
-      ExpressionAttributeValues: { ':u': new Date().toISOString() }
+      UpdateExpression: updateExpr,
+      ExpressionAttributeValues: updateVals
     })).catch(() => {});
 
     if (kind === 'organizations') {
