@@ -2726,6 +2726,28 @@ function App(){
     const originalNext = slot.nextSibling;
     slot.classList.remove("auth-hidden");
     host.appendChild(slot);
+    // Hide the legacy Close/Cancel buttons — switching the Admin sub-tab
+    // is the navigation here, so a Close button next to Refresh looks
+    // uneven and out of place. Also right-align the row and restyle the
+    // primary action to match the AutoLedger gradient palette.
+    ['invite-cancel','users-close-btn','unlock-close-btn'].forEach(id=>{
+      const b=document.getElementById(id); if(b) b.style.display='none';
+    });
+    slot.querySelectorAll('.auth-row').forEach(row=>{
+      row.style.justifyContent='flex-end';
+      row.style.marginTop='14px';
+      row.style.paddingTop='14px';
+      row.style.borderTop='1px solid #f0f0f4';
+    });
+    ['invite-submit','users-refresh-btn','unlock-refresh-btn'].forEach(id=>{
+      const b=document.getElementById(id); if(!b) return;
+      b.style.width='auto';
+      b.style.background='linear-gradient(135deg,#6958C2,#4D3FA0)';
+      b.style.padding='8px 18px';
+      b.style.fontSize='12px';
+      b.style.fontWeight='600';
+      b.style.borderRadius='8px';
+    });
     // Pre-populate (mirrors what switchModalTab does for each tab).
     try {
       if(adminTab==="invite" && typeof window.populateInviteRoles==="function") window.populateInviteRoles();
@@ -2734,6 +2756,23 @@ function App(){
     } catch(_) {}
     return ()=>{
       try {
+        // Restore the legacy button/row styles before moving the section
+        // back into the floating modal so the fallback openInviteModal()
+        // flow still looks correct.
+        ['invite-cancel','users-close-btn','unlock-close-btn'].forEach(id=>{
+          const b=document.getElementById(id); if(b) b.style.display='';
+        });
+        slot.querySelectorAll('.auth-row').forEach(row=>{
+          row.style.justifyContent='';
+          row.style.marginTop='';
+          row.style.paddingTop='';
+          row.style.borderTop='';
+        });
+        ['invite-submit','users-refresh-btn','unlock-refresh-btn'].forEach(id=>{
+          const b=document.getElementById(id); if(!b) return;
+          b.style.width=''; b.style.background=''; b.style.padding='';
+          b.style.fontSize=''; b.style.fontWeight=''; b.style.borderRadius='';
+        });
         slot.classList.add("auth-hidden");
         if(originalParent) originalParent.insertBefore(slot, originalNext);
       } catch(_) {}
