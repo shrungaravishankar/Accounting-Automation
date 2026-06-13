@@ -486,9 +486,9 @@ export const handler = async (event: Event) => {
       // tax_treatment value is country-bucketed in Zoho UAE edition:
       //   AE                              → vat_registered / vat_not_registered
       //   GCC (SA/OM/BH/QA/KW)            → gcc_vat_registered / gcc_vat_not_registered
-      //   Everything else (Spain etc.)    → non_gcc
-      // Sending a UAE value for a non-UAE contact returned
-      // "Invalid Element tax_treatment [zoho code 8]".
+      //   Everything else (Spain etc.)    → omit; Zoho rejects "non_gcc"
+      //     on contacts with "Invalid Element tax_treatment [zoho code 8]"
+      //     and infers the treatment from billing_address.country on its own.
       const cc = String(p.country_code || '').toUpperCase();
       const isAE = cc === 'AE';
       const isGCC = ['SA','OM','BH','QA','KW'].includes(cc);
@@ -497,8 +497,6 @@ export const handler = async (event: Event) => {
         body.tax_treatment = hasTrn ? 'vat_registered' : 'vat_not_registered';
       } else if (isGCC) {
         body.tax_treatment = hasTrn ? 'gcc_vat_registered' : 'gcc_vat_not_registered';
-      } else if (cc) {
-        body.tax_treatment = 'non_gcc';
       }
       if (hasTrn) body.tax_reg_no = p.trn;
       // Zoho's Contacts API doesn't accept `country_code` at the root —
