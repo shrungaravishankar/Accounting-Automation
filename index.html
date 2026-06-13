@@ -6066,12 +6066,14 @@ td,th{padding:8px 12px;vertical-align:middle}
 
             <Phase num="1" title="One-time setup" subtitle="Connect Zoho, then bring in your client" color="#4D3FA0" bg="rgba(105,88,194,0.08)">
               <Step icon="🔗" title="Connect to Zoho Books"
-                desc="Click the avatar (top right) → Connect to Zoho. You will be sent to Zoho's consent screen; approve, and AutoLedger stores a refresh token tied to your account. You only do this once. If a refresh ever fails, the error will say so and you can reconnect from the same menu." />
+                desc="Click your name in the left sidebar → Connect to Zoho. You will be sent to Zoho's consent screen; approve, and AutoLedger stores a refresh token tied to your account. You only do this once. If a refresh ever fails, the error will say so and you can reconnect from the same menu." />
               <Step icon="🏢" title="Import (or create) a client"
                 desc="Sidebar → Clients → Import from Zoho. Pick the Zoho organisation you want to work on. AutoLedger creates the client, pulls Chart of Accounts, vendors, and customers, and saves the ID maps you'll need for Push later."
                 extra="Manual clients are also supported: Clients → + New Client. You then upload a CoA CSV manually." />
-              <Step icon="👥" title="(Admins) assign team members to clients"
-                desc="On the client card, click Assign — pick the staff users who should see this client. They will see only their assigned clients on their next sign-in." tone="tip" />
+              <Step icon="👥" title="(Admins) invite + assign team members"
+                desc="Sidebar → Admin opens five sub-tabs: Overview (KPIs + team table), Invite User (send a Cognito invite), Current Users (reset passwords, change role, replace), Unlock Requests (approve/deny when a User asks to edit a locked project), and Permissions (role hierarchy reference). Per-client access is set on the client card → Assign." tone="tip" />
+              <Step icon="📁" title="Use Projects to switch context fast"
+                desc="Sidebar → Projects gives you a Quick switch grid (every client you can see) plus Recent projects across all clients. There's a search box at the top — type a client or project name to jump straight to it." tone="tip" />
             </Phase>
 
             <Phase num="2" title="Process a bank statement" subtitle="Workflow steps 1–5 inside a client" color="#0891b2" bg="rgba(8,145,178,0.08)">
@@ -6109,7 +6111,8 @@ td,th{padding:8px 12px;vertical-align:middle}
               <ul style={{margin:0,paddingLeft:18,color:"#7c2d12",fontSize:12,lineHeight:1.9}}>
                 <li><strong>Bank ledger mismatch:</strong> if the bank name in Step 1 doesn't match a Zoho account, Push will offer a picker. Fix it once and it's saved per-client.</li>
                 <li><strong>Inactive ledger in Zoho:</strong> Zoho will reject the push with code 1004. Re-activate the account in Zoho Books, then retry the failed rows.</li>
-                <li><strong>Missing vendor/customer ID:</strong> if a name doesn't exist in Zoho yet, the push falls back to vendor_name (Zoho auto-creates it) — but for customer payments you must have the customer in Zoho first.</li>
+                <li><strong>Missing vendor/customer ID:</strong> if a vendor name doesn't exist in Zoho yet, the push falls back to vendor_name (Zoho auto-creates it). For customers, AutoLedger now fuzzy-matches the name against existing Zoho contacts before creating — so a customer added manually in Zoho's UI is reused instead of duplicated.</li>
+                <li><strong>Non-VAT suppliers:</strong> when a project has no TRN configured in Client Settings, AutoLedger automatically omits the VAT-only fields (<code>tax_treatment</code>, <code>place_of_supply</code>) when creating contacts or pushing invoices to Zoho. Don't fake a TRN to "get past" a push — Zoho will reject those fields on a non-VAT-registered organisation.</li>
                 <li><strong>Date format:</strong> Zoho's API needs YYYY-MM-DD. AutoLedger auto-converts DD/MM/YYYY, but check Step 5 if dates look off.</li>
                 <li><strong>Daily API quota:</strong> the ⚡ chip in the top bar (and on the Dashboard) shows calls remaining. Free Zoho Books = 1,000/day per organisation. Sequential pushing avoids hitting it accidentally.</li>
               </ul>
