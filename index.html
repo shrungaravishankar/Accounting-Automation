@@ -3699,17 +3699,18 @@ function App(){
           if(m && m.score>=0.85 && m.customerId){ custId=m.customerId; custName=m.name; }
         }
         if(!custId){
+          const supplierHasTrn = !!getClientData(activeClientId,'trn','');
           const created=await window.zohoCreateCustomer(orgId,{
             contact_name:custName,
             trn: item.customerTrn || undefined,           // the CUSTOMER's TRN, not the project's
             address: item.customerAddress || undefined,    // billing + shipping populated from this string
             country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
             currency_code: item.currency || 'AED',
-            // place_of_supply is mandatory on Zoho UAE customer contacts.
-            // Use whatever the review modal resolved for the invoice —
-            // for a B2B customer with TRN this is the customer's
-            // emirate; for B2C it's the supplier's emirate (Art. 27).
-            place_of_supply: item.placeOfSupply || undefined
+            // place_of_supply is mandatory on Zoho UAE customer contacts —
+            // but ONLY when the org is on UAE VAT (supplier has a TRN).
+            // For non-VAT-registered suppliers Zoho rejects the element
+            // entirely with 'Invalid Element place_of_supply [zoho code 8]'.
+            place_of_supply: supplierHasTrn ? (item.placeOfSupply || undefined) : undefined
           });
           custId=created.id;
           customerIds[created.name||custName]=custId;
@@ -3768,20 +3769,27 @@ function App(){
           || (alResolvePlaceOfSupply({customerAddress:item.customerAddress,customerTrn:item.customerTrn,supplierEmirate})||{}).code
           || supplierEmirate
           || 'DU';
+        // VAT-only fields: only send tax_treatment and place_of_supply
+        // when the SUPPLIER (project) is VAT-registered. For a non-VAT
+        // supplier (no project TRN configured), the Zoho org isn't on
+        // UAE VAT — sending these fields returns 'Invalid Element
+        // place_of_supply / tax_treatment [zoho code 8]'.
+        const supplierIsVatRegistered = !!getClientData(activeClientId,'trn','');
         const body={
           customer_id:custId,
           date:item.date,
           due_date:item.dueDate||item.date,
           invoice_number:item.invoiceNumber,
-          // tax_treatment on the INVOICE follows the CUSTOMER's TRN status,
-          // regardless of country. Ground truth from a real Z2 Tech invoice
-          // (Spanish customer) shows this org accepts only vat_registered /
-          // vat_not_registered on the invoice — non_gcc was rejected with
-          // 'Invalid Element tax_treatment [zoho code 8]'. The non_gcc
-          // bucket lives on the CONTACT (Zoho derives it from the contact
-          // country); the invoice itself stays on the UAE-resident enum.
-          tax_treatment: item.customerTrn ? 'vat_registered' : 'vat_not_registered',
-          place_of_supply: placeOfSupply,
+          ...(supplierIsVatRegistered ? {
+            // tax_treatment on the INVOICE follows the CUSTOMER's TRN status.
+            // Ground truth from a real Z2 Tech invoice (Spanish customer):
+            // this org accepts only vat_registered / vat_not_registered on
+            // the invoice — non_gcc was rejected with 'Invalid Element
+            // tax_treatment [zoho code 8]'. The non_gcc bucket lives on
+            // the CONTACT (Zoho derives it from the contact country).
+            tax_treatment: item.customerTrn ? 'vat_registered' : 'vat_not_registered',
+            place_of_supply: placeOfSupply,
+          } : {}),
           // Tell Zoho the invoice's actual currency. Without this, Zoho
           // silently falls back to the customer's base currency — a
           // 12,000 USD invoice was being booked as AED 12,000 against
