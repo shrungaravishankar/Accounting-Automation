@@ -3544,16 +3544,26 @@ function App(){
   },[]);
 
   // Lazy-load the org's Zoho tax list (used by the invoice-creator UI).
+  // Returns the loaded tax list so callers can use it immediately —
+  // setZohoTaxes is async (state update), so a same-tick caller relying
+  // on the closure's `zohoTaxes` would still see the stale empty array
+  // and fall through to tax_percentage (which Zoho UAE silently treats
+  // as "no tax" → invoice line shows as Exempt).
   const loadZohoTaxes=useCallback(async ()=>{
-    if(zohoTaxes.length>0 || zohoTaxesLoading) return;
+    if(zohoTaxes.length>0) return zohoTaxes;
+    if(zohoTaxesLoading) return zohoTaxes;
     const c=clients.find(x=>x.id===activeClientId);
     const orgId=c && c.zohoOrgId;
-    if(!orgId) return;
+    if(!orgId) return [];
     setZohoTaxesLoading(true);
-    try { const tx = await window.zohoFetch('taxes', orgId); setZohoTaxes(tx||[]); }
-    catch(e){ console.warn('taxes load failed:', e.message||e); }
+    try {
+      const tx = await window.zohoFetch('taxes', orgId);
+      setZohoTaxes(tx||[]);
+      return tx||[];
+    }
+    catch(e){ console.warn('taxes load failed:', e.message||e); return []; }
     finally { setZohoTaxesLoading(false); }
-  },[activeClientId,clients,zohoTaxes.length,zohoTaxesLoading]);
+  },[activeClientId,clients,zohoTaxes.length,zohoTaxesLoading,zohoTaxes]);
 
   // Pick sensible defaults for a UAE sales line from this client's CoA.
   // Order of preference: a "Sales – Taxable Supply" / "5% VAT" account,
@@ -3803,7 +3813,11 @@ function App(){
     if(!confirm("Push "+eligible.length+" invoice(s) to Zoho?"+(blocked>0?"\n\n"+blocked+" selected item(s) are blocked by failed validations and will be skipped.":""))) return;
     setOcrPushing(true);
     let queue=[...ocrQueue];
-    await loadZohoTaxes();
+    // Use the freshly-loaded tax list directly. The closure's `zohoTaxes`
+    // is still the empty array from before setZohoTaxes flushed, so
+    // relying on it would skip the 5% tax_id and book lines without
+    // tax — which Zoho UAE renders as Exempt on the final invoice.
+    const taxes = (await loadZohoTaxes()) || zohoTaxes || [];
     const customerIds=getClientData(activeClientId,'customerIds',{})||{};
     for(const item of eligible){
       // Wipe any prior push-failure validation so the row's UI status no
@@ -3874,13 +3888,26 @@ function App(){
         }
         const vat=Number(item.vatPercent||0);
         // Tax mapping: 5% → the standard-rate tax; 0% → pick the Zero-Rated
-        // or Exempt tax per the reviewer's choice on the draft.
+        // or Exempt tax per the reviewer's choice on the draft. We use the
+        // freshly-loaded `taxes` (not the closure's stale zohoTaxes) so a
+        // first-push-of-the-session lands the correct tax_id.
         let taxMatch=null;
-        if(vat>0){ taxMatch=(zohoTaxes||[]).find(t=>Number(t.percentage)===vat); }
+        if(vat>0){
+          // Prefer a "Standard" / "Sales" 5% tax if multiple exist (Zoho
+          // can have separate 5% taxes for Sales vs Purchase vs RCM).
+          const fives=taxes.filter(t=>Number(t.percentage)===vat);
+          taxMatch=fives.find(t=>/standard|sales|output/i.test(t.name||'')) || fives[0] || null;
+        }
         else {
-          const zeros=(zohoTaxes||[]).filter(t=>Number(t.percentage)===0);
+          const zeros=taxes.filter(t=>Number(t.percentage)===0);
           const wantExempt=(item.zeroType||'zero_rated')==='exempt';
           taxMatch=zeros.find(t=>wantExempt?/exempt/i.test(t.name||''):/zero/i.test(t.name||''))||zeros[0]||null;
+        }
+        if(vat>0 && !taxMatch){
+          // Hard-fail rather than silently push as Exempt. Surfaces a
+          // clear error on the draft so the reviewer can add the missing
+          // 5% tax in Zoho → Settings → Taxes and retry.
+          throw new Error('No '+vat+'% tax configured in Zoho for this org. Open Zoho → Settings → Taxes, add a '+vat+'% sales tax, then retry the push.');
         }
         // Income account: reviewer's pick on the draft, else the default
         // sales account from the CoA.
@@ -3914,7 +3941,12 @@ function App(){
                 description: l.description||'',
                 rate: rate, quantity: qty || 1 };
           if(lineAccountId) li.account_id=lineAccountId;
-          if(taxMatch) li.tax_id=taxMatch.id; else if(vat>0) li.tax_percentage=vat;
+          // Always send tax_id on a UAE invoice. tax_percentage alone is
+          // ignored by Zoho UAE and the line is booked without tax (which
+          // renders as Exempt). The throw above guarantees taxMatch is
+          // non-null when vat>0; for vat===0 we fall back to the first
+          // zero-rated tax_id if available.
+          if(taxMatch) li.tax_id=taxMatch.id;
           return li;
         });
         // Place of supply: respect the user's explicit pick from the
