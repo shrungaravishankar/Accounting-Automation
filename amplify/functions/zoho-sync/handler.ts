@@ -305,19 +305,39 @@ export const handler = async (event: Event) => {
         return JSON.stringify({ error: null, rate: Math.round(peg * 100000) / 100000, source: 'GCC peg (fixed parity)', dateUsed: p.date || null, apiUsage: lastApiUsage });
       }
       // Floating pair — fetch the historical reference rate for the
-      // invoice date from frankfurter.dev (ECB data, free, no key).
-      // Endpoint: /v1/YYYY-MM-DD?base=EUR&symbols=AED. If the date falls
-      // on a weekend/holiday, Frankfurter returns the most recent prior
-      // working-day rate. Fall back to open.er-api.com's latest table
-      // only when historical lookup fails entirely.
+      // invoice date from Frankfurter (ECB data, free, no key).
+      // Frankfurter doesn't quote AED directly (ECB only publishes the
+      // ~30 reference currencies), but AED is hard-pegged to USD at
+      // 3.6725, so for *→AED we fetch *→USD on the invoice date and
+      // multiply by the peg. Same trick for AED→* via USD. Weekend/
+      // holiday dates: Frankfurter returns the most recent prior
+      // working-day rate (its `date` field tells us which).
       const isoDate = /^\d{4}-\d{2}-\d{2}$/.test(String(p.date || '')) ? String(p.date) : '';
+      const usdToAed = 3.6725;
+      const frankfurter = async (base: string, sym: string) => {
+        // Use the .dev host directly — .app issues a 301 to .dev that
+        // node-fetch in the Lambda runtime doesn't always follow for
+        // cross-host redirects, which silently breaks the lookup.
+        const r = await fetch(`https://api.frankfurter.dev/v1/${isoDate}?base=${base}&symbols=${sym}`);
+        const j: any = await r.json();
+        return { rate: j && j.rates && j.rates[sym], dateUsed: j && j.date };
+      };
       if (isoDate) {
         try {
-          const r = await fetch(`https://api.frankfurter.dev/v1/${isoDate}?base=${from}&symbols=${to}`);
-          const j: any = await r.json();
-          const rate = j && j.rates && j.rates[to];
+          let rate: number | null = null;
+          let dateUsed: string | null = null;
+          if (to === 'AED' && from !== 'AED') {
+            const f = await frankfurter(from, 'USD');
+            if (f.rate) { rate = Number(f.rate) * usdToAed; dateUsed = f.dateUsed; }
+          } else if (from === 'AED' && to !== 'AED') {
+            const f = await frankfurter('USD', to);
+            if (f.rate) { rate = Number(f.rate) / usdToAed; dateUsed = f.dateUsed; }
+          } else {
+            const f = await frankfurter(from, to);
+            if (f.rate) { rate = Number(f.rate); dateUsed = f.dateUsed; }
+          }
           if (rate) {
-            return JSON.stringify({ error: null, rate: Math.round(Number(rate) * 100000) / 100000, source: `frankfurter.dev (ECB reference rate, ${j.date || isoDate})`, dateUsed: j.date || isoDate, apiUsage: lastApiUsage });
+            return JSON.stringify({ error: null, rate: Math.round(rate * 100000) / 100000, source: `frankfurter.dev (ECB reference rate, ${dateUsed || isoDate}${to === 'AED' || from === 'AED' ? ' · via USD @ 3.6725 peg' : ''})`, dateUsed: dateUsed || isoDate, apiUsage: lastApiUsage });
           }
         } catch (_) { /* fall through to latest */ }
       }
