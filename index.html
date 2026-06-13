@@ -926,6 +926,22 @@ window.zohoPush = async (kind, organizationId, payload) => {
   return { id: d.id || null, raw: d.raw || null };
 };
 
+// Search existing Zoho customers by name (fuzzy contains). Returns
+// { matches: [{ contact_id, contact_name, contact_type, email, status }] }
+// ordered by Zoho's relevance. Used before zohoCreateCustomer to detect
+// duplicates regardless of local cache.
+window.zohoSearchCustomer = async (organizationId, name) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('searchCustomer');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'searchCustomer', organizationId, payload: JSON.stringify({ name: name || '' })
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) return { matches: [] };
+  __recordApiUsage(d.apiUsage);
+  if (d.error) return { matches: [], error: d.error };
+  return { matches: d.matches || [] };
+};
+
 // Create a customer in Zoho Books. data = { contact_name, email?, phone?, trn?, tax_treatment? }.
 window.zohoCreateCustomer = async (organizationId, data) => {
   window.__alIncrementApiCount && window.__alIncrementApiCount('createCustomer');
@@ -3699,6 +3715,40 @@ function App(){
           if(m && m.score>=0.85 && m.customerId){ custId=m.customerId; custName=m.name; }
         }
         if(!custId){
+          // Local cache miss — ask Zoho directly. A customer the user
+          // created in Zoho's UI wouldn't be in our local customerIds
+          // map yet, and creating again would produce a duplicate
+          // contact. Use a contains-search and reuse the closest match
+          // (substring or ≥0.85 token-overlap score, same rules as the
+          // local matcher).
+          try{
+            const res=await window.zohoSearchCustomer(orgId,custName);
+            const q=(custName||'').toLowerCase().trim();
+            let best=null;
+            for(const c of (res.matches||[])){
+              const lc=(c.contact_name||'').toLowerCase();
+              let score=0;
+              if(lc===q) score=1;
+              else if(lc.includes(q) || q.includes(lc)) score=0.85;
+              else{
+                const a=new Set(q.split(/\s+/).filter(s=>s.length>=3));
+                const b=new Set(lc.split(/\s+/).filter(s=>s.length>=3));
+                let common=0; a.forEach(t=>{ if(b.has(t)) common++; });
+                const denom=Math.max(a.size,b.size,1);
+                score=common/denom*0.85;
+              }
+              if(!best || score>best.score) best={...c,score};
+            }
+            if(best && best.score>=0.85){
+              custId=best.contact_id;
+              custName=best.contact_name;
+              customerIds[custName]=custId;
+              setClientData(activeClientId,'customerIds',customerIds);
+              setCustomers(prev=>prev.includes(custName)?prev:[...prev,custName]);
+            }
+          }catch(_){ /* fall through to create */ }
+        }
+        if(!custId){
           const supplierHasTrn = !!getClientData(activeClientId,'trn','');
           const created=await window.zohoCreateCustomer(orgId,{
             contact_name:custName,
@@ -3870,21 +3920,48 @@ function App(){
     if(!item || !item.customerName){ alert("Pick a customer name first."); return; }
     setOcrCustomerCreating(true);
     try{
-      // Use the invoice's detected currency as the customer's billing
-      // currency in Zoho. A USD invoice issued to a UAE-addressed customer
-      // (e.g. ATCOM billed in USD) must create the Zoho contact as USD —
-      // otherwise Zoho defaults to AED and a future foreign-currency
-      // invoice for them gets rebooked at the wrong amount.
-      const res = await window.zohoCreateCustomer(orgId, {
-        contact_name: item.customerName.trim(),
-        trn: item.customerTrn ? item.customerTrn.trim() : undefined,
-        address: (item.customerAddress || '').trim() || undefined,
-        country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
-        currency_code: item.currency || 'AED',
-        place_of_supply: item.placeOfSupply || undefined
-      });
+      const trimmedName = item.customerName.trim();
+      // First, check if the contact already exists in Zoho — the user
+      // may have created it manually in Zoho's UI, so our local
+      // customerIds cache won't know. Reuse on exact match or ≥0.85
+      // substring/token-overlap score to prevent duplicates.
+      const search = await window.zohoSearchCustomer(orgId, trimmedName);
+      const q = trimmedName.toLowerCase();
+      let existing = null;
+      for(const c of (search.matches||[])){
+        const lc=(c.contact_name||'').toLowerCase();
+        let score=0;
+        if(lc===q) score=1;
+        else if(lc.includes(q) || q.includes(lc)) score=0.85;
+        else{
+          const a=new Set(q.split(/\s+/).filter(s=>s.length>=3));
+          const b=new Set(lc.split(/\s+/).filter(s=>s.length>=3));
+          let common=0; a.forEach(t=>{ if(b.has(t)) common++; });
+          score=common/Math.max(a.size,b.size,1)*0.85;
+        }
+        if(!existing || score>existing.score) existing={...c,score};
+      }
+      let res;
+      if(existing && existing.score>=0.85){
+        res = { id: existing.contact_id, name: existing.contact_name };
+      } else {
+        // Use the invoice's detected currency as the customer's billing
+        // currency in Zoho. A USD invoice issued to a UAE-addressed customer
+        // (e.g. ATCOM billed in USD) must create the Zoho contact as USD —
+        // otherwise Zoho defaults to AED and a future foreign-currency
+        // invoice for them gets rebooked at the wrong amount.
+        const supplierHasTrn = !!getClientData(activeClientId,'trn','');
+        res = await window.zohoCreateCustomer(orgId, {
+          contact_name: trimmedName,
+          trn: item.customerTrn ? item.customerTrn.trim() : undefined,
+          address: (item.customerAddress || '').trim() || undefined,
+          country_code: item.customerCountry || alDetectCountry(item.customerAddress) || 'AE',
+          currency_code: item.currency || 'AED',
+          place_of_supply: supplierHasTrn ? (item.placeOfSupply || undefined) : undefined
+        });
+      }
       const cur = getClientData(activeClientId,'customerIds',{}) || {};
-      cur[res.name || item.customerName.trim()] = res.id;
+      cur[res.name || trimmedName] = res.id;
       setClientData(activeClientId,'customerIds',cur);
       setCustomers(prev => prev.includes(item.customerName.trim()) ? prev : [...prev, item.customerName.trim()]);
       // Touching the item re-runs validation (Customer-in-Zoho flips to PASS).

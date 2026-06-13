@@ -477,6 +477,37 @@ export const handler = async (event: Event) => {
       });
     }
 
+    // Search Zoho contacts by name (fuzzy contains match). Used by the
+    // Revenue push flow to detect customers that already exist in Zoho
+    // before creating a duplicate. payload = { name }. Returns
+    // { matches: [{ contact_id, contact_name, contact_type, email }, ...] }
+    // ordered by Zoho's relevance (closest first).
+    if (kind === 'searchCustomer') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      const name = String(p.name || '').trim();
+      if (!name) return JSON.stringify({ error: null, matches: [], apiUsage: lastApiUsage });
+      try {
+        const j = await zohoGet('contacts', accessToken, region, {
+          organization_id: orgId!,
+          contact_name_contains: name,
+          contact_type: 'customer',
+          per_page: '20'
+        });
+        const matches = (j?.contacts || []).map((c: any) => ({
+          contact_id: c.contact_id,
+          contact_name: c.contact_name,
+          contact_type: c.contact_type,
+          email: c.email,
+          status: c.status
+        }));
+        return JSON.stringify({ error: null, matches, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), matches: [], apiUsage: lastApiUsage });
+      }
+    }
+
     // Push operations — accept a JSON payload string and POST to Zoho.
     // Each push returns the Zoho response so the frontend can show the
     // created resource's id and surface specific errors per entry.
