@@ -1830,57 +1830,120 @@ function alDetectEmirate(addr){
   return null;
 }
 
-// Detect ISO-2 country code from a free-text billing address. Used when
-// creating Zoho contacts so the "Country/Region" mandatory field is
-// populated correctly — defaulting to AE silently is wrong for export
-// customers (e.g. ATCOM-style USD invoices to overseas buyers).
+// Full ISO 3166-1 country list matching Zoho's country dropdown.
+// Display labels follow Zoho's own conventions (e.g. "United Arab
+// Emirates" not "UAE", "Türkiye" not "Turkey"). The dropdown in the
+// review modal is rendered from this list.
 const AL_COUNTRIES = [
-  { code: 'AE', label: 'United Arab Emirates' },
-  { code: 'SA', label: 'Saudi Arabia' },
-  { code: 'OM', label: 'Oman' },
-  { code: 'BH', label: 'Bahrain' },
-  { code: 'QA', label: 'Qatar' },
-  { code: 'KW', label: 'Kuwait' },
-  { code: 'IN', label: 'India' },
-  { code: 'PK', label: 'Pakistan' },
-  { code: 'EG', label: 'Egypt' },
-  { code: 'JO', label: 'Jordan' },
-  { code: 'LB', label: 'Lebanon' },
-  { code: 'GB', label: 'United Kingdom' },
-  { code: 'US', label: 'United States' },
-  { code: 'SG', label: 'Singapore' },
-  { code: 'CN', label: 'China' },
-  { code: 'TR', label: 'Türkiye' },
-  { code: 'DE', label: 'Germany' },
-  { code: 'FR', label: 'France' },
-  { code: 'CH', label: 'Switzerland' },
-  { code: 'AU', label: 'Australia' },
-  { code: 'CA', label: 'Canada' },
+  {code:'AF',label:'Afghanistan'},{code:'AX',label:'Åland Islands'},{code:'AL',label:'Albania'},{code:'DZ',label:'Algeria'},{code:'AS',label:'American Samoa'},{code:'AD',label:'Andorra'},{code:'AO',label:'Angola'},{code:'AI',label:'Anguilla'},{code:'AQ',label:'Antarctica'},{code:'AG',label:'Antigua and Barbuda'},
+  {code:'AR',label:'Argentina'},{code:'AM',label:'Armenia'},{code:'AW',label:'Aruba'},{code:'AU',label:'Australia'},{code:'AT',label:'Austria'},{code:'AZ',label:'Azerbaijan'},{code:'BS',label:'Bahamas'},{code:'BH',label:'Bahrain'},{code:'BD',label:'Bangladesh'},{code:'BB',label:'Barbados'},
+  {code:'BY',label:'Belarus'},{code:'BE',label:'Belgium'},{code:'BZ',label:'Belize'},{code:'BJ',label:'Benin'},{code:'BM',label:'Bermuda'},{code:'BT',label:'Bhutan'},{code:'BO',label:'Bolivia'},{code:'BA',label:'Bosnia and Herzegovina'},{code:'BW',label:'Botswana'},{code:'BR',label:'Brazil'},
+  {code:'IO',label:'British Indian Ocean Territory'},{code:'VG',label:'British Virgin Islands'},{code:'BN',label:'Brunei'},{code:'BG',label:'Bulgaria'},{code:'BF',label:'Burkina Faso'},{code:'BI',label:'Burundi'},{code:'KH',label:'Cambodia'},{code:'CM',label:'Cameroon'},{code:'CA',label:'Canada'},{code:'CV',label:'Cape Verde'},
+  {code:'KY',label:'Cayman Islands'},{code:'CF',label:'Central African Republic'},{code:'TD',label:'Chad'},{code:'CL',label:'Chile'},{code:'CN',label:'China'},{code:'CX',label:'Christmas Island'},{code:'CC',label:'Cocos (Keeling) Islands'},{code:'CO',label:'Colombia'},{code:'KM',label:'Comoros'},{code:'CK',label:'Cook Islands'},
+  {code:'CR',label:'Costa Rica'},{code:'HR',label:'Croatia'},{code:'CU',label:'Cuba'},{code:'CW',label:'Curaçao'},{code:'CY',label:'Cyprus'},{code:'CZ',label:'Czech Republic'},{code:'CD',label:'Democratic Republic of the Congo'},{code:'DK',label:'Denmark'},{code:'DJ',label:'Djibouti'},{code:'DM',label:'Dominica'},
+  {code:'DO',label:'Dominican Republic'},{code:'TL',label:'East Timor'},{code:'EC',label:'Ecuador'},{code:'EG',label:'Egypt'},{code:'SV',label:'El Salvador'},{code:'GQ',label:'Equatorial Guinea'},{code:'ER',label:'Eritrea'},{code:'EE',label:'Estonia'},{code:'SZ',label:'Eswatini'},{code:'ET',label:'Ethiopia'},
+  {code:'FK',label:'Falkland Islands'},{code:'FO',label:'Faroe Islands'},{code:'FJ',label:'Fiji'},{code:'FI',label:'Finland'},{code:'FR',label:'France'},{code:'GF',label:'French Guiana'},{code:'PF',label:'French Polynesia'},{code:'GA',label:'Gabon'},{code:'GM',label:'Gambia'},{code:'GE',label:'Georgia'},
+  {code:'DE',label:'Germany'},{code:'GH',label:'Ghana'},{code:'GI',label:'Gibraltar'},{code:'GR',label:'Greece'},{code:'GL',label:'Greenland'},{code:'GD',label:'Grenada'},{code:'GP',label:'Guadeloupe'},{code:'GU',label:'Guam'},{code:'GT',label:'Guatemala'},{code:'GG',label:'Guernsey'},
+  {code:'GN',label:'Guinea'},{code:'GW',label:'Guinea-Bissau'},{code:'GY',label:'Guyana'},{code:'HT',label:'Haiti'},{code:'HN',label:'Honduras'},{code:'HK',label:'Hong Kong'},{code:'HU',label:'Hungary'},{code:'IS',label:'Iceland'},{code:'IN',label:'India'},{code:'ID',label:'Indonesia'},
+  {code:'IR',label:'Iran'},{code:'IQ',label:'Iraq'},{code:'IE',label:'Ireland'},{code:'IM',label:'Isle of Man'},{code:'IL',label:'Israel'},{code:'IT',label:'Italy'},{code:'CI',label:'Ivory Coast'},{code:'JM',label:'Jamaica'},{code:'JP',label:'Japan'},{code:'JE',label:'Jersey'},
+  {code:'JO',label:'Jordan'},{code:'KZ',label:'Kazakhstan'},{code:'KE',label:'Kenya'},{code:'KI',label:'Kiribati'},{code:'XK',label:'Kosovo'},{code:'KW',label:'Kuwait'},{code:'KG',label:'Kyrgyzstan'},{code:'LA',label:'Laos'},{code:'LV',label:'Latvia'},{code:'LB',label:'Lebanon'},
+  {code:'LS',label:'Lesotho'},{code:'LR',label:'Liberia'},{code:'LY',label:'Libya'},{code:'LI',label:'Liechtenstein'},{code:'LT',label:'Lithuania'},{code:'LU',label:'Luxembourg'},{code:'MO',label:'Macao'},{code:'MG',label:'Madagascar'},{code:'MW',label:'Malawi'},{code:'MY',label:'Malaysia'},
+  {code:'MV',label:'Maldives'},{code:'ML',label:'Mali'},{code:'MT',label:'Malta'},{code:'MH',label:'Marshall Islands'},{code:'MQ',label:'Martinique'},{code:'MR',label:'Mauritania'},{code:'MU',label:'Mauritius'},{code:'YT',label:'Mayotte'},{code:'MX',label:'Mexico'},{code:'FM',label:'Micronesia'},
+  {code:'MD',label:'Moldova'},{code:'MC',label:'Monaco'},{code:'MN',label:'Mongolia'},{code:'ME',label:'Montenegro'},{code:'MS',label:'Montserrat'},{code:'MA',label:'Morocco'},{code:'MZ',label:'Mozambique'},{code:'MM',label:'Myanmar'},{code:'NA',label:'Namibia'},{code:'NR',label:'Nauru'},
+  {code:'NP',label:'Nepal'},{code:'NL',label:'Netherlands'},{code:'NC',label:'New Caledonia'},{code:'NZ',label:'New Zealand'},{code:'NI',label:'Nicaragua'},{code:'NE',label:'Niger'},{code:'NG',label:'Nigeria'},{code:'NU',label:'Niue'},{code:'NF',label:'Norfolk Island'},{code:'KP',label:'North Korea'},
+  {code:'MK',label:'North Macedonia'},{code:'MP',label:'Northern Mariana Islands'},{code:'NO',label:'Norway'},{code:'OM',label:'Oman'},{code:'PK',label:'Pakistan'},{code:'PW',label:'Palau'},{code:'PS',label:'Palestine'},{code:'PA',label:'Panama'},{code:'PG',label:'Papua New Guinea'},{code:'PY',label:'Paraguay'},
+  {code:'PE',label:'Peru'},{code:'PH',label:'Philippines'},{code:'PN',label:'Pitcairn Islands'},{code:'PL',label:'Poland'},{code:'PT',label:'Portugal'},{code:'PR',label:'Puerto Rico'},{code:'QA',label:'Qatar'},{code:'CG',label:'Republic of the Congo'},{code:'RE',label:'Réunion'},{code:'RO',label:'Romania'},
+  {code:'RU',label:'Russia'},{code:'RW',label:'Rwanda'},{code:'BL',label:'Saint Barthélemy'},{code:'SH',label:'Saint Helena'},{code:'KN',label:'Saint Kitts and Nevis'},{code:'LC',label:'Saint Lucia'},{code:'MF',label:'Saint Martin'},{code:'PM',label:'Saint Pierre and Miquelon'},{code:'VC',label:'Saint Vincent and the Grenadines'},{code:'WS',label:'Samoa'},
+  {code:'SM',label:'San Marino'},{code:'ST',label:'São Tomé and Príncipe'},{code:'SA',label:'Saudi Arabia'},{code:'SN',label:'Senegal'},{code:'RS',label:'Serbia'},{code:'SC',label:'Seychelles'},{code:'SL',label:'Sierra Leone'},{code:'SG',label:'Singapore'},{code:'SX',label:'Sint Maarten'},{code:'SK',label:'Slovakia'},
+  {code:'SI',label:'Slovenia'},{code:'SB',label:'Solomon Islands'},{code:'SO',label:'Somalia'},{code:'ZA',label:'South Africa'},{code:'KR',label:'South Korea'},{code:'SS',label:'South Sudan'},{code:'ES',label:'Spain'},{code:'LK',label:'Sri Lanka'},{code:'SD',label:'Sudan'},{code:'SR',label:'Suriname'},
+  {code:'SJ',label:'Svalbard and Jan Mayen'},{code:'SE',label:'Sweden'},{code:'CH',label:'Switzerland'},{code:'SY',label:'Syria'},{code:'TW',label:'Taiwan'},{code:'TJ',label:'Tajikistan'},{code:'TZ',label:'Tanzania'},{code:'TH',label:'Thailand'},{code:'TG',label:'Togo'},{code:'TK',label:'Tokelau'},
+  {code:'TO',label:'Tonga'},{code:'TT',label:'Trinidad and Tobago'},{code:'TN',label:'Tunisia'},{code:'TR',label:'Türkiye'},{code:'TM',label:'Turkmenistan'},{code:'TC',label:'Turks and Caicos Islands'},{code:'TV',label:'Tuvalu'},{code:'UG',label:'Uganda'},{code:'UA',label:'Ukraine'},{code:'AE',label:'United Arab Emirates'},
+  {code:'GB',label:'United Kingdom'},{code:'US',label:'United States'},{code:'UY',label:'Uruguay'},{code:'UZ',label:'Uzbekistan'},{code:'VU',label:'Vanuatu'},{code:'VA',label:'Vatican City'},{code:'VE',label:'Venezuela'},{code:'VN',label:'Vietnam'},{code:'WF',label:'Wallis and Futuna'},{code:'EH',label:'Western Sahara'},
+  {code:'YE',label:'Yemen'},{code:'ZM',label:'Zambia'},{code:'ZW',label:'Zimbabwe'},
 ];
+
+// Multilingual address tokens → ISO-2 country code. Includes the
+// country's own-language name(s) and the names in major business
+// languages (English, Spanish, French, German, Italian, Portuguese,
+// Arabic, Chinese, Japanese, Russian, Hindi) plus capital cities and
+// major commercial hubs. Ordered most-specific → least-specific so the
+// first match wins. UAE-related tokens stay at the top so a domestic
+// invoice still resolves to AE.
 function alDetectCountry(addr){
   const a = (addr||'').toLowerCase();
   if (!a) return null;
-  if (/\buae\b|u\.?\s*a\.?\s*e\b|united\s*arab\s*emirates|emirates|\bdubai\b|\babu\s*dhabi\b|\bsharjah\b|\bajman\b|\bfujairah\b|ras\s*al\s*khaimah|umm\s*al\s*quwain/.test(a)) return 'AE';
-  if (/\bksa\b|saudi|riyadh|jeddah|dammam|mecca|medina/.test(a)) return 'SA';
-  if (/\boman\b|muscat|salalah/.test(a)) return 'OM';
-  if (/\bbahrain\b|manama/.test(a)) return 'BH';
-  if (/\bqatar\b|\bdoha\b/.test(a)) return 'QA';
-  if (/\bkuwait\b/.test(a)) return 'KW';
-  if (/\bindia\b|mumbai|delhi|bangalore|bengaluru|chennai|kolkata|hyderabad|pune/.test(a)) return 'IN';
-  if (/\bpakistan\b|karachi|lahore|islamabad/.test(a)) return 'PK';
-  if (/\begypt\b|cairo|alexandria/.test(a)) return 'EG';
-  if (/\bjordan\b|amman/.test(a)) return 'JO';
-  if (/\blebanon\b|beirut/.test(a)) return 'LB';
-  if (/\buk\b|u\.?\s*k\b|united\s*kingdom|england|britain|london|manchester/.test(a)) return 'GB';
-  if (/\busa\b|u\.?\s*s\.?\s*a\b|united\s*states|new\s*york|california|texas/.test(a)) return 'US';
-  if (/singapore/.test(a)) return 'SG';
-  if (/\bchina\b|shanghai|beijing|shenzhen/.test(a)) return 'CN';
-  if (/türkiye|turkey|istanbul|ankara/.test(a)) return 'TR';
-  if (/germany|deutschland|berlin|munich|frankfurt/.test(a)) return 'DE';
-  if (/\bfrance\b|paris/.test(a)) return 'FR';
-  if (/switzerland|zurich|geneva|bern/.test(a)) return 'CH';
-  if (/australia|sydney|melbourne/.test(a)) return 'AU';
-  if (/\bcanada\b|toronto|vancouver|montreal/.test(a)) return 'CA';
+  const checks = [
+    ['AE', /\buae\b|u\.?\s*a\.?\s*e\b|united\s*arab\s*emirates|emirates|الإمارات|إمارات|\bdubai\b|\babu\s*dhabi\b|\bsharjah\b|\bajman\b|\bfujairah\b|ras\s*al\s*khaimah|umm\s*al\s*quwain/],
+    ['SA', /\bksa\b|saudi|arabie\s*saoudite|arabia\s*saudita|السعودية|riyadh|jeddah|jiddah|dammam|mecca|medina/],
+    ['OM', /\boman\b|sultanate\s*of\s*oman|عُمان|\bمسقط\b|muscat|salalah/],
+    ['BH', /\bbahrain\b|البحرين|manama/],
+    ['QA', /\bqatar\b|قطر|\bdoha\b|الدوحة/],
+    ['KW', /\bkuwait\b|الكويت/],
+    ['IN', /\bindia\b|भारत|inde|indien|mumbai|bombay|delhi|bangalore|bengaluru|chennai|madras|kolkata|calcutta|hyderabad|pune|ahmedabad|kerala|tamil\s*nadu|karnataka|maharashtra/],
+    ['PK', /\bpakistan\b|پاکستان|karachi|lahore|islamabad|peshawar|faisalabad/],
+    ['EG', /\begypt\b|égypte|egipto|egitto|مصر|cairo|القاهرة|alexandria|giza/],
+    ['JO', /\bjordan\b|jordanie|jordania|الأردن|amman/],
+    ['LB', /\blebanon\b|liban|líbano|libano|لبنان|beirut|بيروت/],
+    ['GB', /\buk\b|u\.?\s*k\b|united\s*kingdom|england|scotland|wales|britain|british|royaume[-\s]*uni|reino\s*unido|großbritannien|grande[-\s]*bretagne|regno\s*unito|london|manchester|birmingham|edinburgh|glasgow|liverpool|leeds|bristol|cardiff|belfast|sheffield/],
+    ['US', /\busa\b|u\.?\s*s\.?\s*a\b|united\s*states|états[-\s]*unis|estados\s*unidos|stati\s*uniti|vereinigte\s*staaten|new\s*york|california|texas|florida|chicago|los\s*angeles|san\s*francisco|boston|seattle|miami|atlanta/],
+    ['SG', /singapore|singapur|singapour|cingapura|新加坡/],
+    ['CN', /\bchina\b|chine|cina|china[ip]?|中国|中華人民共和国|prc\b|p\.?\s*r\.?\s*c\b|people'?s\s*republic\s*of\s*china|shanghai|上海|beijing|peking|北京|shenzhen|深圳|guangzhou|广州|hong\s*kong|香港|hk\b/],
+    ['TR', /türkiye|turkey|turquía|turquie|turchia|türkei|istanbul|ankara|izmir/],
+    ['DE', /germany|deutschland|allemagne|alemania|germania|deutscher|berlin|munich|münchen|frankfurt|hamburg|cologne|köln|stuttgart|düsseldorf/],
+    ['FR', /\bfrance\b|francia|frankreich|frança|france-/, ],
+    ['CH', /switzerland|suisse|suiza|svizzera|schweiz|zurich|zürich|geneva|genève|bern|basel|lausanne/],
+    ['AU', /\baustralia\b|australie|austrália|sydney|melbourne|brisbane|perth|adelaide|canberra/],
+    ['CA', /\bcanada\b|canadá|toronto|vancouver|montreal|montréal|ottawa|calgary|edmonton|quebec|québec/],
+    ['ES', /\bspain\b|españa|espagne|spagna|spanien|espanha|madrid|barcelona|valencia|sevilla|seville|bilbao|málaga|zaragoza|a\s*coruña|coruna|galicia|catalunya|cataluña|andalucía/],
+    ['PT', /\bportugal\b|lisbon|lisboa|porto|coimbra/],
+    ['IT', /\bitaly\b|italia|italie|italien|italië|roma|\brome\b|milano|\bmilan\b|napoli|naples|torino|turin|firenze|florence|venezia|venice/],
+    ['NL', /netherlands|nederland|países\s*bajos|pays[-\s]*bas|paesi\s*bassi|niederlande|amsterdam|rotterdam|the\s*hague|den\s*haag|utrecht|eindhoven/],
+    ['BE', /\bbelgium\b|belgique|bélgica|belgio|belgien|brussels|bruxelles|antwerp|antwerpen|ghent|gent|liège/],
+    ['JP', /\bjapan\b|japón|japon|giappone|日本|tokyo|東京|osaka|大阪|kyoto|京都|yokohama|nagoya|sapporo/],
+    ['KR', /south\s*korea|korea(?:,\s*south)?|república\s*de\s*corea|corée\s*du\s*sud|südkorea|大韓民国|한국|대한민국|seoul|busan|incheon/],
+    ['RU', /russia|russie|rusia|russland|russland|россия|moscow|москва|saint\s*petersburg|st\.?\s*petersburg/],
+    ['IE', /\bireland\b|irlande|irlanda|irland|éire|dublin|cork|galway/],
+    ['SE', /\bsweden\b|suède|suecia|svezia|schweden|sverige|stockholm|gothenburg|göteborg|malmö/],
+    ['NO', /\bnorway\b|norvège|noruega|norvegia|norwegen|norge|oslo|bergen|trondheim/],
+    ['DK', /\bdenmark\b|danemark|dinamarca|danimarca|dänemark|danmark|copenhagen|københavn/],
+    ['FI', /\bfinland\b|finlande|finlandia|finnland|suomi|helsinki|tampere|turku/],
+    ['PL', /\bpoland\b|pologne|polonia|polen|polska|warsaw|warszawa|kraków|cracow|gdańsk/],
+    ['CZ', /czech\s*republic|czechia|república\s*checa|tchéquie|tschechien|česká\s*republika|prague|praha|brno/],
+    ['AT', /\baustria\b|autriche|österreich|vienna|wien|salzburg|graz|innsbruck/],
+    ['GR', /\bgreece\b|grèce|grecia|griechenland|ελλάδα|athens|αθήνα|thessaloniki/],
+    ['MX', /\bmexico\b|méxico|mexique|messico|mexiko|ciudad\s*de\s*méxico|guadalajara|monterrey|cancun/],
+    ['BR', /\bbrazil\b|brasil|brésil|brasile|brasilien|são\s*paulo|sao\s*paulo|rio\s*de\s*janeiro|brasília|salvador/],
+    ['AR', /\bargentina\b|argentine|argentinien|buenos\s*aires|córdoba|cordoba|rosario/],
+    ['ZA', /south\s*africa|sudáfrica|afrique\s*du\s*sud|südafrika|johannesburg|cape\s*town|durban|pretoria/],
+    ['NG', /\bnigeria\b|nigéria|lagos|abuja|kano/],
+    ['KE', /\bkenya\b|nairobi|mombasa/],
+    ['NZ', /new\s*zealand|nouvelle[-\s]*zélande|nueva\s*zelanda|neuseeland|aotearoa|auckland|wellington/],
+    ['TH', /\bthailand\b|thaïlande|tailandia|tailândia|bangkok|กรุงเทพ|chiang\s*mai|phuket/],
+    ['VN', /\bvietnam\b|viêt\s*nam|việt\s*nam|hanoi|ho\s*chi\s*minh|saigon/],
+    ['ID', /\bindonesia\b|indonésie|indonésia|jakarta|surabaya|bali|denpasar/],
+    ['MY', /\bmalaysia\b|malaisie|malasia|malesia|kuala\s*lumpur|penang|johor/],
+    ['PH', /\bphilippines\b|filipinas|pilipinas|manila|cebu|quezon\s*city/],
+    ['BD', /\bbangladesh\b|dhaka|chittagong/],
+    ['LK', /sri\s*lanka|ceilán|colombo/],
+    ['IL', /\bisrael\b|israël|tel\s*aviv|jerusalem|haifa/],
+    ['MA', /\bmorocco\b|maroc|marruecos|marocco|marokko|المغرب|casablanca|rabat|marrakech/],
+    ['TN', /\btunisia\b|tunisie|túnez|tunisi|tunesien|تونس|tunis/],
+    ['DZ', /algeria|algérie|argelia|algerien|الجزائر|algiers|algier|oran/],
+    ['LU', /luxembourg|luxemburgo|lussemburgo|luxemburg/],
+    ['LI', /liechtenstein|vaduz/],
+    ['MT', /\bmalta\b|valletta/],
+    ['CY', /\bcyprus\b|chypre|chipre|cipro|zypern|κύπρος|nicosia|limassol/],
+    ['IS', /\biceland\b|islande|islandia|islanda|island\s*\b|reykjavik|reykjavík/],
+    ['HU', /\bhungary\b|hongrie|hungría|ungheria|ungarn|magyarország|budapest/],
+    ['RO', /\bromania\b|roumanie|rumania|romênia|rumänien|românia|bucharest|bucurești/],
+    ['BG', /\bbulgaria\b|bulgarie|bulgarien|българия|sofia/],
+    ['SK', /slovakia|slovaquie|eslovaquia|slovacchia|slowakei|slovensko|bratislava/],
+    ['SI', /slovenia|slovénie|eslovenia|slovenija|ljubljana/],
+    ['HR', /\bcroatia\b|croatie|croacia|croazia|kroatien|hrvatska|zagreb/],
+    ['HK', /hong\s*kong|香港/],
+    ['TW', /\btaiwan\b|台灣|台北|taipei|kaohsiung/],
+  ];
+  for (const [code, re] of checks) { if (re.test(a)) return code; }
   return null;
 }
 
