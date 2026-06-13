@@ -3768,31 +3768,20 @@ function App(){
           || (alResolvePlaceOfSupply({customerAddress:item.customerAddress,customerTrn:item.customerTrn,supplierEmirate})||{}).code
           || supplierEmirate
           || 'DU';
-        // tax_treatment is country-bucketed. For non-AE/non-GCC customers
-        // (export of services, e.g. Spain) Zoho expects 'non_gcc' and
-        // REJECTS place_of_supply entirely — sending "DU" returns
-        // "Invalid Element place_of_supply [zoho code 8]".
-        const custCc = String(item.customerCountry || alDetectCountry(item.customerAddress) || 'AE').toUpperCase();
-        const custIsAE = custCc === 'AE';
-        const custIsGCC = ['SA','OM','BH','QA','KW'].includes(custCc);
-        let invTaxTreatment;
-        if (custIsAE) {
-          invTaxTreatment = item.customerTrn ? 'vat_registered' : 'vat_not_registered';
-        } else if (custIsGCC) {
-          invTaxTreatment = item.customerTrn ? 'gcc_vat_registered' : 'gcc_vat_not_registered';
-        } else {
-          invTaxTreatment = 'non_gcc';
-        }
         const body={
           customer_id:custId,
           date:item.date,
           due_date:item.dueDate||item.date,
           invoice_number:item.invoiceNumber,
-          tax_treatment: invTaxTreatment,
-          // place_of_supply applies only to UAE customers — Zoho rejects
-          // it for non_gcc / GCC tax_treatments with "Invalid Element
-          // place_of_supply [zoho code 8]".
-          ...(custIsAE ? { place_of_supply: placeOfSupply } : {}),
+          // tax_treatment on the INVOICE follows the CUSTOMER's TRN status,
+          // regardless of country. Ground truth from a real Z2 Tech invoice
+          // (Spanish customer) shows this org accepts only vat_registered /
+          // vat_not_registered on the invoice — non_gcc was rejected with
+          // 'Invalid Element tax_treatment [zoho code 8]'. The non_gcc
+          // bucket lives on the CONTACT (Zoho derives it from the contact
+          // country); the invoice itself stays on the UAE-resident enum.
+          tax_treatment: item.customerTrn ? 'vat_registered' : 'vat_not_registered',
+          place_of_supply: placeOfSupply,
           // Tell Zoho the invoice's actual currency. Without this, Zoho
           // silently falls back to the customer's base currency — a
           // 12,000 USD invoice was being booked as AED 12,000 against
