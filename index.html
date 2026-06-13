@@ -2072,7 +2072,10 @@ function alValidateOcrInvoice(item, ctx){
   // 4 · UAE tax-invoice compliance — mandatory fields
   const missing=[];
   if(!item.supplierName) missing.push('Supplier Name');
-  if(!item.supplierTrn) missing.push('Supplier TRN');
+  // Supplier TRN is only mandatory when the project itself has a TRN
+  // configured — for non-VAT-registered projects (e.g. foreign suppliers
+  // in Spain) UAE VAT compliance does not require a TRN on the invoice.
+  if(ctx.project.trn && !item.supplierTrn) missing.push('Supplier TRN');
   if(!item.invoiceNumber) missing.push('Invoice Number');
   if(!item.date) missing.push('Invoice Date');
   if(!item.customerName) missing.push('Customer Name');
