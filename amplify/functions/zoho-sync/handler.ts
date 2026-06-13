@@ -304,13 +304,29 @@ export const handler = async (event: Event) => {
       if (peg != null) {
         return JSON.stringify({ error: null, rate: Math.round(peg * 100000) / 100000, source: 'GCC peg (fixed parity)', dateUsed: p.date || null, apiUsage: lastApiUsage });
       }
-      // Floating pair — try the free open.er-api.com latest table.
+      // Floating pair — fetch the historical reference rate for the
+      // invoice date from frankfurter.dev (ECB data, free, no key).
+      // Endpoint: /v1/YYYY-MM-DD?base=EUR&symbols=AED. If the date falls
+      // on a weekend/holiday, Frankfurter returns the most recent prior
+      // working-day rate. Fall back to open.er-api.com's latest table
+      // only when historical lookup fails entirely.
+      const isoDate = /^\d{4}-\d{2}-\d{2}$/.test(String(p.date || '')) ? String(p.date) : '';
+      if (isoDate) {
+        try {
+          const r = await fetch(`https://api.frankfurter.dev/v1/${isoDate}?base=${from}&symbols=${to}`);
+          const j: any = await r.json();
+          const rate = j && j.rates && j.rates[to];
+          if (rate) {
+            return JSON.stringify({ error: null, rate: Math.round(Number(rate) * 100000) / 100000, source: `frankfurter.dev (ECB reference rate, ${j.date || isoDate})`, dateUsed: j.date || isoDate, apiUsage: lastApiUsage });
+          }
+        } catch (_) { /* fall through to latest */ }
+      }
       try {
         const r = await fetch(`https://open.er-api.com/v6/latest/${from}`);
         const j: any = await r.json();
         const rate = j && j.rates && j.rates[to];
         if (rate) {
-          return JSON.stringify({ error: null, rate: Math.round(Number(rate) * 100000) / 100000, source: 'open.er-api.com (latest reference rate)', dateUsed: new Date().toISOString().slice(0, 10), apiUsage: lastApiUsage });
+          return JSON.stringify({ error: null, rate: Math.round(Number(rate) * 100000) / 100000, source: 'open.er-api.com (latest reference rate — historical lookup failed)', dateUsed: new Date().toISOString().slice(0, 10), apiUsage: lastApiUsage });
         }
       } catch (_) { /* fall through */ }
       return JSON.stringify({ error: 'Historical exchange rate could not be retrieved. Enter the rate manually.', apiUsage: lastApiUsage });
