@@ -2704,7 +2704,7 @@ function App(){
 
   // UI state
   const[coaSearch,setCoaSearch]=useState({});const[coaDropdownOpen,setCoaDropdownOpen]=useState({});const[highlightIdx,setHighlightIdx]=useState(-1);
-  const[showRefDB,setShowRefDB]=useState(false);const[reviewTab,setReviewTab]=useState("expenses");const[selectedIds,setSelectedIds]=useState(new Set());
+  const[showRefDB,setShowRefDB]=useState(false);const[reviewTab,setReviewTab]=useState("expenses");const[txnTypeFilter,setTxnTypeFilter]=useState("all");const[selectedIds,setSelectedIds]=useState(new Set());
   const[showAddLedger,setShowAddLedger]=useState(false);const[newLedgerName,setNewLedgerName]=useState("");const[newLedgerType,setNewLedgerType]=useState("Expense");const[newLedgerCode,setNewLedgerCode]=useState("");
   const[showAddVendor,setShowAddVendor]=useState(false);const[newVendorName,setNewVendorName]=useState("");
   const[showAddCustomer,setShowAddCustomer]=useState(false);const[newCustomerName,setNewCustomerName]=useState("");
@@ -5362,6 +5362,10 @@ td,th{padding:8px 12px;vertical-align:middle}
     let l=classifiedTxns;
     if(reviewTab==="expenses") l=l.filter(t=>t.debit>0);
     else if(reviewTab==="revenue") l=l.filter(t=>t.credit>0);
+    // Sub-type filter within debits: journal / expense / bill — mirrors Zoho.
+    if(reviewTab==="expenses" && txnTypeFilter && txnTypeFilter!=="all"){
+      l = l.filter(t => (t.entryMode||"expense") === txnTypeFilter);
+    }
     if(filterStatus==="suspense")l=l.filter(t=>t.status==="Suspense");
     if(filterStatus==="confirmed")l=l.filter(t=>t.status==="Confirmed"||t.status==="Auto-Assigned");
     if(confidenceFilter===1)l=l.filter(t=>t.confidence===0);
@@ -7491,11 +7495,24 @@ td,th{padding:8px 12px;vertical-align:middle}
             {[{label:"Expenses",val:expenseCount,color:"#dc2626",bg:"rgba(220,38,38,0.08)"},{label:"Revenue",val:revenueCount,color:"#16a34a",bg:"rgba(22,163,74,0.08)"},{label:"Auto-Assigned",val:stats.auto,color:"#6958C2",bg:"rgba(105,88,194,0.08)"},{label:"Suspense",val:stats.suspense,color:"#d97706",bg:"rgba(217,119,6,0.08)"},{label:"Confirmed",val:stats.confirmed,color:"#16a34a",bg:"rgba(22,163,74,0.08)"}].map(s=><div key={s.label} style={{background:s.bg,borderRadius:8,padding:"8px 14px",border:"1px solid "+s.color+"22",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18,fontWeight:700,color:s.color,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1}}>{s.val}</span><span style={{fontSize:12,color:"#555",fontWeight:500}}>{s.label}</span></div>)}
           </div>
 
-          {/* Expenses / Revenue Tabs */}
-          <div style={{display:"flex",gap:0,borderBottom:"1px solid #e2e2ea"}}>
-            <button onClick={()=>{setReviewTab("expenses");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="expenses"?"2px solid #dc2626":"2px solid transparent",background:"transparent",color:reviewTab==="expenses"?"#dc2626":"#777777"}}>💸 Debit ({expenseCount})</button>
-            <button onClick={()=>{setReviewTab("revenue");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="revenue"?"2px solid #16a34a":"2px solid transparent",background:"transparent",color:reviewTab==="revenue"?"#16a34a":"#777777"}}>💰 Credit ({revenueCount})</button>
-          </div>
+          {/* Zoho-style sub-tabs: Journal / Expenses / Bills (debits) · Revenue Invoices (credits) */}
+          {(()=>{
+            const debits = classifiedTxns.filter(t=>t.debit>0);
+            const journalCount = debits.filter(t=>(t.entryMode||"expense")==="journal").length;
+            const billCount = debits.filter(t=>(t.entryMode||"expense")==="billpay").length;
+            const expenseOnlyCount = debits.filter(t=>(t.entryMode||"expense")==="expense").length;
+            const TAB = ({active,onClick,color,label,count,icon})=>(
+              <button onClick={onClick} style={{padding:"10px 20px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:active?"2px solid "+color:"2px solid transparent",background:"transparent",color:active?color:"#777",display:"inline-flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}}>{icon}{label} <span style={{fontSize:11,color:active?color:"#aaa",background:active?color+"15":"#f0f0f4",padding:"1px 7px",borderRadius:10,fontWeight:700}}>{count}</span></button>
+            );
+            return <div style={{display:"flex",gap:0,borderBottom:"1px solid #e2e2ea",flexWrap:"wrap"}}>
+              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="expense"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("expense");setFilterStatus("all");}} color="#dc2626" label="Expenses" count={expenseOnlyCount} icon="💸" />
+              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="billpay"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("billpay");setFilterStatus("all");}} color="#0891b2" label="Bills" count={billCount} icon="🧾" />
+              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="journal"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("journal");setFilterStatus("all");}} color="#6958C2" label="Journals" count={journalCount} icon="📓" />
+              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="all"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("all");setFilterStatus("all");}} color="#888" label="All debits" count={expenseCount} icon="⇩" />
+              <div style={{flex:1,borderBottom:"1px solid transparent"}}/>
+              <TAB active={reviewTab==="revenue"} onClick={()=>{setReviewTab("revenue");setTxnTypeFilter("all");setFilterStatus("all");}} color="#16a34a" label="Revenue Invoices" count={revenueCount} icon="💰" />
+            </div>;
+          })()}
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
               <input type="text" placeholder="Search..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 12px",color:"#1a1a2e",fontSize:12,width:180}}/>
@@ -7635,14 +7652,14 @@ td,th{padding:8px 12px;vertical-align:middle}
               and filter row already cover stats and filters. */}
           <div><div style={{minWidth:0}}>
           <div style={{borderRadius:10,border:"1px solid #e2e2ea",overflow:"hidden"}}><div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}><thead><tr style={{background:"#f8f9fc"}}>
-              <th style={{padding:"14px 10px",width:40,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}><input type="checkbox" checked={filteredTxns.length>0&&filteredTxns.every(t=>selectedIds.has(t.id))} onChange={toggleSelectAll} style={{cursor:"pointer",accentColor:"#6958C2"}} /></th>
-              {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment","Posts To",reviewTab==="expenses"?"Route":"",reviewTab==="expenses"?"Vendor/Contact":"","Confidence","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"14px 14px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#666666",fontWeight:700,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:12,letterSpacing:"0.02em"}}>{h}</th>)}
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,tableLayout:"auto"}}><thead><tr style={{background:"#f8f9fc"}}>
+              <th style={{padding:"10px 8px",width:34,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}><input type="checkbox" checked={filteredTxns.length>0&&filteredTxns.every(t=>selectedIds.has(t.id))} onChange={toggleSelectAll} style={{cursor:"pointer",accentColor:"#6958C2"}} /></th>
+              {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment","Posts To",reviewTab==="expenses"?"Type":"",reviewTab==="expenses"?"Vendor":"","Conf.","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"10px 10px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#666666",fontWeight:700,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:11,letterSpacing:"0.02em"}}>{h}</th>)}
             </tr></thead><tbody>{filteredTxns.map((t,i)=><tr key={t.id} style={{borderBottom:"1px solid #ffffff",background:selectedIds.has(t.id)?"rgba(105,88,194,0.08)":t.status==="Suspense"?"rgba(217,119,6,0.04)":i%2===0?"transparent":"rgba(0,20,65,0.025)"}}>
-              <td style={{padding:"12px 10px",textAlign:"center"}}><input type="checkbox" checked={selectedIds.has(t.id)} onChange={()=>toggleSelect(t.id)} style={{cursor:"pointer",accentColor:"#6958C2"}} /></td>
-              <td style={{padding:"12px 14px",fontFamily:"'IBM Plex Mono',monospace",fontSize:12,whiteSpace:"nowrap",color:"#444"}}>{t.date}</td>
-              <td style={{padding:"12px 14px",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13,color:"#1a1a2e"}} title={t.description}>{t.description}</td>
-              <td style={{padding:"12px 14px",textAlign:"right",color:t.debit?"#dc2626":t.credit?"#16a34a":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:13,fontWeight:600}}>{t.debit?fmt(t.debit):t.credit?fmt(t.credit):"—"}</td>
+              <td style={{padding:"9px 8px",textAlign:"center"}}><input type="checkbox" checked={selectedIds.has(t.id)} onChange={()=>toggleSelect(t.id)} style={{cursor:"pointer",accentColor:"#6958C2"}} /></td>
+              <td style={{padding:"9px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,whiteSpace:"nowrap",color:"#444"}}>{t.date}</td>
+              <td style={{padding:"9px 10px",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:"#1a1a2e"}} title={t.description}>{t.description}</td>
+              <td style={{padding:"9px 10px",textAlign:"right",color:t.debit?"#dc2626":t.credit?"#16a34a":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:12,fontWeight:600,whiteSpace:"nowrap"}}>{t.debit?fmt(t.debit):t.credit?fmt(t.credit):"—"}</td>
 
               {/* Credit tab: Customer column FIRST (before ledger) */}
               {reviewTab==="revenue"&&<td style={{padding:"8px 6px",minWidth:160,position:"relative"}}>
@@ -7731,7 +7748,18 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {coaDropdownOpen[t.id]&&(()=>{
                   // Context filter: expenses tab shows expense accounts, revenue tab
                   // shows income accounts; Journal entry-mode sees everything.
-                  const ctxAccounts=alFilterAccountsForContext(chartOfAccounts, reviewTab==="revenue" ? "income" : (t.entryMode==="journal" ? "all" : "expense"));
+                  // Zoho restricts which ledgers can be chosen depending on the
+                  // transaction type. Mirror that here:
+                  //   Revenue Invoice → income accounts only
+                  //   Journal         → every account (full COA)
+                  //   Bill            → expense + COGS (Bills usually post the
+                  //                     debit side to an expense account; the
+                  //                     credit side hits AP automatically on push)
+                  //   Expense         → expense + COGS
+                  const ctxKind = reviewTab==="revenue" ? "income"
+                                : t.entryMode==="journal" ? "all"
+                                : "expense";
+                  const ctxAccounts=alFilterAccountsForContext(chartOfAccounts, ctxKind);
                   const filtered=ctxAccounts.filter(a=>!coaSearch[t.id]||a.name.toLowerCase().includes((coaSearch[t.id]||"").toLowerCase()));
                   return <div style={{position:"absolute",top:"100%",left:8,right:8,zIndex:100,background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:340,overflow:"hidden",display:"flex",flexDirection:"column",minWidth:300}}>
                   <input type="text" placeholder="Search ledger..." value={coaSearch[t.id]||""} onChange={e=>{setCoaSearch(p=>({...p,[t.id]:e.target.value}));setHighlightIdx(0);}} onClick={e=>e.stopPropagation()} autoFocus onKeyDown={e=>{
@@ -7747,20 +7775,25 @@ td,th{padding:8px 12px;vertical-align:middle}
                 </>)}
               </td>
               {/* Posts To — clearly shows the accountant whether this row hits the P&L or the Balance Sheet */}
-              <td style={{padding:"12px 12px",whiteSpace:"nowrap"}}>{(()=>{
+              <td style={{padding:"9px 8px",whiteSpace:"nowrap"}}>{(()=>{
                 const d = alDestinationOf(t.selectedLedger, chartOfAccounts);
-                const tone = d==="P&L" ? {bg:"rgba(22,163,74,0.10)",fg:"#16a34a",br:"rgba(22,163,74,0.30)"}
-                           : d==="Balance Sheet" ? {bg:"rgba(8,145,178,0.10)",fg:"#0891b2",br:"rgba(8,145,178,0.30)"}
-                           : {bg:"rgba(217,119,6,0.10)",fg:"#d97706",br:"rgba(217,119,6,0.35)"};
-                const label = d==="P&L" ? "Profit & Loss" : d==="Balance Sheet" ? "Balance Sheet" : "Pick a ledger first";
-                return <span style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700,padding:"5px 10px",borderRadius:8,background:tone.bg,color:tone.fg,border:"1px solid "+tone.br,whiteSpace:"nowrap"}}>{d==="Unknown"?"⚠ ":""}{label}</span>;
+                const tone = d==="P&L" ? {bg:"rgba(22,163,74,0.10)",fg:"#16a34a",br:"rgba(22,163,74,0.28)"}
+                           : d==="Balance Sheet" ? {bg:"rgba(8,145,178,0.10)",fg:"#0891b2",br:"rgba(8,145,178,0.28)"}
+                           : {bg:"rgba(217,119,6,0.10)",fg:"#d97706",br:"rgba(217,119,6,0.32)"};
+                const label = d==="P&L" ? "P&L" : d==="Balance Sheet" ? "Balance Sheet" : "Pick ledger";
+                return <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:11,fontWeight:700,padding:"3px 8px",borderRadius:6,background:tone.bg,color:tone.fg,border:"1px solid "+tone.br,whiteSpace:"nowrap"}}>{d==="Unknown"?"⚠":""}{label}</span>;
               })()}</td>
-              {/* Entry Mode (expenses only) */}
-              {reviewTab==="expenses"&&<td style={{padding:"8px 6px"}}>
-                <select value={t.entryMode||"expense"} onChange={e=>handleEntryModeChange(t.id,e.target.value)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:4,padding:"3px 4px",color:t.entryMode==="journal"?"#6958C2":"#16a34a",fontSize:10,cursor:"pointer"}}>
-                  <option value="expense">Expense</option>
-                  <option value="journal">Journal</option>
-                </select>
+              {/* Entry Mode / Zoho txn type — Expense / Bill / Journal */}
+              {reviewTab==="expenses"&&<td style={{padding:"9px 6px"}}>
+                {(()=>{
+                  const m = t.entryMode||"expense";
+                  const c = m==="journal"?"#6958C2":m==="billpay"?"#0891b2":"#16a34a";
+                  return <select value={m} onChange={e=>handleEntryModeChange(t.id,e.target.value)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:5,padding:"4px 6px",color:c,fontSize:11,cursor:"pointer",fontWeight:600,minWidth:80}}>
+                    <option value="expense">Expense</option>
+                    <option value="billpay">Bill</option>
+                    <option value="journal">Journal</option>
+                  </select>;
+                })()}
               </td>}
               {/* Vendor (Debit tab only) */}
               {reviewTab==="expenses"&&<td style={{padding:"8px 6px",minWidth:160,position:"relative"}}>
@@ -7778,11 +7811,11 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>}
                 </div>
               </td>}
-              <td style={{padding:"12px 10px"}}><div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"center"}}>
-                <span style={{fontSize:12,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence}%</span>
-                <span style={{fontSize:10,color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence===100?"Exact":t.confidence===50?"Partial":"New"}</span>
+              <td style={{padding:"9px 8px"}}><div style={{display:"flex",flexDirection:"column",gap:1,alignItems:"center"}}>
+                <span style={{fontSize:11,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence}%</span>
+                <span style={{fontSize:9,color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence===100?"Exact":t.confidence===50?"Partial":"New"}</span>
               </div></td>
-              <td style={{padding:"12px 12px"}}><span style={{fontSize:11,fontWeight:700,padding:"4px 9px",borderRadius:6,background:t.status==="Confirmed"?"rgba(22,163,74,0.12)":t.status==="Auto-Assigned"?"rgba(105,88,194,0.12)":"rgba(217,119,6,0.12)",color:t.status==="Confirmed"?"#16a34a":t.status==="Auto-Assigned"?"#6958C2":"#d97706",whiteSpace:"nowrap"}}>{t.status}</span></td>
+              <td style={{padding:"9px 8px"}}><span style={{fontSize:10,fontWeight:700,padding:"3px 7px",borderRadius:5,background:t.status==="Confirmed"?"rgba(22,163,74,0.12)":t.status==="Auto-Assigned"?"rgba(105,88,194,0.12)":"rgba(217,119,6,0.12)",color:t.status==="Confirmed"?"#16a34a":t.status==="Auto-Assigned"?"#6958C2":"#d97706",whiteSpace:"nowrap"}}>{t.status}</span></td>
             </tr>)}</tbody></table>
           </div></div>
             </div>
