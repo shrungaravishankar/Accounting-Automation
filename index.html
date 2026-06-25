@@ -5603,7 +5603,7 @@ td,th{padding:8px 12px;vertical-align:middle}
         </div>
       </div>
 
-      <div style={{maxWidth:1400,margin:"0 auto",padding:"24px 28px"}}>
+      <div style={{maxWidth:1600,margin:"0 auto",padding:"24px 32px"}}>
 
         {/* ═════════════════ DASHBOARD VIEW ═════════════════ */}
         {view==="dashboard" && (()=>{
@@ -7487,8 +7487,8 @@ td,th{padding:8px 12px;vertical-align:middle}
               ⚠ <strong>Suspense-only mode.</strong> You re-opened this project to clarify suspense entries. Only the rows that were originally Suspense can be re-classified. On export, only those re-classified entries will be downloaded — import the delta into Zoho.
             </div>
           )}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12}}>
-            {[{label:"Expenses",val:expenseCount,color:"#dc2626",bg:"rgba(220,38,38,0.1)"},{label:"Revenue",val:revenueCount,color:"#16a34a",bg:"rgba(22,163,74,0.1)"},{label:"Auto-Assigned",val:stats.auto,color:"#6958C2",bg:"rgba(105,88,194,0.1)"},{label:"Suspense",val:stats.suspense,color:"#d97706",bg:"rgba(217,119,6,0.1)"},{label:"Confirmed",val:stats.confirmed,color:"#6958C2",bg:"rgba(105,88,194,0.1)"}].map(s=><div key={s.label} style={{background:s.bg,borderRadius:10,padding:"14px 16px",border:"1px solid "+s.color+"22"}}><div style={{fontSize:22,fontWeight:700,color:s.color,fontFamily:"'IBM Plex Mono',monospace"}}>{s.val}</div><div style={{fontSize:11,color:"#888888",marginTop:2}}>{s.label}</div></div>)}
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            {[{label:"Expenses",val:expenseCount,color:"#dc2626",bg:"rgba(220,38,38,0.08)"},{label:"Revenue",val:revenueCount,color:"#16a34a",bg:"rgba(22,163,74,0.08)"},{label:"Auto-Assigned",val:stats.auto,color:"#6958C2",bg:"rgba(105,88,194,0.08)"},{label:"Suspense",val:stats.suspense,color:"#d97706",bg:"rgba(217,119,6,0.08)"},{label:"Confirmed",val:stats.confirmed,color:"#16a34a",bg:"rgba(22,163,74,0.08)"}].map(s=><div key={s.label} style={{background:s.bg,borderRadius:8,padding:"8px 14px",border:"1px solid "+s.color+"22",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18,fontWeight:700,color:s.color,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1}}>{s.val}</span><span style={{fontSize:12,color:"#555",fontWeight:500}}>{s.label}</span></div>)}
           </div>
 
           {/* Expenses / Revenue Tabs */}
@@ -7636,7 +7636,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               (focused-row detail). Click a row's blank area to focus
               it on the right; existing inline editors (ledger / vendor
               / customer dropdowns) continue to work in the table. */}
-          <div style={{display:"grid",gridTemplateColumns:"220px 1fr 320px",gap:12,alignItems:"flex-start"}}>
+          <div style={{display:"grid",gridTemplateColumns:focusedTxnId?"240px 1fr 360px":"240px 1fr",gap:16,alignItems:"flex-start"}}>
             {/* LEFT PANEL */}
             <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:14,position:"sticky",top:12,maxHeight:"calc(100vh - 40px)",overflowY:"auto"}}>
               <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Project</div>
@@ -7679,14 +7679,14 @@ td,th{padding:8px 12px;vertical-align:middle}
             {/* CENTER — existing table preserved exactly */}
             <div style={{minWidth:0}}>
           <div style={{borderRadius:10,border:"1px solid #e2e2ea",overflow:"hidden"}}><div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}><thead><tr style={{background:"#f8f9fc"}}>
-              <th style={{padding:"10px 8px",width:36,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}><input type="checkbox" checked={filteredTxns.length>0&&filteredTxns.every(t=>selectedIds.has(t.id))} onChange={toggleSelectAll} style={{cursor:"pointer",accentColor:"#6958C2"}} /></th>
-              {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment",reviewTab==="expenses"?"Route":"",reviewTab==="expenses"?"Vendor/Contact":"","Confidence","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"10px 12px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:11}}>{h}</th>)}
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}><thead><tr style={{background:"#f8f9fc"}}>
+              <th style={{padding:"14px 10px",width:40,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}><input type="checkbox" checked={filteredTxns.length>0&&filteredTxns.every(t=>selectedIds.has(t.id))} onChange={toggleSelectAll} style={{cursor:"pointer",accentColor:"#6958C2"}} /></th>
+              {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment",reviewTab==="expenses"?"Route":"",reviewTab==="expenses"?"Vendor/Contact":"","Confidence","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"14px 14px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#666666",fontWeight:700,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:12,letterSpacing:"0.02em"}}>{h}</th>)}
             </tr></thead><tbody>{filteredTxns.map((t,i)=><tr key={t.id} onClick={(e)=>{ if(e.target.closest('select, input, button, [class*="dropdown"]')) return; setFocusedTxnId(t.id); }} style={{borderBottom:"1px solid #ffffff",cursor:"pointer",background:focusedTxnId===t.id?"rgba(77,63,160,0.12)":selectedIds.has(t.id)?"rgba(105,88,194,0.08)":t.status==="Suspense"?"rgba(217,119,6,0.03)":i%2===0?"transparent":"rgba(0,20,65,0.03)"}}>
-              <td style={{padding:"8px 8px",textAlign:"center"}}><input type="checkbox" checked={selectedIds.has(t.id)} onChange={()=>toggleSelect(t.id)} style={{cursor:"pointer",accentColor:"#6958C2"}} /></td>
-              <td style={{padding:"8px 12px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,whiteSpace:"nowrap"}}>{t.date}</td>
-              <td style={{padding:"8px 12px",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={t.description}>{t.description}</td>
-              <td style={{padding:"8px 12px",textAlign:"right",color:t.debit?"#dc2626":t.credit?"#16a34a":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{t.debit?fmt(t.debit):t.credit?fmt(t.credit):"—"}</td>
+              <td style={{padding:"12px 10px",textAlign:"center"}}><input type="checkbox" checked={selectedIds.has(t.id)} onChange={()=>toggleSelect(t.id)} style={{cursor:"pointer",accentColor:"#6958C2"}} /></td>
+              <td style={{padding:"12px 14px",fontFamily:"'IBM Plex Mono',monospace",fontSize:12,whiteSpace:"nowrap",color:"#444"}}>{t.date}</td>
+              <td style={{padding:"12px 14px",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13,color:"#1a1a2e"}} title={t.description}>{t.description}</td>
+              <td style={{padding:"12px 14px",textAlign:"right",color:t.debit?"#dc2626":t.credit?"#16a34a":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:13,fontWeight:600}}>{t.debit?fmt(t.debit):t.credit?fmt(t.credit):"—"}</td>
 
               {/* Credit tab: Customer column FIRST (before ledger) */}
               {reviewTab==="revenue"&&<td style={{padding:"8px 6px",minWidth:160,position:"relative"}}>
@@ -7814,16 +7814,16 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>}
                 </div>
               </td>}
-              <td style={{padding:"8px 6px"}}><div style={{display:"flex",flexDirection:"column",gap:2,alignItems:"center"}}>
-                <span style={{fontSize:10,fontWeight:600,fontFamily:"'IBM Plex Mono',monospace",color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence}%</span>
-                <span style={{fontSize:8,color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence===100?"Exact":t.confidence===50?"Partial":"New"}</span>
+              <td style={{padding:"12px 10px"}}><div style={{display:"flex",flexDirection:"column",gap:3,alignItems:"center"}}>
+                <span style={{fontSize:12,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence}%</span>
+                <span style={{fontSize:10,color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence===100?"Exact":t.confidence===50?"Partial":"New"}</span>
               </div></td>
-              <td style={{padding:"8px 8px"}}><span style={{fontSize:9,fontWeight:600,padding:"2px 6px",borderRadius:4,background:t.status==="Confirmed"?"rgba(22,163,74,0.1)":t.status==="Auto-Assigned"?"rgba(105,88,194,0.1)":"rgba(217,119,6,0.1)",color:t.status==="Confirmed"?"#16a34a":t.status==="Auto-Assigned"?"#6958C2":"#d97706"}}>{t.status}</span></td>
+              <td style={{padding:"12px 12px"}}><span style={{fontSize:11,fontWeight:700,padding:"4px 9px",borderRadius:6,background:t.status==="Confirmed"?"rgba(22,163,74,0.12)":t.status==="Auto-Assigned"?"rgba(105,88,194,0.12)":"rgba(217,119,6,0.12)",color:t.status==="Confirmed"?"#16a34a":t.status==="Auto-Assigned"?"#6958C2":"#d97706",whiteSpace:"nowrap"}}>{t.status}</span></td>
             </tr>)}</tbody></table>
           </div></div>
             </div>
-            {/* RIGHT — focused transaction detail */}
-            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:14,position:"sticky",top:12,maxHeight:"calc(100vh - 40px)",overflowY:"auto"}}>
+            {/* RIGHT — focused transaction detail (only mounted when a row is focused) */}
+            {focusedTxnId && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:14,position:"sticky",top:12,maxHeight:"calc(100vh - 40px)",overflowY:"auto"}}>
               {(()=>{
                 const focused = focusedTxnId ? classifiedTxns.find(t=>t.id===focusedTxnId) : null;
                 if(!focused){
@@ -7905,7 +7905,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>
                 </div>;
               })()}
-            </div>
+            </div>}
           </div>
           <div style={{display:"flex",justifyContent:"flex-end",gap:24,padding:"8px 16px",background:"#f8f9fc",borderRadius:8,border:"1px solid #e2e2ea"}}>
             <span style={{fontSize:12,color:"#888888"}}>Total Debits: <strong style={{color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(stats.totalDebit)}</strong></span>
