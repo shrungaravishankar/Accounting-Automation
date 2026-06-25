@@ -7631,58 +7631,14 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>}
           </div>}
 
-          {/* Three-panel accountant workspace: LEFT (filters + stats),
-              CENTER (the existing review table — left untouched), RIGHT
-              (focused-row detail). Click a row's blank area to focus
-              it on the right; existing inline editors (ledger / vendor
-              / customer dropdowns) continue to work in the table. */}
-          <div style={{display:"grid",gridTemplateColumns:focusedTxnId?"240px 1fr 360px":"240px 1fr",gap:16,alignItems:"flex-start"}}>
-            {/* LEFT PANEL */}
-            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:14,position:"sticky",top:12,maxHeight:"calc(100vh - 40px)",overflowY:"auto"}}>
-              <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Project</div>
-              <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",marginBottom:2}}>{activeClientName||"—"}</div>
-              <div style={{fontSize:10,color:"#888888",marginBottom:14}}>{bankAccount||"Bank account not set"}</div>
-
-              <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Status</div>
-              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:14}}>
-                {[
-                  {key:"all",label:"All transactions",count:classifiedTxns.length},
-                  {key:"suspense",label:"⚠ Suspense",count:stats.suspense},
-                  {key:"confirmed",label:"✓ Confirmed",count:stats.confirmed},
-                ].map(f=>(
-                  <div key={f.key} onClick={()=>setFilterStatus(f.key)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 10px",borderRadius:6,cursor:"pointer",background:filterStatus===f.key?"rgba(77,63,160,0.08)":"transparent",color:filterStatus===f.key?"#4D3FA0":"#1a1a2e",fontSize:11,fontWeight:filterStatus===f.key?600:500}}>
-                    <span>{f.label}</span>
-                    <span style={{fontSize:10,fontFamily:"'IBM Plex Mono',monospace",color:"#888888"}}>{f.count}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Confidence</div>
-              <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:14}}>
-                {[
-                  {v:0,label:"All confidences"},
-                  {v:1,label:"0% — Unmatched"},
-                  {v:50,label:"≤ 50% — Partial"},
-                ].map(o=>(
-                  <div key={o.v} onClick={()=>setConfidenceFilter(o.v)} style={{padding:"5px 10px",borderRadius:6,cursor:"pointer",background:confidenceFilter===o.v?"rgba(77,63,160,0.08)":"transparent",color:confidenceFilter===o.v?"#4D3FA0":"#1a1a2e",fontSize:11,fontWeight:confidenceFilter===o.v?600:500}}>{o.label}</div>
-                ))}
-              </div>
-
-              <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Counts</div>
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#666666"}}><span>Auto-classified</span><strong style={{color:"#6958C2",fontFamily:"'IBM Plex Mono',monospace"}}>{stats.auto}</strong></div>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#666666"}}><span>Manually confirmed</span><strong style={{color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{stats.confirmed}</strong></div>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#666666"}}><span>Awaiting decision</span><strong style={{color:"#d97706",fontFamily:"'IBM Plex Mono',monospace"}}>{stats.suspense}</strong></div>
-              </div>
-            </div>
-
-            {/* CENTER — existing table preserved exactly */}
-            <div style={{minWidth:0}}>
+          {/* Single full-width table. Sidebars removed — the top KPI strip
+              and filter row already cover stats and filters. */}
+          <div><div style={{minWidth:0}}>
           <div style={{borderRadius:10,border:"1px solid #e2e2ea",overflow:"hidden"}}><div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}><thead><tr style={{background:"#f8f9fc"}}>
               <th style={{padding:"14px 10px",width:40,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}><input type="checkbox" checked={filteredTxns.length>0&&filteredTxns.every(t=>selectedIds.has(t.id))} onChange={toggleSelectAll} style={{cursor:"pointer",accentColor:"#6958C2"}} /></th>
-              {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment",reviewTab==="expenses"?"Route":"",reviewTab==="expenses"?"Vendor/Contact":"","Confidence","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"14px 14px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#666666",fontWeight:700,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:12,letterSpacing:"0.02em"}}>{h}</th>)}
-            </tr></thead><tbody>{filteredTxns.map((t,i)=><tr key={t.id} onClick={(e)=>{ if(e.target.closest('select, input, button, [class*="dropdown"]')) return; setFocusedTxnId(t.id); }} style={{borderBottom:"1px solid #ffffff",cursor:"pointer",background:focusedTxnId===t.id?"rgba(77,63,160,0.12)":selectedIds.has(t.id)?"rgba(105,88,194,0.08)":t.status==="Suspense"?"rgba(217,119,6,0.03)":i%2===0?"transparent":"rgba(0,20,65,0.03)"}}>
+              {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment","Posts To",reviewTab==="expenses"?"Route":"",reviewTab==="expenses"?"Vendor/Contact":"","Confidence","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"14px 14px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#666666",fontWeight:700,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:12,letterSpacing:"0.02em"}}>{h}</th>)}
+            </tr></thead><tbody>{filteredTxns.map((t,i)=><tr key={t.id} style={{borderBottom:"1px solid #ffffff",background:selectedIds.has(t.id)?"rgba(105,88,194,0.08)":t.status==="Suspense"?"rgba(217,119,6,0.04)":i%2===0?"transparent":"rgba(0,20,65,0.025)"}}>
               <td style={{padding:"12px 10px",textAlign:"center"}}><input type="checkbox" checked={selectedIds.has(t.id)} onChange={()=>toggleSelect(t.id)} style={{cursor:"pointer",accentColor:"#6958C2"}} /></td>
               <td style={{padding:"12px 14px",fontFamily:"'IBM Plex Mono',monospace",fontSize:12,whiteSpace:"nowrap",color:"#444"}}>{t.date}</td>
               <td style={{padding:"12px 14px",maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13,color:"#1a1a2e"}} title={t.description}>{t.description}</td>
@@ -7772,7 +7728,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>
                 ) : (
                 <><div onClick={()=>{setCoaDropdownOpen(p=>({...p,[t.id]:!p[t.id]}));setHighlightIdx(0);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:36}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.selectedLedger}</span><span style={{color:"#777777",marginLeft:6}}>▾</span></div>
-                <div style={{marginTop:4}}><AlDestinationBadge ledger={t.selectedLedger} chartOfAccounts={chartOfAccounts} compact={true} /></div>
                 {coaDropdownOpen[t.id]&&(()=>{
                   // Context filter: expenses tab shows expense accounts, revenue tab
                   // shows income accounts; Journal entry-mode sees everything.
@@ -7791,6 +7746,15 @@ td,th{padding:8px 12px;vertical-align:middle}
                 </div>;})()}
                 </>)}
               </td>
+              {/* Posts To — clearly shows the accountant whether this row hits the P&L or the Balance Sheet */}
+              <td style={{padding:"12px 12px",whiteSpace:"nowrap"}}>{(()=>{
+                const d = alDestinationOf(t.selectedLedger, chartOfAccounts);
+                const tone = d==="P&L" ? {bg:"rgba(22,163,74,0.10)",fg:"#16a34a",br:"rgba(22,163,74,0.30)"}
+                           : d==="Balance Sheet" ? {bg:"rgba(8,145,178,0.10)",fg:"#0891b2",br:"rgba(8,145,178,0.30)"}
+                           : {bg:"rgba(217,119,6,0.10)",fg:"#d97706",br:"rgba(217,119,6,0.35)"};
+                const label = d==="P&L" ? "Profit & Loss" : d==="Balance Sheet" ? "Balance Sheet" : "Pick a ledger first";
+                return <span style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700,padding:"5px 10px",borderRadius:8,background:tone.bg,color:tone.fg,border:"1px solid "+tone.br,whiteSpace:"nowrap"}}>{d==="Unknown"?"⚠ ":""}{label}</span>;
+              })()}</td>
               {/* Entry Mode (expenses only) */}
               {reviewTab==="expenses"&&<td style={{padding:"8px 6px"}}>
                 <select value={t.entryMode||"expense"} onChange={e=>handleEntryModeChange(t.id,e.target.value)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:4,padding:"3px 4px",color:t.entryMode==="journal"?"#6958C2":"#16a34a",fontSize:10,cursor:"pointer"}}>
@@ -7822,90 +7786,6 @@ td,th{padding:8px 12px;vertical-align:middle}
             </tr>)}</tbody></table>
           </div></div>
             </div>
-            {/* RIGHT — focused transaction detail (only mounted when a row is focused) */}
-            {focusedTxnId && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:14,position:"sticky",top:12,maxHeight:"calc(100vh - 40px)",overflowY:"auto"}}>
-              {(()=>{
-                const focused = focusedTxnId ? classifiedTxns.find(t=>t.id===focusedTxnId) : null;
-                if(!focused){
-                  return <div style={{padding:"40px 10px",textAlign:"center"}}>
-                    <div style={{fontSize:22,opacity:0.4,marginBottom:6}}>▤</div>
-                    <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>No transaction selected</div>
-                    <div style={{fontSize:10,color:"#888888",marginTop:4,lineHeight:1.6}}>Click any row to see its details and re-classify it here without scrolling the table.</div>
-                  </div>;
-                }
-                const conf = Number(focused.confidence||0);
-                const confTone = conf>=100?{c:"#16a34a",label:"Exact"}:conf>=50?{c:"#d97706",label:"Partial"}:{c:"#dc2626",label:"New / unmatched"};
-                const statusTone = focused.status==="Confirmed"?{c:"#16a34a",bg:"rgba(22,163,74,0.1)"}:focused.status==="Auto-Assigned"?{c:"#6958C2",bg:"rgba(105,88,194,0.1)"}:{c:"#d97706",bg:"rgba(217,119,6,0.1)"};
-                const isConfirmed = focused.status==="Confirmed";
-                return <div>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10,gap:8}}>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase"}}>Selected transaction</div>
-                      <div style={{fontSize:11,fontFamily:"'IBM Plex Mono',monospace",color:"#666666",marginTop:2}}>{focused.date}</div>
-                    </div>
-                    <span onClick={()=>setFocusedTxnId(null)} title="Close (Esc)" style={{fontSize:14,color:"#888888",cursor:"pointer",lineHeight:1}}>✕</span>
-                  </div>
-                  <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",marginBottom:10,lineHeight:1.4}}>{focused.description}</div>
-                  <div style={{display:"flex",gap:8,marginBottom:14}}>
-                    {focused.debit>0 && <div style={{flex:1,background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:6,padding:"7px 10px"}}>
-                      <div style={{fontSize:9,color:"#888888",textTransform:"uppercase"}}>Debit</div>
-                      <div style={{fontSize:14,fontWeight:700,color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(focused.debit)}</div>
-                    </div>}
-                    {focused.credit>0 && <div style={{flex:1,background:"rgba(22,163,74,0.06)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:6,padding:"7px 10px"}}>
-                      <div style={{fontSize:9,color:"#888888",textTransform:"uppercase"}}>Credit</div>
-                      <div style={{fontSize:14,fontWeight:700,color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(focused.credit)}</div>
-                    </div>}
-                  </div>
-
-                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                    <div>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:6}}>
-                        <span style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase"}}>Ledger</span>
-                        <AlDestinationBadge ledger={focused.selectedLedger} chartOfAccounts={chartOfAccounts} compact={false} />
-                      </div>
-                      <div style={{padding:"7px 10px",background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,fontSize:11,color:focused.selectedLedger==="Review Required"?"#d97706":"#1a1a2e",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={focused.selectedLedger}>{focused.selectedLedger||"—"}</div>
-                    </div>
-
-                    {focused.contactName && <div>
-                      <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:4}}>{focused.credit>0?"Customer":"Vendor"}</div>
-                      <div style={{padding:"7px 10px",background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,fontSize:11,color:focused.credit>0?"#16a34a":"#0891b2",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{focused.contactName}</div>
-                    </div>}
-
-                    {focused.invoiceNumber && <div>
-                      <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:4}}>Linked invoice</div>
-                      <div style={{padding:"7px 10px",background:"rgba(22,163,74,0.04)",border:"1px solid rgba(22,163,74,0.2)",borderRadius:6,fontSize:11,color:"#16a34a",fontWeight:600,fontFamily:"'IBM Plex Mono',monospace"}}>📎 {focused.invoiceNumber}</div>
-                    </div>}
-
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-                      <div>
-                        <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:4}}>Confidence</div>
-                        <div style={{padding:"6px 8px",background:confTone.c+"15",border:"1px solid "+confTone.c+"40",borderRadius:6,textAlign:"center"}}>
-                          <div style={{fontSize:13,fontWeight:700,color:confTone.c,fontFamily:"'IBM Plex Mono',monospace"}}>{conf}%</div>
-                          <div style={{fontSize:9,color:confTone.c}}>{confTone.label}</div>
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:4}}>Status</div>
-                        <div style={{padding:"6px 8px",background:statusTone.bg,border:"1px solid "+statusTone.c+"40",borderRadius:6,textAlign:"center"}}>
-                          <div style={{fontSize:11,fontWeight:700,color:statusTone.c}}>{focused.status}</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div style={{display:"flex",gap:6,marginTop:6}}>
-                      <button onClick={()=>{
-                        // Confirm just this row
-                        setClassifiedTxns(prev=>prev.map(t=>t.id===focused.id?{...t,status:"Confirmed"}:t));
-                      }} disabled={isConfirmed} style={{flex:1,background:isConfirmed?"#f0f0f4":"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:6,padding:"8px 12px",color:isConfirmed?"#888888":"#ffffff",fontSize:11,fontWeight:700,cursor:isConfirmed?"default":"pointer"}}>{isConfirmed?"✓ Confirmed":"Confirm"}</button>
-                      <button onClick={()=>{
-                        setClassifiedTxns(prev=>prev.map(t=>t.id===focused.id?{...t,status:"Suspense"}:t));
-                      }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#d97706",fontSize:11,fontWeight:600,cursor:"pointer"}}>Send to Suspense</button>
-                    </div>
-                    <div style={{fontSize:9,color:"#888888",textAlign:"center",marginTop:4,lineHeight:1.5}}>To change the ledger / vendor / customer use the inline dropdown in the row itself — the right panel mirrors your edits live.</div>
-                  </div>
-                </div>;
-              })()}
-            </div>}
           </div>
           <div style={{display:"flex",justifyContent:"flex-end",gap:24,padding:"8px 16px",background:"#f8f9fc",borderRadius:8,border:"1px solid #e2e2ea"}}>
             <span style={{fontSize:12,color:"#888888"}}>Total Debits: <strong style={{color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>AED {fmt(stats.totalDebit)}</strong></span>
