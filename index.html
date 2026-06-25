@@ -2754,7 +2754,10 @@ function App(){
   const[projectsTab,setProjectsTab]=useState("switch"); // 'switch' | 'recent'
   const[projectsSearch,setProjectsSearch]=useState("");
   const[userMenuOpen,setUserMenuOpen]=useState(false);
-  const[adminTab,setAdminTab]=useState("overview"); // 'overview' | 'invite' | 'users' | 'unlock' | 'permissions'
+  const[adminTab,setAdminTab]=useState("overview");
+  // Phase-2 view state
+  const[exceptionsFilter,setExceptionsFilter]=useState("all");
+  const[postingTab,setPostingTab]=useState("queue"); // 'overview' | 'invite' | 'users' | 'unlock' | 'permissions'
   // Mounts the existing #invite-section / #users-list-section / #unlock-section
   // DOM nodes inline on the Admin page. The legacy modal still owns the event
   // wiring (invite-submit, users-refresh-btn, ...); we just relocate the
@@ -5420,6 +5423,14 @@ td,th{padding:8px 12px;vertical-align:middle}
           {(()=>{
             const role=window.AUTH_USER&&window.AUTH_USER.role;
             const isAdmin=["admin","team-lead"].includes(role);
+            // Counts for the Accounting Close section. ocrQueue is the
+            // active client's drafts; we surface those because that's the
+            // queue the user is currently looking at. Cross-client
+            // aggregation is a Phase 3 backend change (one DDB query per
+            // client across the team) — Phase 2 stays scoped to active.
+            const exceptionsOpen = (ocrQueue||[]).reduce((n,q)=>n + (q.validations||[]).filter(v=>v.status==='fail'||v.status==='warn').length, 0);
+            const reviewQueue    = (ocrQueue||[]).filter(q=>q.submittedForReview && q.status!=='Pushed To Zoho').length;
+            const postingQueue   = (ocrQueue||[]).filter(q=>q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail')).length;
             const SECTIONS=[
               {title:"Workspace", items:[
                 {key:"dashboard",label:"Dashboard",icon:"⌂"},
@@ -5427,6 +5438,9 @@ td,th{padding:8px 12px;vertical-align:middle}
               ]},
               {title:"Accounting Close", items:[
                 {key:"projects",label:"Projects",icon:"📁",count:recentProjectsAll.length||undefined},
+                {key:"exceptions",label:"Exceptions",icon:"⚠",count:exceptionsOpen||undefined},
+                {key:"review",label:"Review Center",icon:"▤",count:reviewQueue||undefined},
+                {key:"posting",label:"Zoho Posting",icon:"↗",count:postingQueue||undefined},
               ]},
               {title:"System", items:[
                 {key:"guide",label:"Guide",icon:"📖"},
@@ -5513,8 +5527,11 @@ td,th{padding:8px 12px;vertical-align:middle}
             {view==="clientDetail" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>{activeClientName||"—"}</span></>}
             {view==="workflow" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span onClick={()=>setView("clientDetail")} style={{cursor:"pointer",color:"#6958C2"}}>{activeClientName||"—"}</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>New Statement</span></>}
             {view==="projects" && <span style={{color:"#1a1a2e",fontWeight:600}}>Projects</span>}
+            {view==="exceptions" && <span style={{color:"#1a1a2e",fontWeight:600}}>Exceptions</span>}
+            {view==="review" && <span style={{color:"#1a1a2e",fontWeight:600}}>Review Center</span>}
+            {view==="posting" && <span style={{color:"#1a1a2e",fontWeight:600}}>Zoho Posting</span>}
             {view==="guide" && <span style={{color:"#1a1a2e",fontWeight:600}}>Guide</span>}
-            {view==="admin" && <span style={{color:"#1a1a2e",fontWeight:600}}>Admin</span>}
+            {view==="admin" && <span style={{color:"#1a1a2e",fontWeight:600}}>Administration</span>}
           </div>
           {view==="workflow"&&appMode==="bank"&&<div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
             <button onClick={()=>{if(step>1){ if(step===4) setStep(2); else setStep(step-1); }}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:step>1?"#6958C2":"#e2e2ea",fontSize:13,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
@@ -6062,7 +6079,20 @@ td,th{padding:8px 12px;vertical-align:middle}
                           </>}
                           <button onClick={()=>deleteOcrItems([q.id])} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>Delete draft</button>
                           <button onClick={()=>{ setOcrReviewId(""); setOcrBulkReviewIds([]); setOcrBulkIndex(0); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:7,padding:"7px 14px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>Close</button>
-                          {q.status!=='Pushed To Zoho'&&<button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing||fails>0} style={{background:(ocrPushing||fails>0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:(ocrPushing||fails>0)?"default":"pointer"}}>{ocrPushing?"Posting…":"⚡ Post to Zoho"}</button>}
+                          {q.status!=='Pushed To Zoho'&&(()=>{
+                            const myRole = window.AUTH_USER && window.AUTH_USER.role;
+                            const isReviewer = myRole==='admin' || myRole==='team-lead';
+                            // Staff users submit for review instead of
+                            // posting directly. Reviewers (Admin / Team-
+                            // lead) can either submit OR post directly.
+                            if(!isReviewer && !q.submittedForReview){
+                              return <button onClick={()=>setOcrQueue(prev=>prev.map(x=>x.id===q.id?{...x,submittedForReview:true,submittedBy:(window.AUTH_USER&&window.AUTH_USER.name)||'staff',submittedAt:Date.now()}:x))} disabled={fails>0} style={{background:fails>0?"#cccccc":"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:fails>0?"default":"pointer"}}>▤ Submit for Review</button>;
+                            }
+                            if(q.submittedForReview && !isReviewer){
+                              return <span style={{fontSize:10,padding:"5px 12px",borderRadius:6,background:"rgba(105,88,194,0.08)",color:"#4D3FA0",fontWeight:600}}>▤ Awaiting reviewer</span>;
+                            }
+                            return <button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing||fails>0} style={{background:(ocrPushing||fails>0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:(ocrPushing||fails>0)?"default":"pointer"}}>{ocrPushing?"Posting…":"⚡ Post to Zoho"}</button>;
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -6155,6 +6185,263 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{fontSize:13,color:"#888888"}}>Activity log will appear here as the client accumulates exports, pushes, and reverts. (Pulled from ExportLog — coming next.)</div>
               {(()=>{ const cnt = apiCounts && apiCounts[c.id]; if(!cnt) return null; return <div style={{marginTop:14,padding:14,background:"#f8f9fc",borderRadius:8,fontSize:12}}><strong>Zoho API calls:</strong> {cnt.total} total · last action: <code style={{fontFamily:"'IBM Plex Mono',monospace"}}>{cnt.lastKind||"—"}</code>{cnt.lastAt?(" · "+new Date(cnt.lastAt).toLocaleString()):""}</div>; })()}
             </div>}
+          </div>;
+        })()}
+
+        {/* ═════════════════ EXCEPTION CENTER ═════════════════ */}
+        {view==="exceptions" && (()=>{
+          const activeClient = clients.find(c=>c.id===activeClientId);
+          // Aggregate validations across the active client's draft queue.
+          // Each row in `rows` represents one open exception with enough
+          // context to deep-link back to its draft.
+          const SEV = (s)=> s==='fail' ? 'critical' : s==='warn' ? 'warning' : 'info';
+          const CATEGORY = {
+            classification: 'Revenue', ownership: 'Revenue', invno: 'Revenue', date: 'Revenue', math: 'Revenue',
+            trn: 'VAT & Tax', vat: 'VAT & Tax', cttrn: 'VAT & Tax', vatintel: 'VAT & Tax', compliance: 'VAT & Tax',
+            customer: 'Customer', duplicate: 'Duplicate', currency: 'Currency', confidence: 'OCR Quality',
+            push: 'Posting',
+          };
+          const rows = [];
+          for(const q of (ocrQueue||[])){
+            if(q.status==='Pushed To Zoho') continue;
+            for(const v of (q.validations||[])){
+              if(v.status!=='fail' && v.status!=='warn') continue;
+              rows.push({
+                id: q.id+'::'+v.key,
+                draftId: q.id,
+                draftName: q.fileName || q.invoiceNumber || q.id.slice(0,8),
+                customer: q.customerName || '—',
+                category: CATEGORY[v.key] || 'Other',
+                key: v.key, label: v.label, severity: SEV(v.status),
+                message: v.message,
+              });
+            }
+          }
+          // Group counts per category
+          const cats = {}; const sevCounts = {critical:0, warning:0};
+          for(const r of rows){
+            cats[r.category] = (cats[r.category]||0)+1;
+            if(r.severity==='critical') sevCounts.critical++; else if(r.severity==='warning') sevCounts.warning++;
+          }
+          const allCats = Object.keys(cats).sort();
+          const filtered = exceptionsFilter==='all' ? rows : rows.filter(r=>r.category===exceptionsFilter);
+          return <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
+              <div>
+                <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Exceptions</h1>
+                <p style={{color:"#888888",fontSize:12}}>
+                  Open issues on the active client's invoice drafts.
+                  {!activeClient && " Pick a client to see their exceptions."}
+                  {activeClient && <> Showing <strong>{activeClient.name}</strong>. <span onClick={()=>setView("clients")} style={{color:"#4D3FA0",cursor:"pointer"}}>Switch client →</span></>}
+                </p>
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <div style={{background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:10,padding:"10px 16px",textAlign:"center",minWidth:90}}>
+                  <div style={{fontSize:22,fontWeight:700,color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>{sevCounts.critical}</div>
+                  <div style={{fontSize:10,color:"#666666"}}>Critical</div>
+                </div>
+                <div style={{background:"rgba(217,119,6,0.06)",border:"1px solid rgba(217,119,6,0.2)",borderRadius:10,padding:"10px 16px",textAlign:"center",minWidth:90}}>
+                  <div style={{fontSize:22,fontWeight:700,color:"#d97706",fontFamily:"'IBM Plex Mono',monospace"}}>{sevCounts.warning}</div>
+                  <div style={{fontSize:10,color:"#666666"}}>Warnings</div>
+                </div>
+              </div>
+            </div>
+            {rows.length===0 ? (
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"60px 24px",textAlign:"center"}}>
+                <div style={{fontSize:32,marginBottom:8,opacity:0.4}}>✓</div>
+                <div style={{fontSize:14,fontWeight:600,color:"#1a1a2e"}}>No open exceptions</div>
+                <div style={{fontSize:12,color:"#888888",marginTop:4}}>{activeClient?'All invoice drafts for '+activeClient.name+' have passed validation.':'No drafts loaded.'}</div>
+              </div>
+            ) : (
+              <div style={{display:"grid",gridTemplateColumns:"220px 1fr",gap:16}}>
+                <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:14}}>
+                  <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:10}}>Category</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                    <div onClick={()=>setExceptionsFilter('all')} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 10px",borderRadius:6,cursor:"pointer",background:exceptionsFilter==='all'?"rgba(77,63,160,0.08)":"transparent",color:exceptionsFilter==='all'?"#4D3FA0":"#1a1a2e",fontSize:12,fontWeight:exceptionsFilter==='all'?600:500}}>
+                      <span>All</span>
+                      <span style={{fontSize:10,fontFamily:"'IBM Plex Mono',monospace",color:"#888888"}}>{rows.length}</span>
+                    </div>
+                    {allCats.map(cat=>(
+                      <div key={cat} onClick={()=>setExceptionsFilter(cat)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 10px",borderRadius:6,cursor:"pointer",background:exceptionsFilter===cat?"rgba(77,63,160,0.08)":"transparent",color:exceptionsFilter===cat?"#4D3FA0":"#1a1a2e",fontSize:12,fontWeight:exceptionsFilter===cat?600:500}}>
+                        <span>{cat}</span>
+                        <span style={{fontSize:10,fontFamily:"'IBM Plex Mono',monospace",color:"#888888"}}>{cats[cat]}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {filtered.map(r=>{
+                    const isCrit = r.severity==='critical';
+                    return <div key={r.id} style={{background:"#ffffff",border:"1px solid "+(isCrit?"rgba(220,38,38,0.25)":"rgba(217,119,6,0.25)"),borderLeft:"3px solid "+(isCrit?"#dc2626":"#d97706"),borderRadius:8,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:14}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                          <span style={{fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:4,background:isCrit?"rgba(220,38,38,0.1)":"rgba(217,119,6,0.1)",color:isCrit?"#dc2626":"#d97706",textTransform:"uppercase",letterSpacing:"0.04em"}}>{isCrit?'Critical':'Warning'}</span>
+                          <span style={{fontSize:10,color:"#888888"}}>{r.category} · {r.label}</span>
+                        </div>
+                        <div style={{fontSize:13,color:"#1a1a2e",lineHeight:1.4,marginBottom:6}}>{r.message}</div>
+                        <div style={{fontSize:10,color:"#666666"}}>{r.draftName} · {r.customer}</div>
+                      </div>
+                      <button onClick={()=>{ setOcrReviewId(r.draftId); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 12px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>Open draft →</button>
+                    </div>;
+                  })}
+                </div>
+              </div>
+            )}
+          </div>;
+        })()}
+
+        {/* ═════════════════ REVIEW CENTER ═════════════════ */}
+        {view==="review" && (()=>{
+          // Submit-for-review flow. Drafts a Staff user has flagged
+          // (q.submittedForReview === true) surface here for Admins/
+          // Team-leads to sign off. Risk Score is rule-based — see
+          // formula below — so the breakdown is transparent.
+          const role = window.AUTH_USER && window.AUTH_USER.role;
+          const isReviewer = role==='admin' || role==='team-lead';
+          const queue = (ocrQueue||[]).filter(q=>q.submittedForReview && q.status!=='Pushed To Zoho');
+          const riskScore = (q)=>{
+            let s = 100;
+            const vals = q.validations || [];
+            s -= 8 * vals.filter(v=>v.status==='fail').length;
+            s -= 3 * vals.filter(v=>v.status==='warn').length;
+            if(q.fx && /manual override/i.test(q.fx.source||'')) s -= 5;
+            if(q.status==='Error') s -= 10;
+            const conf = Number(q.confidence||0);
+            if(conf>0 && conf<70) s -= 5;
+            return Math.max(0, Math.min(100, s));
+          };
+          return <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
+              <div>
+                <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Review Center</h1>
+                <p style={{color:"#888888",fontSize:12}}>Projects submitted by your team for sign-off before posting to Zoho.</p>
+              </div>
+              <div style={{fontSize:11,color:"#888888"}}>Reviewer: <strong style={{color:"#1a1a2e"}}>{(window.AUTH_USER&&window.AUTH_USER.name)||'You'}</strong></div>
+            </div>
+            {queue.length===0 ? (
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"60px 24px",textAlign:"center"}}>
+                <div style={{fontSize:32,marginBottom:8,opacity:0.4}}>▤</div>
+                <div style={{fontSize:14,fontWeight:600,color:"#1a1a2e"}}>Nothing waiting for review</div>
+                <div style={{fontSize:12,color:"#888888",marginTop:4}}>Drafts will appear here once a team member submits them. Staff users see a 'Submit for review' button on Ready For Posting instead of posting directly.</div>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {queue.map(q=>{
+                  const score = riskScore(q);
+                  const fails = (q.validations||[]).filter(v=>v.status==='fail').length;
+                  const warns = (q.validations||[]).filter(v=>v.status==='warn').length;
+                  const tone = score>=80 ? {color:"#16a34a",bg:"rgba(22,163,74,0.08)"} : score>=60 ? {color:"#d97706",bg:"rgba(217,119,6,0.08)"} : {color:"#dc2626",bg:"rgba(220,38,38,0.08)"};
+                  return <div key={q.id} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+                    <div style={{flex:"1 1 240px",minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:600,color:"#1a1a2e"}}>{q.fileName || q.invoiceNumber || '—'}</div>
+                      <div style={{fontSize:11,color:"#888888",marginTop:3}}>
+                        Customer: {q.customerName||'—'} · Total: {q.currency||'AED'} {q.total||0}
+                      </div>
+                      <div style={{fontSize:10,color:"#666666",marginTop:3}}>
+                        Submitted by {q.submittedBy||'staff'}{q.submittedAt?(' · '+new Date(q.submittedAt).toLocaleString()):''}
+                      </div>
+                    </div>
+                    <div style={{textAlign:"center",minWidth:130}}>
+                      <div style={{fontSize:9,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em"}}>Risk Score</div>
+                      <div style={{fontSize:22,fontWeight:700,color:tone.color,fontFamily:"'IBM Plex Mono',monospace"}} title={"Penalties: "+(fails*8)+" (fails) + "+(warns*3)+" (warns) ..."}>{score}<span style={{fontSize:11,color:"#888888"}}>/100</span></div>
+                      <div style={{fontSize:9,color:"#888888"}}>{fails} fails · {warns} warns</div>
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{ setOcrReviewId(q.id); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 14px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>Open</button>
+                      {isReviewer && fails===0 && <button onClick={()=>{ setOcrQueue(prev=>prev.map(x=>x.id===q.id?{...x,submittedForReview:false,reviewerApproved:true,reviewedBy:(window.AUTH_USER&&window.AUTH_USER.name)||'reviewer',reviewedAt:Date.now()}:x)); pushOcrItems && pushOcrItems([q.id]); }} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:6,padding:"7px 16px",color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer"}}>✓ Approve &amp; Post</button>}
+                      {isReviewer && <button onClick={()=>{ const comment=prompt('Why are you sending this back?'); if(!comment) return; setOcrQueue(prev=>prev.map(x=>x.id===q.id?{...x,submittedForReview:false,reviewSentBack:true,reviewComment:comment,reviewedBy:(window.AUTH_USER&&window.AUTH_USER.name)||'reviewer',reviewedAt:Date.now()}:x)); }} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>Send back</button>}
+                    </div>
+                  </div>;
+                })}
+              </div>
+            )}
+            {!isReviewer && queue.length===0 && (
+              <div style={{marginTop:14,padding:"12px 16px",background:"rgba(217,119,6,0.04)",border:"1px solid rgba(217,119,6,0.2)",borderRadius:8,fontSize:11,color:"#92400e"}}>
+                You are signed in as a Staff user — you submit drafts for review; approval is done by an Admin.
+              </div>
+            )}
+          </div>;
+        })()}
+
+        {/* ═════════════════ ZOHO POSTING ═════════════════ */}
+        {view==="posting" && (()=>{
+          const drafts = ocrQueue || [];
+          const queue  = drafts.filter(q=>q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail'));
+          const posted = drafts.filter(q=>q.status==='Pushed To Zoho' || q.zohoInvoiceId);
+          const failed = drafts.filter(q=>q.status==='Error' || (q.validations||[]).some(v=>v.key==='push'&&v.status==='fail'));
+          const TAB = (key,label,count,color)=>(
+            <div onClick={()=>setPostingTab(key)} style={{padding:"10px 18px",fontSize:13,fontWeight:postingTab===key?700:500,color:postingTab===key?color:"#666666",cursor:"pointer",borderBottom:"2px solid "+(postingTab===key?color:"transparent"),display:"flex",alignItems:"center",gap:8}}>
+              <span>{label}</span>
+              <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:postingTab===key?"rgba(0,0,0,0.05)":"#f0f0f4",color:postingTab===key?color:"#777777",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>{count}</span>
+            </div>
+          );
+          const showing = postingTab==='posted' ? posted : postingTab==='failed' ? failed : queue;
+          return <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
+              <div>
+                <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Zoho Posting</h1>
+                <p style={{color:"#888888",fontSize:12}}>Track what's queued, posted, and failed across the active client.</p>
+              </div>
+              {apiUsage && apiUsage.remaining!=null && <div style={{fontSize:11,color:"#666666"}}>Daily quota: <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>{(apiUsage.limit?apiUsage.limit-apiUsage.remaining:'?')} / {apiUsage.limit||1000}</strong> used</div>}
+            </div>
+            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,overflow:"hidden"}}>
+              <div style={{display:"flex",borderBottom:"1px solid #f0f0f4",background:"#fafafd"}}>
+                {TAB("queue","Queue",queue.length,"#16a34a")}
+                {TAB("posted","Posted",posted.length,"#0891b2")}
+                {TAB("failed","Failed",failed.length,"#dc2626")}
+              </div>
+              <div style={{padding:18}}>
+                {showing.length===0 ? (
+                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>
+                    {postingTab==='queue' ? 'Nothing in the queue — all drafts either have open exceptions or are already posted.' :
+                     postingTab==='posted' ? 'No invoices have been posted yet from the active client.' :
+                     'No failed posts. Good news.'}
+                  </div>
+                ) : postingTab==='queue' ? (
+                  <div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                      <div style={{fontSize:11,color:"#666666"}}>{queue.length} draft{queue.length===1?'':'s'} ready</div>
+                      <button onClick={()=>pushOcrItems && pushOcrItems(queue.map(q=>q.id))} disabled={ocrPushing||queue.length===0} style={{background:ocrPushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:8,padding:"8px 18px",color:"#fff",fontSize:12,fontWeight:700,cursor:ocrPushing?"default":"pointer"}}>⚡ {ocrPushing?'Posting…':'Post all to Zoho ('+queue.length+')'}</button>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      {showing.map(q=><div key={q.id} style={{padding:"10px 14px",border:"1px solid #f0f0f4",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <div style={{minWidth:0,flex:1}}>
+                          <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{q.fileName||q.invoiceNumber||'—'}</div>
+                          <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}</div>
+                        </div>
+                        <button onClick={()=>pushOcrItems && pushOcrItems([q.id])} disabled={ocrPushing} style={{background:"#ffffff",border:"1px solid rgba(22,163,74,0.4)",borderRadius:6,padding:"5px 12px",color:"#16a34a",fontSize:10,fontWeight:600,cursor:ocrPushing?"default":"pointer"}}>Post</button>
+                      </div>)}
+                    </div>
+                  </div>
+                ) : postingTab==='posted' ? (
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {showing.map(q=><div key={q.id} style={{padding:"10px 14px",border:"1px solid #f0f0f4",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div style={{minWidth:0,flex:1}}>
+                        <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{q.zohoInvoiceNumber||q.invoiceNumber||q.fileName||'—'}</div>
+                        <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}{q.pushedAt?(' · '+new Date(q.pushedAt).toLocaleDateString()):''}</div>
+                      </div>
+                      <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:"rgba(8,145,178,0.1)",color:"#0891b2",fontWeight:600}}>Posted</span>
+                    </div>)}
+                  </div>
+                ) : (
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {showing.map(q=>{
+                      const errVal = (q.validations||[]).find(v=>v.key==='push' && v.status==='fail');
+                      return <div key={q.id} style={{padding:"10px 14px",border:"1px solid rgba(220,38,38,0.25)",borderLeft:"3px solid #dc2626",borderRadius:8}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                          <div style={{minWidth:0,flex:1}}>
+                            <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{q.fileName||q.invoiceNumber||'—'}</div>
+                            <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}</div>
+                          </div>
+                          <button onClick={()=>pushOcrItems && pushOcrItems([q.id])} disabled={ocrPushing} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.4)",borderRadius:6,padding:"5px 12px",color:"#dc2626",fontSize:10,fontWeight:600,cursor:ocrPushing?"default":"pointer"}}>Retry</button>
+                        </div>
+                        {errVal && <div style={{fontSize:10,color:"#dc2626",marginTop:6,paddingTop:6,borderTop:"1px solid rgba(220,38,38,0.15)"}}>{errVal.message}</div>}
+                      </div>;
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>;
         })()}
 
