@@ -5455,7 +5455,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {key:"clients",label:"Clients",icon:"👥",count:clients.length},
               ]},
               {title:"Accounting Close", items:[
-                {key:"projects",label:"Projects",icon:"📁",count:recentProjectsAll.length||undefined},
                 {key:"exceptions",label:"Exceptions",icon:"⚠",count:exceptionsOpen||undefined},
                 {key:"review",label:"Review Center",icon:"▤",count:reviewQueue||undefined},
                 {key:"posting",label:"Zoho Posting",icon:"↗",count:postingQueue||undefined},
@@ -6195,7 +6194,6 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Assigned to</div><div style={{fontSize:13,color:"#1a1a2e"}}>{(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).join(", ")||"—"}</div></div>
               {isAdmin && <div style={{display:"flex",gap:8,paddingTop:8,borderTop:"1px solid #f0f0f4",marginTop:4,flexWrap:"wrap"}}>
                 <button onClick={()=>openAssignDialog(c.id)} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 12px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer"}}>👥 Assign Users</button>
-                <button onClick={()=>renameClient(c.id)} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 12px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>✏ Rename</button>
                 <button onClick={()=>deleteClient(c.id)} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"6px 12px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>🗑 Delete Client</button>
               </div>}
             </div>}
@@ -6208,10 +6206,10 @@ td,th{padding:8px 12px;vertical-align:middle}
 
         {/* ═════════════════ EXCEPTION CENTER ═════════════════ */}
         {view==="exceptions" && (()=>{
-          const activeClient = clients.find(c=>c.id===activeClientId);
-          // Aggregate validations across the active client's draft queue.
-          // Each row in `rows` represents one open exception with enough
-          // context to deep-link back to its draft.
+          // Cross-client aggregation. Each client's draft queue is
+          // persisted under getClientData(clientId,'ocrDrafts',[]), so
+          // we can read every visible client's open issues without
+          // forcing the user to switch.
           const SEV = (s)=> s==='fail' ? 'critical' : s==='warn' ? 'warning' : 'info';
           const CATEGORY = {
             classification: 'Revenue', ownership: 'Revenue', invno: 'Revenue', date: 'Revenue', math: 'Revenue',
@@ -6219,90 +6217,143 @@ td,th{padding:8px 12px;vertical-align:middle}
             customer: 'Customer', duplicate: 'Duplicate', currency: 'Currency', confidence: 'OCR Quality',
             push: 'Posting',
           };
+          // What the user should do. One line per validation key — plain
+          // English, written for a junior accountant who's seeing the
+          // exception for the first time.
+          const RESOLUTION = {
+            classification: 'Confirm whether this is actually a tax invoice. Quotations and pro-formas do not get posted — route them out of this queue.',
+            ownership:      'Check that the supplier name on the invoice matches the project. If the invoice belongs to a different entity, remove it from this client.',
+            trn:            'Open the draft and fix the supplier TRN, OR update the project TRN in Client Settings if it is the project that is wrong.',
+            compliance:     'Open the draft and fill the missing fields highlighted in red — invoice number, date, customer, taxable amount, VAT, total.',
+            invno:          'Open the draft and correct the invoice number — it must match the printed value on the document.',
+            duplicate:      'Confirm whether this invoice was already pushed for this customer. If yes, delete the draft. If no, change the invoice number.',
+            date:           'Open the draft and adjust the invoice date to a value within the acceptable period.',
+            currency:       'Open the draft and pick the correct currency. If the rate is stale or wrong, click Refresh on the FX panel.',
+            vat:            'Re-check the VAT amount. 5% × Taxable should equal VAT (±AED 1 rounding). Override only if the printed invoice is definitively right.',
+            math:           'Subtotal + VAT must equal Total. Open the draft and re-key whichever number was OCR\\'d wrong.',
+            customer:       'Either pick an existing Zoho customer from the dropdown, or click "Create now" so we add them to Zoho with the right country / tax treatment.',
+            confidence:     'OCR confidence is low. Open the draft and verify every extracted field manually before posting.',
+            cttrn:          'The Corporate Tax TRN is not the VAT TRN — remove the CT TRN label from the invoice or ask the client to reissue it.',
+            vatintel:       'Review the VAT treatment hint and confirm the right category (Standard / Zero-Rated / Exempt / Out of Scope) on the draft.',
+            push:           'Open the draft, fix what Zoho rejected (see message), and retry the post. The Reconnect button is on the FX panel if the token has died.',
+          };
+
           const rows = [];
-          for(const q of (ocrQueue||[])){
-            if(q.status==='Pushed To Zoho') continue;
-            for(const v of (q.validations||[])){
-              if(v.status!=='fail' && v.status!=='warn') continue;
-              rows.push({
-                id: q.id+'::'+v.key,
-                draftId: q.id,
-                draftName: q.fileName || q.invoiceNumber || q.id.slice(0,8),
-                customer: q.customerName || '—',
-                category: CATEGORY[v.key] || 'Other',
-                key: v.key, label: v.label, severity: SEV(v.status),
-                message: v.message,
-              });
+          for(const c of (clients||[])){
+            const drafts = getClientData(c.id,'ocrDrafts',[]) || [];
+            for(const q of drafts){
+              if(q.status==='Pushed To Zoho') continue;
+              for(const v of (q.validations||[])){
+                if(v.status!=='fail' && v.status!=='warn') continue;
+                rows.push({
+                  id: c.id+'::'+q.id+'::'+v.key,
+                  clientId: c.id,
+                  clientName: c.name,
+                  draftId: q.id,
+                  draftName: q.fileName || q.invoiceNumber || q.id.slice(0,8),
+                  customer: q.customerName || '—',
+                  category: CATEGORY[v.key] || 'Other',
+                  key: v.key, label: v.label, severity: SEV(v.status),
+                  message: v.message,
+                  whatToDo: RESOLUTION[v.key] || 'Open the draft to inspect the issue and decide whether to fix the field or remove the draft.',
+                });
+              }
             }
           }
-          // Group counts per category
-          const cats = {}; const sevCounts = {critical:0, warning:0};
+          // Group by client first; user wanted to see each client's issues
+          // side-by-side, not a flat list with a "switch client" prompt.
+          const byClient = {};
+          const sevCounts = {critical:0, warning:0};
           for(const r of rows){
-            cats[r.category] = (cats[r.category]||0)+1;
+            if(!byClient[r.clientId]) byClient[r.clientId] = { name:r.clientName, items:[] };
+            byClient[r.clientId].items.push(r);
             if(r.severity==='critical') sevCounts.critical++; else if(r.severity==='warning') sevCounts.warning++;
           }
+          const clientGroups = Object.entries(byClient).sort((a,b)=>{
+            // Critical-heavy clients first, then alphabetical.
+            const ca=a[1].items.filter(x=>x.severity==='critical').length;
+            const cb=b[1].items.filter(x=>x.severity==='critical').length;
+            if(cb!==ca) return cb-ca;
+            return a[1].name.localeCompare(b[1].name);
+          });
+          // Category filter still applies, but as a top filter chip.
+          const cats = {}; for(const r of rows){ cats[r.category]=(cats[r.category]||0)+1; }
           const allCats = Object.keys(cats).sort();
-          const filtered = exceptionsFilter==='all' ? rows : rows.filter(r=>r.category===exceptionsFilter);
+          const filterCat = (r)=> exceptionsFilter==='all' || r.category===exceptionsFilter;
+
           return <div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:14,gap:14,flexWrap:"wrap"}}>
               <div>
                 <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Exceptions</h1>
-                <p style={{color:"#888888",fontSize:12}}>
-                  Open issues on the active client's invoice drafts.
-                  {!activeClient && " Pick a client to see their exceptions."}
-                  {activeClient && <> Showing <strong>{activeClient.name}</strong>. <span onClick={()=>setView("clients")} style={{color:"#4D3FA0",cursor:"pointer"}}>Switch client →</span></>}
-                </p>
+                <p style={{color:"#888888",fontSize:12}}>Every open issue across all your clients. Each row tells you what is wrong and the next step to fix it — no need to switch clients.</p>
               </div>
               <div style={{display:"flex",gap:10}}>
                 <div style={{background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:10,padding:"10px 16px",textAlign:"center",minWidth:90}}>
                   <div style={{fontSize:22,fontWeight:700,color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>{sevCounts.critical}</div>
-                  <div style={{fontSize:10,color:"#666666"}}>Critical</div>
+                  <div style={{fontSize:10,color:"#666666"}}>Critical · blocks posting</div>
                 </div>
                 <div style={{background:"rgba(217,119,6,0.06)",border:"1px solid rgba(217,119,6,0.2)",borderRadius:10,padding:"10px 16px",textAlign:"center",minWidth:90}}>
                   <div style={{fontSize:22,fontWeight:700,color:"#d97706",fontFamily:"'IBM Plex Mono',monospace"}}>{sevCounts.warning}</div>
-                  <div style={{fontSize:10,color:"#666666"}}>Warnings</div>
+                  <div style={{fontSize:10,color:"#666666"}}>Warning · review before post</div>
                 </div>
               </div>
             </div>
+
+            {/* Category filter chips (replaces the old left sidebar — keeps
+                the page wider and the per-client groups breathable). */}
+            {rows.length>0 && (
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+                <button onClick={()=>setExceptionsFilter('all')} style={{padding:"5px 12px",borderRadius:14,fontSize:11,fontWeight:600,cursor:"pointer",border:"1px solid "+(exceptionsFilter==='all'?"#4D3FA0":"#e2e2ea"),background:exceptionsFilter==='all'?"rgba(77,63,160,0.08)":"#ffffff",color:exceptionsFilter==='all'?"#4D3FA0":"#666666"}}>All ({rows.length})</button>
+                {allCats.map(cat=>(
+                  <button key={cat} onClick={()=>setExceptionsFilter(cat)} style={{padding:"5px 12px",borderRadius:14,fontSize:11,fontWeight:600,cursor:"pointer",border:"1px solid "+(exceptionsFilter===cat?"#4D3FA0":"#e2e2ea"),background:exceptionsFilter===cat?"rgba(77,63,160,0.08)":"#ffffff",color:exceptionsFilter===cat?"#4D3FA0":"#666666"}}>{cat} ({cats[cat]})</button>
+                ))}
+              </div>
+            )}
+
             {rows.length===0 ? (
               <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"60px 24px",textAlign:"center"}}>
                 <div style={{fontSize:32,marginBottom:8,opacity:0.4}}>✓</div>
                 <div style={{fontSize:14,fontWeight:600,color:"#1a1a2e"}}>No open exceptions</div>
-                <div style={{fontSize:12,color:"#888888",marginTop:4}}>{activeClient?'All invoice drafts for '+activeClient.name+' have passed validation.':'No drafts loaded.'}</div>
+                <div style={{fontSize:12,color:"#888888",marginTop:4}}>Every draft across all your clients has passed validation.</div>
               </div>
             ) : (
-              <div style={{display:"grid",gridTemplateColumns:"220px 1fr",gap:16}}>
-                <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:14}}>
-                  <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:10}}>Category</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
-                    <div onClick={()=>setExceptionsFilter('all')} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 10px",borderRadius:6,cursor:"pointer",background:exceptionsFilter==='all'?"rgba(77,63,160,0.08)":"transparent",color:exceptionsFilter==='all'?"#4D3FA0":"#1a1a2e",fontSize:12,fontWeight:exceptionsFilter==='all'?600:500}}>
-                      <span>All</span>
-                      <span style={{fontSize:10,fontFamily:"'IBM Plex Mono',monospace",color:"#888888"}}>{rows.length}</span>
-                    </div>
-                    {allCats.map(cat=>(
-                      <div key={cat} onClick={()=>setExceptionsFilter(cat)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 10px",borderRadius:6,cursor:"pointer",background:exceptionsFilter===cat?"rgba(77,63,160,0.08)":"transparent",color:exceptionsFilter===cat?"#4D3FA0":"#1a1a2e",fontSize:12,fontWeight:exceptionsFilter===cat?600:500}}>
-                        <span>{cat}</span>
-                        <span style={{fontSize:10,fontFamily:"'IBM Plex Mono',monospace",color:"#888888"}}>{cats[cat]}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                  {filtered.map(r=>{
-                    const isCrit = r.severity==='critical';
-                    return <div key={r.id} style={{background:"#ffffff",border:"1px solid "+(isCrit?"rgba(220,38,38,0.25)":"rgba(217,119,6,0.25)"),borderLeft:"3px solid "+(isCrit?"#dc2626":"#d97706"),borderRadius:8,padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:14}}>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                          <span style={{fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:4,background:isCrit?"rgba(220,38,38,0.1)":"rgba(217,119,6,0.1)",color:isCrit?"#dc2626":"#d97706",textTransform:"uppercase",letterSpacing:"0.04em"}}>{isCrit?'Critical':'Warning'}</span>
-                          <span style={{fontSize:10,color:"#888888"}}>{r.category} · {r.label}</span>
+              <div style={{display:"flex",flexDirection:"column",gap:18}}>
+                {clientGroups.map(([cid,grp])=>{
+                  const visible = grp.items.filter(filterCat);
+                  if(visible.length===0) return null;
+                  const crits = visible.filter(x=>x.severity==='critical').length;
+                  return (
+                    <div key={cid} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,overflow:"hidden"}}>
+                      <div style={{padding:"12px 18px",background:"#fafafd",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10}}>
+                          <div style={{width:8,height:8,borderRadius:"50%",background:crits>0?"#dc2626":"#d97706"}} />
+                          <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>{grp.name}</div>
+                          <span style={{fontSize:10,color:"#888888"}}>{visible.length} open {visible.length===1?'issue':'issues'}</span>
                         </div>
-                        <div style={{fontSize:13,color:"#1a1a2e",lineHeight:1.4,marginBottom:6}}>{r.message}</div>
-                        <div style={{fontSize:10,color:"#666666"}}>{r.draftName} · {r.customer}</div>
+                        <span onClick={()=>{ switchClient(cid); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{fontSize:11,color:"#4D3FA0",cursor:"pointer",fontWeight:600}}>Open this client →</span>
                       </div>
-                      <button onClick={()=>{ setOcrReviewId(r.draftId); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 12px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>Open draft →</button>
-                    </div>;
-                  })}
-                </div>
+                      <div style={{display:"flex",flexDirection:"column"}}>
+                        {visible.map(r=>{
+                          const isCrit = r.severity==='critical';
+                          return (
+                            <div key={r.id} style={{padding:"14px 18px",borderTop:"1px solid #f8f9fc",borderLeft:"3px solid "+(isCrit?"#dc2626":"#d97706"),display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:14}}>
+                              <div style={{flex:1,minWidth:0}}>
+                                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
+                                  <span style={{fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:4,background:isCrit?"rgba(220,38,38,0.1)":"rgba(217,119,6,0.1)",color:isCrit?"#dc2626":"#d97706",textTransform:"uppercase",letterSpacing:"0.04em"}}>{isCrit?'Critical':'Warning'}</span>
+                                  <span style={{fontSize:10,color:"#666666",fontWeight:600}}>{r.category} · {r.label}</span>
+                                  <span style={{fontSize:10,color:"#888888"}}>· {r.draftName} · {r.customer}</span>
+                                </div>
+                                <div style={{fontSize:12,color:"#1a1a2e",lineHeight:1.5,marginBottom:6}}><strong style={{color:isCrit?"#dc2626":"#d97706"}}>Issue:</strong> {r.message}</div>
+                                <div style={{fontSize:11,color:"#444444",lineHeight:1.5,padding:"7px 10px",background:"rgba(77,63,160,0.04)",borderRadius:6,border:"1px solid rgba(77,63,160,0.12)"}}><strong style={{color:"#4D3FA0"}}>What to do:</strong> {r.whatToDo}</div>
+                              </div>
+                              <button onClick={()=>{ switchClient(r.clientId); setOcrReviewId(r.draftId); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:6,padding:"8px 14px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>Resolve →</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>;
@@ -6383,78 +6434,114 @@ td,th{padding:8px 12px;vertical-align:middle}
 
         {/* ═════════════════ ZOHO POSTING ═════════════════ */}
         {view==="posting" && (()=>{
-          const drafts = ocrQueue || [];
-          const queue  = drafts.filter(q=>q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail'));
-          const posted = drafts.filter(q=>q.status==='Pushed To Zoho' || q.zohoInvoiceId);
-          const failed = drafts.filter(q=>q.status==='Error' || (q.validations||[]).some(v=>v.key==='push'&&v.status==='fail'));
+          // Cross-client aggregation. We read each client's persisted
+          // draft queue (localStorage via getClientData) so a reviewer
+          // sees their whole portfolio's posting state without having
+          // to switch active client.
+          const groups = []; // [{client, queue, posted, failed}]
+          let totalQueue=0,totalPosted=0,totalFailed=0;
+          for(const c of (clients||[])){
+            const drafts = getClientData(c.id,'ocrDrafts',[]) || [];
+            const queue  = drafts.filter(q=>q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail'));
+            const posted = drafts.filter(q=>q.status==='Pushed To Zoho' || q.zohoInvoiceId);
+            const failed = drafts.filter(q=>q.status==='Error' || (q.validations||[]).some(v=>v.key==='push'&&v.status==='fail'));
+            if(queue.length+posted.length+failed.length===0) continue;
+            groups.push({client:c, queue, posted, failed});
+            totalQueue+=queue.length; totalPosted+=posted.length; totalFailed+=failed.length;
+          }
+          // Most-actionable client first, then alphabetical.
+          groups.sort((a,b)=>{
+            const wa = a.failed.length*3 + a.queue.length;
+            const wb = b.failed.length*3 + b.queue.length;
+            if(wb!==wa) return wb-wa;
+            return a.client.name.localeCompare(b.client.name);
+          });
           const TAB = (key,label,count,color)=>(
             <div onClick={()=>setPostingTab(key)} style={{padding:"10px 18px",fontSize:13,fontWeight:postingTab===key?700:500,color:postingTab===key?color:"#666666",cursor:"pointer",borderBottom:"2px solid "+(postingTab===key?color:"transparent"),display:"flex",alignItems:"center",gap:8}}>
               <span>{label}</span>
               <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:postingTab===key?"rgba(0,0,0,0.05)":"#f0f0f4",color:postingTab===key?color:"#777777",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>{count}</span>
             </div>
           );
-          const showing = postingTab==='posted' ? posted : postingTab==='failed' ? failed : queue;
+          const tabKey = postingTab==='posted' ? 'posted' : postingTab==='failed' ? 'failed' : 'queue';
+          const pickList = (g)=> g[tabKey];
+          // "Post all" / "Post this client" actions require the queue to
+          // be the active client's queue — pushOcrItems pulls from
+          // ocrQueue state. So we switch to the client first, then push.
+          const postAllForClient = (clientId, items)=>{
+            if(clientId !== activeClientId){
+              switchClient(clientId);
+              alert("Client switched — click Post once the queue finishes loading.");
+              return;
+            }
+            pushOcrItems && pushOcrItems(items.map(q=>q.id));
+          };
           return <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
               <div>
                 <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Zoho Posting</h1>
-                <p style={{color:"#888888",fontSize:12}}>Track what's queued, posted, and failed across the active client.</p>
+                <p style={{color:"#888888",fontSize:12}}>Every client's queued / posted / failed invoices, grouped by client.</p>
               </div>
               {apiUsage && apiUsage.remaining!=null && <div style={{fontSize:11,color:"#666666"}}>Daily quota: <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>{(apiUsage.limit?apiUsage.limit-apiUsage.remaining:'?')} / {apiUsage.limit||1000}</strong> used</div>}
             </div>
             <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,overflow:"hidden"}}>
               <div style={{display:"flex",borderBottom:"1px solid #f0f0f4",background:"#fafafd"}}>
-                {TAB("queue","Queue",queue.length,"#16a34a")}
-                {TAB("posted","Posted",posted.length,"#0891b2")}
-                {TAB("failed","Failed",failed.length,"#dc2626")}
+                {TAB("queue","Queue",totalQueue,"#16a34a")}
+                {TAB("posted","Posted",totalPosted,"#0891b2")}
+                {TAB("failed","Failed",totalFailed,"#dc2626")}
               </div>
               <div style={{padding:18}}>
-                {showing.length===0 ? (
-                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>
-                    {postingTab==='queue' ? 'Nothing in the queue — all drafts either have open exceptions or are already posted.' :
-                     postingTab==='posted' ? 'No invoices have been posted yet from the active client.' :
-                     'No failed posts. Good news.'}
-                  </div>
-                ) : postingTab==='queue' ? (
-                  <div>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                      <div style={{fontSize:11,color:"#666666"}}>{queue.length} draft{queue.length===1?'':'s'} ready</div>
-                      <button onClick={()=>pushOcrItems && pushOcrItems(queue.map(q=>q.id))} disabled={ocrPushing||queue.length===0} style={{background:ocrPushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:8,padding:"8px 18px",color:"#fff",fontSize:12,fontWeight:700,cursor:ocrPushing?"default":"pointer"}}>⚡ {ocrPushing?'Posting…':'Post all to Zoho ('+queue.length+')'}</button>
-                    </div>
-                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                      {showing.map(q=><div key={q.id} style={{padding:"10px 14px",border:"1px solid #f0f0f4",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                        <div style={{minWidth:0,flex:1}}>
-                          <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{q.fileName||q.invoiceNumber||'—'}</div>
-                          <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}</div>
-                        </div>
-                        <button onClick={()=>pushOcrItems && pushOcrItems([q.id])} disabled={ocrPushing} style={{background:"#ffffff",border:"1px solid rgba(22,163,74,0.4)",borderRadius:6,padding:"5px 12px",color:"#16a34a",fontSize:10,fontWeight:600,cursor:ocrPushing?"default":"pointer"}}>Post</button>
-                      </div>)}
-                    </div>
-                  </div>
-                ) : postingTab==='posted' ? (
-                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {showing.map(q=><div key={q.id} style={{padding:"10px 14px",border:"1px solid #f0f0f4",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <div style={{minWidth:0,flex:1}}>
-                        <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{q.zohoInvoiceNumber||q.invoiceNumber||q.fileName||'—'}</div>
-                        <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}{q.pushedAt?(' · '+new Date(q.pushedAt).toLocaleDateString()):''}</div>
-                      </div>
-                      <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:"rgba(8,145,178,0.1)",color:"#0891b2",fontWeight:600}}>Posted</span>
-                    </div>)}
-                  </div>
+                {groups.length===0 ? (
+                  <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>No invoice drafts in any client yet. Upload via Client → Revenue.</div>
                 ) : (
-                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {showing.map(q=>{
-                      const errVal = (q.validations||[]).find(v=>v.key==='push' && v.status==='fail');
-                      return <div key={q.id} style={{padding:"10px 14px",border:"1px solid rgba(220,38,38,0.25)",borderLeft:"3px solid #dc2626",borderRadius:8}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
-                          <div style={{minWidth:0,flex:1}}>
-                            <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{q.fileName||q.invoiceNumber||'—'}</div>
-                            <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+                    {groups.map(g=>{
+                      const items = pickList(g);
+                      if(items.length===0) return null;
+                      const isActive = g.client.id===activeClientId;
+                      return (
+                        <div key={g.client.id} style={{border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                          <div style={{padding:"10px 14px",background:"#fafafd",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
+                              <div style={{width:24,height:24,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:600,flexShrink:0}}>{(g.client.name||"?").trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase()}</div>
+                              <div style={{minWidth:0}}>
+                                <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{g.client.name}</div>
+                                <div style={{fontSize:10,color:"#888888"}}>{g.queue.length} queued · {g.posted.length} posted · {g.failed.length} failed</div>
+                              </div>
+                            </div>
+                            {tabKey==='queue' && items.length>0 && (
+                              <button onClick={()=>postAllForClient(g.client.id,items)} disabled={ocrPushing && isActive} style={{background:(ocrPushing&&isActive)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:6,padding:"6px 14px",fontSize:11,fontWeight:700,cursor:(ocrPushing&&isActive)?"default":"pointer",whiteSpace:"nowrap"}}>{isActive?(ocrPushing?'Posting…':'⚡ Post all ('+items.length+')'):'⚡ Switch & post all ('+items.length+')'}</button>
+                            )}
                           </div>
-                          <button onClick={()=>pushOcrItems && pushOcrItems([q.id])} disabled={ocrPushing} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.4)",borderRadius:6,padding:"5px 12px",color:"#dc2626",fontSize:10,fontWeight:600,cursor:ocrPushing?"default":"pointer"}}>Retry</button>
+                          <div style={{padding:"10px 14px",display:"flex",flexDirection:"column",gap:6}}>
+                            {items.map(q=>{
+                              const errVal = tabKey==='failed' ? (q.validations||[]).find(v=>v.key==='push' && v.status==='fail') : null;
+                              const borderStyle = tabKey==='failed' ? {border:"1px solid rgba(220,38,38,0.25)",borderLeft:"3px solid #dc2626"} : {border:"1px solid #f0f0f4"};
+                              return (
+                                <div key={q.id} style={{padding:"10px 14px",borderRadius:8,...borderStyle}}>
+                                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+                                    <div style={{minWidth:0,flex:1}}>
+                                      <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e"}}>{tabKey==='posted'?(q.zohoInvoiceNumber||q.invoiceNumber||q.fileName||'—'):(q.fileName||q.invoiceNumber||'—')}</div>
+                                      <div style={{fontSize:10,color:"#888888"}}>{q.customerName||'—'} · {q.currency||'AED'} {q.total||0}{tabKey==='posted'&&q.pushedAt?(' · '+new Date(q.pushedAt).toLocaleDateString()):''}</div>
+                                    </div>
+                                    {tabKey==='queue' && (
+                                      isActive
+                                        ? <button onClick={()=>pushOcrItems && pushOcrItems([q.id])} disabled={ocrPushing} style={{background:"#ffffff",border:"1px solid rgba(22,163,74,0.4)",borderRadius:6,padding:"5px 12px",color:"#16a34a",fontSize:10,fontWeight:600,cursor:ocrPushing?"default":"pointer"}}>Post</button>
+                                        : <span onClick={()=>{ switchClient(g.client.id); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",fontWeight:600}}>Open in client →</span>
+                                    )}
+                                    {tabKey==='posted' && <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:"rgba(8,145,178,0.1)",color:"#0891b2",fontWeight:600}}>Posted</span>}
+                                    {tabKey==='failed' && (
+                                      isActive
+                                        ? <button onClick={()=>pushOcrItems && pushOcrItems([q.id])} disabled={ocrPushing} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.4)",borderRadius:6,padding:"5px 12px",color:"#dc2626",fontSize:10,fontWeight:600,cursor:ocrPushing?"default":"pointer"}}>Retry</button>
+                                        : <span onClick={()=>{ switchClient(g.client.id); setView("clientDetail"); setClientDetailTab("revenue"); }} style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",fontWeight:600}}>Open in client →</span>
+                                    )}
+                                  </div>
+                                  {errVal && <div style={{fontSize:10,color:"#dc2626",marginTop:6,paddingTop:6,borderTop:"1px solid rgba(220,38,38,0.15)"}}>{errVal.message}</div>}
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
-                        {errVal && <div style={{fontSize:10,color:"#dc2626",marginTop:6,paddingTop:6,borderTop:"1px solid rgba(220,38,38,0.15)"}}>{errVal.message}</div>}
-                      </div>;
+                      );
                     })}
                   </div>
                 )}
@@ -6463,80 +6550,9 @@ td,th{padding:8px 12px;vertical-align:middle}
           </div>;
         })()}
 
-        {/* ═════════════════ GUIDE VIEW ═════════════════ */}
-        {/* ═════════════════ PROJECTS VIEW ═════════════════ */}
-        {view==="projects" && (()=>{
-          const q = (projectsSearch||"").toLowerCase().trim();
-          const filteredClients = q ? clients.filter(c=>(c.name||"").toLowerCase().includes(q)) : clients;
-          const filteredProjects = q ? recentProjectsAll.filter(p=>((p.name||"")+" "+(p.clientName||"")).toLowerCase().includes(q)) : recentProjectsAll;
-          const TAB = (key,label,count)=>(
-            <div onClick={()=>setProjectsTab(key)} style={{padding:"10px 18px",fontSize:13,fontWeight:projectsTab===key?700:500,color:projectsTab===key?"#4D3FA0":"#666666",cursor:"pointer",borderBottom:"2px solid "+(projectsTab===key?"#4D3FA0":"transparent"),display:"flex",alignItems:"center",gap:8}}>
-              <span>{label}</span>
-              <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:projectsTab===key?"rgba(77,63,160,0.12)":"#f0f0f4",color:projectsTab===key?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>{count}</span>
-            </div>
-          );
-          return <div>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12,marginBottom:18}}>
-              <div>
-                <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",margin:0}}>Projects</h1>
-                <div style={{fontSize:12,color:"#888888",marginTop:4}}>Switch clients or jump back into a recent project.</div>
-              </div>
-              <input value={projectsSearch} onChange={e=>setProjectsSearch(e.target.value)} placeholder="Search clients or projects…" style={{padding:"8px 12px",border:"1px solid #e2e2ea",borderRadius:8,fontSize:12,background:"#ffffff",minWidth:260,fontFamily:"inherit"}} />
-            </div>
-            <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,overflow:"hidden"}}>
-              <div style={{display:"flex",borderBottom:"1px solid #f0f0f4",background:"#fafafd"}}>
-                {TAB("switch","Quick switch",filteredClients.length)}
-                {TAB("recent","Recent projects",filteredProjects.length)}
-              </div>
-              <div style={{padding:18}}>
-                {projectsTab==="switch" && (
-                  filteredClients.length===0
-                    ? <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>{q?"No clients match.":"No clients yet."}</div>
-                    : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
-                        {filteredClients.map(c=>{
-                          const projCount=(projectLog[c.id]||[]).length;
-                          const active=c.id===activeClientId;
-                          return <div key={c.id} onClick={()=>{ switchClient(c.id); setView("clientDetail"); }} style={{padding:"12px 14px",border:"1px solid "+(active?"rgba(77,63,160,0.4)":"#e2e2ea"),borderRadius:10,cursor:"pointer",background:active?"rgba(77,63,160,0.06)":"#ffffff",transition:"background 0.15s"}}>
-                            <div style={{display:"flex",alignItems:"center",gap:10}}>
-                              <div style={{width:32,height:32,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:600,flexShrink:0,letterSpacing:"0.3px"}}>
-                                {(c.name||"?").trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase()}
-                              </div>
-                              <div style={{flex:1,minWidth:0}}>
-                                <div style={{fontSize:13,fontWeight:600,color:active?"#4D3FA0":"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
-                                <div style={{fontSize:10,color:"#888888",marginTop:2}}>
-                                  {projCount} project{projCount===1?'':'s'}
-                                  {c.zohoOrgId && <span style={{color:"#16a34a",marginLeft:6}}>· Zoho linked</span>}
-                                </div>
-                              </div>
-                            </div>
-                          </div>;
-                        })}
-                      </div>
-                )}
-                {projectsTab==="recent" && (
-                  filteredProjects.length===0
-                    ? <div style={{padding:"40px 20px",textAlign:"center",color:"#888888",fontSize:13}}>{q?"No projects match.":"No recent projects yet."}</div>
-                    : <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                        {filteredProjects.map(p=>(
-                          <div key={p.id||(p.clientId+(p.name||'')+(p.exportedAt||''))} onClick={()=>openProjectViewer(p)} style={{padding:"12px 16px",border:"1px solid #e2e2ea",borderRadius:8,cursor:"pointer",background:"#ffffff",display:"flex",alignItems:"center",gap:14}}>
-                            <div style={{flex:1,minWidth:0}}>
-                              <div style={{fontSize:13,fontWeight:600,color:"#1a1a2e",display:"flex",alignItems:"center",gap:6}}>
-                                {p.locked && <span style={{color:"#dc2626"}}>🔒</span>}
-                                <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||'Project'}</span>
-                              </div>
-                              <div style={{fontSize:11,color:"#888888",marginTop:3}}>
-                                {p.clientName}{p.exportedAt?(' · exported '+new Date(p.exportedAt).toLocaleDateString()):''}
-                              </div>
-                            </div>
-                            <div style={{fontSize:10,color:"#6958C2",fontWeight:600}}>Open →</div>
-                          </div>
-                        ))}
-                      </div>
-                )}
-              </div>
-            </div>
-          </div>;
-        })()}
+        {/* Projects view removed — Clients page is the single entry
+            point. Recent projects live inside each client's detail. */}
+
 
         {view==="guide" && (()=>{
           const Phase = ({num,title,subtitle,color,bg,children})=>(
@@ -6703,7 +6719,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:14,gap:14,flexWrap:"wrap"}}>
               <div>
                 <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Admin</h1>
-                <p style={{color:"#888888",fontSize:12}}>Team members visible to you and the clients each one is assigned to.</p>
+                <p style={{color:"#888888",fontSize:12}}>Every user in your team (including you), and which clients each one can see.</p>
               </div>
               {adminTab==="overview" && <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                 <button onClick={()=>loadAdminUsers()} disabled={adminUsersLoading} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"8px 14px",color:"#1a1a2e",fontSize:12,fontWeight:600,cursor:adminUsersLoading?"default":"pointer"}}>{adminUsersLoading?"Refreshing…":"↻ Refresh"}</button>
@@ -6756,7 +6772,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 rawUsers above), so a simple count is accurate. */}
             <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:18}}>
               {[
-                {label:"Team members",val:sortedUsers.length,color:"#4D3FA0",bg:"rgba(105,88,194,0.06)",icon:"👥"},
+                {label:"Total team",val:sortedUsers.length,color:"#4D3FA0",bg:"rgba(105,88,194,0.06)",icon:"👥"},
                 {label:"Admins",val:sortedUsers.filter(u=>u.role==='team-lead'||u.role==='admin').length,color:"#7c2d12",bg:"rgba(217,119,6,0.06)",icon:"🛡"},
                 {label:"Clients",val:clients.length,color:"#16a34a",bg:"rgba(22,163,74,0.06)",icon:"🏢"},
               ].map(k=>(
@@ -6856,90 +6872,122 @@ td,th{padding:8px 12px;vertical-align:middle}
         {/* ═════════════════ CLIENTS LIST / WORKFLOW ═════════════════ */}
         {(view==="clients" || view==="workflow") && <>
         {/* ── CLIENT SELECTOR ── */}
-        {view==="clients" ? (
-          <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",gap:28}}>
-            <div style={{textAlign:"center"}}>
-              <img src={BCL_LOGO} alt="BCL" style={{height:64,objectFit:"contain",marginBottom:16}} />
-              <h2 style={{fontSize:26,fontWeight:700,letterSpacing:"-0.02em",background:"linear-gradient(135deg,#4D3FA0,#6958C2)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Select or Create a Client</h2>
-              <p style={{color:"#888888",fontSize:13,marginTop:6,maxWidth:400}}>Each client has their own Chart of Accounts, bank ledger, reference database, and learned classification rules.</p>
-            </div>
-
-            {clients.length > 0 && (
-              <div style={{width:"100%",maxWidth:720,display:"flex",justifyContent:"center"}}>
-                <input
-                  type="text"
-                  value={clientSearch}
-                  onChange={e=>setClientSearch(e.target.value)}
-                  placeholder="🔍 Search clients by name…"
-                  style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#1a1a2e",fontSize:13,width:"100%",maxWidth:420,outline:"none",boxShadow:"0 1px 2px rgba(0,0,0,0.04)"}}
-                />
+        {view==="clients" ? (() => {
+          const isAdmin = ["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role);
+          // Resolve assignee emails → display names using the admin
+          // roster. If the roster hasn't loaded yet, fall back to the
+          // email's local part so the column never reads blank.
+          const userByEmail = new Map();
+          for(const u of (adminUsers||[])){
+            if(u && u.email) userByEmail.set(u.email.toLowerCase(), u.name || u.email.split('@')[0] || u.email);
+          }
+          const me = window.AUTH_USER || {};
+          if(me.email) userByEmail.set(me.email.toLowerCase(), me.name || me.email.split('@')[0] || me.email);
+          const nameFor = (email)=> userByEmail.get((email||'').toLowerCase()) || (email||'').split('@')[0] || email || '—';
+          const q = (clientSearch||"").toLowerCase().trim();
+          const filtered = q
+            ? clients.filter(c => (c.name||"").toLowerCase().includes(q))
+            : clients;
+          return (
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18,gap:14,flexWrap:"wrap"}}>
+                <div>
+                  <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e",margin:0}}>Clients</h1>
+                  <p style={{color:"#888888",fontSize:12,marginTop:4}}>Every client lives in Zoho — open one to start the close, or import a new organisation.</p>
+                </div>
+                <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+                  <input
+                    type="text"
+                    value={clientSearch}
+                    onChange={e=>setClientSearch(e.target.value)}
+                    placeholder="🔍 Search clients…"
+                    style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"9px 14px",color:"#1a1a2e",fontSize:12,width:260,outline:"none"}}
+                  />
+                  {isAdmin && (
+                    <button onClick={importClientFromZoho} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"9px 18px",fontSize:12,fontWeight:600,cursor:"pointer",boxShadow:"0 2px 12px rgba(77,63,160,0.25)",whiteSpace:"nowrap"}}>🔗 Import from Zoho</button>
+                  )}
+                </div>
               </div>
-            )}
 
-            {clients.length > 0 && (
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:14,width:"100%",maxWidth:720}}>
-                {clients.filter(c => !clientSearch.trim() || (c.name||"").toLowerCase().includes(clientSearch.trim().toLowerCase())).map(c => (
-                  <div key={c.id} onClick={()=>switchClient(c.id)} style={{background:"linear-gradient(135deg,#ffffff,#f8f9fc)",border:"1px solid #e2e2ea",borderRadius:12,padding:"18px 20px",cursor:"pointer",transition:"all 0.3s",display:"flex",flexDirection:"column",gap:6,boxShadow:"0 2px 12px rgba(77,63,160,0.08)"}} onMouseEnter={e=>{e.currentTarget.style.borderColor="rgba(105,88,194,0.5)";e.currentTarget.style.boxShadow="0 4px 24px rgba(77,63,160,0.2)";}} onMouseLeave={e=>{e.currentTarget.style.borderColor="#e2e2ea";e.currentTarget.style.boxShadow="0 2px 12px rgba(77,63,160,0.08)";}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />
-                      <div style={{fontSize:15,fontWeight:600}}>{c.name}</div>
-                      <button onClick={(e)=>{e.stopPropagation();renameClient(c.id);}} title="Rename client" style={{background:"none",border:"none",color:"#888888",fontSize:12,cursor:"pointer",padding:"0 4px"}}>✏️</button>
-                    </div>
-                    <div style={{fontSize:10,color:"#888888",marginTop:2}}>Bank: {getClientData(c.id,"bank","Not set")}</div>
-                    <div style={{fontSize:10,color:"#777777"}}>References: {Object.keys(getClientData(c.id,"refdb",{})).length} mappings</div>
-                    {(projectLog[c.id]||[]).length>0&&<div style={{fontSize:10,color:"#0891b2",marginTop:2}}>📁 {(projectLog[c.id]||[]).length} project(s)</div>}
-                    {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (c.ownerName||c.ownerEmail) && (
-                      <div style={{fontSize:10,color:"#6958C2",fontStyle:"italic",marginTop:2}}>👤 Created by: {c.ownerName||c.ownerEmail}</div>
-                    )}
-                    {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
-                      <div style={{fontSize:10,color:"#0891b2",marginTop:2}}>
-                        👥 Assigned: {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length || 0} user(s)
-                      </div>
-                    )}
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,paddingTop:6,borderTop:"1px solid #e2e2ea",gap:6}}>
-                      <span style={{fontSize:10,color:"#cccccc"}}>Created {(()=>{ const t=c.createdAt||c.created; return t ? new Date(t).toLocaleDateString() : '—'; })()}</span>
-                      <div style={{display:"flex",gap:6}}>
-                        {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
-                          <span onClick={(e)=>{e.stopPropagation();openAssignDialog(c.id);}} title="Assign Users to this client" style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(77,63,160,0.08)"}}>👥 Assign</span>
-                        )}
-                        {["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) && (
-                          <span onClick={(e)=>{e.stopPropagation();deleteClient(c.id);}} style={{fontSize:10,color:"#dc2626",cursor:"pointer",padding:"2px 8px",borderRadius:4,background:"rgba(220,38,38,0.08)"}}>Delete</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {showNewClient ? (
-              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-                <input type="text" value={newClientName} onChange={e=>setNewClientName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newClientName.trim())createClient(newClientName);}} placeholder="Client name (e.g., Z2 Tech LLC)" autoFocus style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#1a1a2e",fontSize:13,width:260,outline:"none"}} />
-                <button onClick={()=>createClient(newClientName)} disabled={!newClientName.trim()} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:13,fontWeight:600,cursor:newClientName.trim()?"pointer":"default",opacity:newClientName.trim()?1:0.5,boxShadow:"0 2px 12px rgba(77,63,160,0.3)"}}>Create</button>
-                <button onClick={()=>{setShowNewClient(false);setNewClientName("");}} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,padding:"10px 16px",color:"#888888",fontSize:13,cursor:"pointer"}}>Cancel</button>
-              </div>
-            ) : (
-              ["admin","team-lead"].includes(window.AUTH_USER&&window.AUTH_USER.role) ? (
-                <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
-                  <button onClick={importClientFromZoho} style={{background:"#ffffff",color:"#4D3FA0",border:"1.5px solid #4D3FA0",borderRadius:10,padding:"12px 24px",fontSize:14,fontWeight:600,cursor:"pointer",transition:"all 0.2s"}}>🔗 Import from Zoho</button>
-                  <button onClick={()=>setShowNewClient(true)} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:10,padding:"12px 32px",fontSize:14,fontWeight:600,cursor:"pointer",boxShadow:"0 4px 20px rgba(77,63,160,0.35)",transition:"all 0.2s"}}>+ New Client (manual)</button>
+              {clients.length === 0 ? (
+                <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:"60px 24px",textAlign:"center"}}>
+                  <div style={{fontSize:32,marginBottom:8,opacity:0.4}}>🏢</div>
+                  <div style={{fontSize:14,fontWeight:600,color:"#1a1a2e"}}>No clients yet</div>
+                  <div style={{fontSize:12,color:"#888888",marginTop:4}}>{isAdmin?"Click 'Import from Zoho' to bring an organisation in.":"Your Admin needs to import one from Zoho before you can start."}</div>
                 </div>
               ) : (
-                clients.length === 0 ? (
-                  <div style={{fontSize:13,color:"#888888",padding:"12px 16px",borderRadius:8,background:"rgba(105,88,194,0.05)",border:"1px solid rgba(105,88,194,0.15)",maxWidth:480,textAlign:"center"}}>No clients yet. Your Admin needs to import or create one before you can start.</div>
-                ) : null
-              )
-            )}
-
-          </div>
-        ) : (<>
+                <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,overflow:"hidden"}}>
+                  <div style={{maxHeight:"calc(100vh - 240px)",overflowY:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                      <thead><tr style={{background:"#fafafd",position:"sticky",top:0,zIndex:1}}>
+                        <th style={{padding:"12px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",width:60,fontSize:11}}>Sl. No.</th>
+                        <th style={{padding:"12px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>Client Name</th>
+                        <th style={{padding:"12px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11,whiteSpace:"nowrap"}}>Created by</th>
+                        <th style={{padding:"12px 14px",textAlign:"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>Assigned to</th>
+                        {isAdmin && <th style={{padding:"12px 14px",textAlign:"right",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11,width:140,whiteSpace:"nowrap"}}>Actions</th>}
+                      </tr></thead>
+                      <tbody>
+                        {filtered.length===0 ? (
+                          <tr><td colSpan={isAdmin?5:4} style={{padding:"30px 14px",textAlign:"center",color:"#888888",fontSize:12}}>No clients match "{clientSearch}".</td></tr>
+                        ) : filtered.map((c,i) => {
+                          const assignedEmails = (c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean);
+                          const assignedNames = assignedEmails.map(nameFor);
+                          const createdBy = c.ownerName || nameFor(c.ownerEmail);
+                          return (
+                            <tr key={c.id} onClick={()=>switchClient(c.id)} style={{borderBottom:"1px solid #f0f0f4",cursor:"pointer",transition:"background 0.1s"}}
+                              onMouseEnter={e=>e.currentTarget.style.background="rgba(77,63,160,0.04)"}
+                              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                              <td style={{padding:"12px 14px",fontFamily:"'IBM Plex Mono',monospace",color:"#888888",fontSize:11}}>{i+1}</td>
+                              <td style={{padding:"12px 14px"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                                  <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:600,flexShrink:0,letterSpacing:"0.3px"}}>
+                                    {(c.name||"?").trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase()}
+                                  </div>
+                                  <div style={{minWidth:0}}>
+                                    <div style={{fontSize:13,fontWeight:600,color:"#1a1a2e"}}>{c.name}</div>
+                                    <div style={{display:"flex",gap:6,marginTop:3,flexWrap:"wrap"}}>
+                                      {c.zohoOrgId && <span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:"rgba(22,163,74,0.08)",color:"#16a34a"}}>Zoho linked</span>}
+                                      {(projectLog[c.id]||[]).length>0 && <span style={{fontSize:9,padding:"1px 6px",borderRadius:3,background:"rgba(8,145,178,0.08)",color:"#0891b2"}}>{(projectLog[c.id]||[]).length} project{(projectLog[c.id]||[]).length===1?'':'s'}</span>}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td style={{padding:"12px 14px",fontSize:11,color:"#666666"}}>{createdBy||'—'}</td>
+                              <td style={{padding:"12px 14px",fontSize:11,color:"#666666"}}>
+                                {assignedNames.length===0 ? (
+                                  <span style={{color:"#999999"}}>—</span>
+                                ) : (
+                                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                                    {assignedNames.slice(0,3).map((n,j)=>(
+                                      <span key={j} style={{fontSize:10,padding:"3px 8px",borderRadius:4,background:"rgba(105,88,194,0.06)",color:"#4D3FA0",border:"1px solid rgba(105,88,194,0.15)"}}>{n}</span>
+                                    ))}
+                                    {assignedNames.length>3 && <span style={{fontSize:10,color:"#888888",padding:"3px 4px"}}>+{assignedNames.length-3}</span>}
+                                  </div>
+                                )}
+                              </td>
+                              {isAdmin && (
+                                <td style={{padding:"12px 14px",textAlign:"right",whiteSpace:"nowrap"}}>
+                                  <span onClick={(e)=>{e.stopPropagation();openAssignDialog(c.id);}} title="Assign users" style={{fontSize:10,color:"#4D3FA0",cursor:"pointer",padding:"4px 8px",borderRadius:4,background:"rgba(77,63,160,0.06)",marginRight:6}}>👥 Assign</span>
+                                  <span onClick={(e)=>{e.stopPropagation();deleteClient(c.id);}} style={{fontSize:10,color:"#dc2626",cursor:"pointer",padding:"4px 8px",borderRadius:4,background:"rgba(220,38,38,0.06)"}}>Delete</span>
+                                </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })() : (<>
 
         {/* ── CLIENT CONTEXT BAR ── */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,padding:"10px 16px",background:"linear-gradient(135deg,#ffffff,#f8f9fc)",borderRadius:10,border:"1px solid #e2e2ea",flexWrap:"wrap",gap:8,boxShadow:"0 2px 12px rgba(77,63,160,0.06)"}}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />
             <span style={{fontSize:14,fontWeight:600,color:"#4D3FA0"}}>{activeClientName}</span>
-            {activeClientId && <button onClick={()=>renameClient(activeClientId)} title="Rename client" style={{background:"none",border:"none",color:"#888888",fontSize:12,cursor:"pointer",padding:"0 4px"}}>✏️</button>}
             {bankAccount && bankAccount !== "Bank Account" && <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.1)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>{bankAccount}</span>}
             <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(105,88,194,0.15)",color:"#6958C2",border:"1px solid rgba(105,88,194,0.3)"}}>{Object.keys(refDB).length} refs</span>
             {globalRefCount>0&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.15)"}}>{globalRefCount} global</span>}
