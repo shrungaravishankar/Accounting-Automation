@@ -2269,6 +2269,36 @@ function alValidateOcrInvoice(item, ctx){
   return out;
 }
 
+// Posting destination helper — decides whether a ledger lands on P&L or
+// Balance Sheet from its Zoho account_type. Shared by the Bank Statement
+// review, Revenue OCR review, and the pre-push guard so the accountant
+// always sees where a line is going before it is pushed.
+const AL_BS_ACCOUNT_TYPES = new Set([
+  "asset","other asset","other current asset","fixed asset",
+  "bank","cash",
+  "liability","other liability","other current liability","long term liability",
+  "equity",
+  "accounts receivable","accounts payable"
+]);
+function alDestinationOf(ledgerName, chartOfAccounts){
+  const name = (ledgerName||"").trim();
+  if(!name) return "Unknown";
+  if(/^(review required|suspense)/i.test(name) || /suspense/i.test(name)) return "Unknown";
+  const acct = (chartOfAccounts||[]).find(a => (a.name||"").toLowerCase() === name.toLowerCase());
+  if(!acct) return "Unknown";
+  const t = (acct.type||"").toLowerCase();
+  if(!t) return "Unknown";
+  return AL_BS_ACCOUNT_TYPES.has(t) ? "Balance Sheet" : "P&L";
+}
+function AlDestinationBadge({ ledger, chartOfAccounts, compact }){
+  const d = alDestinationOf(ledger, chartOfAccounts);
+  const tone = d==="P&L" ? {bg:"rgba(22,163,74,0.10)",fg:"#16a34a",br:"rgba(22,163,74,0.25)"}
+             : d==="Balance Sheet" ? {bg:"rgba(8,145,178,0.10)",fg:"#0891b2",br:"rgba(8,145,178,0.25)"}
+             : {bg:"rgba(217,119,6,0.10)",fg:"#d97706",br:"rgba(217,119,6,0.30)"};
+  const label = d==="Unknown" ? "Destination unknown" : ("Lands on "+d);
+  return <span title={label} style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:compact?9:10,fontWeight:700,padding:compact?"1px 6px":"2px 8px",borderRadius:10,background:tone.bg,color:tone.fg,border:"1px solid "+tone.br,whiteSpace:"nowrap",lineHeight:1.4}}>{d==="Unknown"?"⚠ Unknown": (d==="P&L"?"P&L":"BS")}</span>;
+}
+
 // Filter Chart-of-Accounts entries by usage context. Zoho account_type
 // values: expense / other_expense / cost_of_goods_sold on the debit side;
 // income / other_income on the credit side. Manual CSVs may carry looser
@@ -4371,6 +4401,20 @@ function App(){
       return !bsTypes.has(t);
     };
 
+    // Pre-push guard: every line about to be posted must resolve to a known
+    // destination (P&L or BS). If the chosen ledger isn't found in the COA
+    // or has no account_type, block the push and tell the accountant which
+    // rows to fix.
+    const unknownDest = classifiedTxns
+      .filter(t => (t.status === "Confirmed" || t.status === "Auto-Assigned"))
+      .filter(t => !(t.credit>0 && t.contactName)) // payment-received rows post to AR (always BS)
+      .filter(t => alDestinationOf(t.selectedLedger, chartOfAccounts) === "Unknown");
+    if(unknownDest.length > 0){
+      const sample = unknownDest.slice(0,5).map(t => "• "+(t.date||"")+" — "+(t.description||"").slice(0,60)+" → "+(t.selectedLedger||"(empty)")).join("\n");
+      alert(unknownDest.length+" transaction(s) have no known posting destination (P&L / Balance Sheet). Fix the ledger before pushing:\n\n"+sample+(unknownDest.length>5?"\n…and "+(unknownDest.length-5)+" more.":""));
+      return;
+    }
+
     const plExpenses=[], bsItems=[], journalEntries2=[], paymentReceived=[];
     const suspenseList=classifiedTxns.filter(t=>t.status==="Suspense").map(t=>({date:t.date,description:t.description,debit:t.debit,credit:t.credit}));
 
@@ -6008,6 +6052,16 @@ td,th{padding:8px 12px;vertical-align:middle}
                                 <option value="">— Default sales account —</option>
                                 {alFilterAccountsForContext(chartOfAccounts,'income').map(a=><option key={a.id||a.name} value={a.id||''}>{a.name}{a.type?(' — '+a.type):''}</option>)}
                               </select>
+                              {(()=>{ const acct=(chartOfAccounts||[]).find(a=>String(a.id||'')===String(q.accountId||'')); const incomeName = acct?acct.name:'Sales Revenue'; return (
+                                <div style={{marginTop:6,padding:"6px 8px",background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,fontSize:10,color:"#555"}}>
+                                  <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888",textTransform:"uppercase",marginBottom:4}}>Posting preview · this invoice will hit</div>
+                                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>Accounts Receivable <span style={{color:"#888"}}>(Dr {Number(q.total||0).toFixed(2)})</span></span><AlDestinationBadge ledger="Accounts Receivable" chartOfAccounts={[{name:"Accounts Receivable",type:"accounts_receivable"}]} compact={true} /></div>
+                                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>{incomeName} <span style={{color:"#888"}}>(Cr {Number(q.subtotal||0).toFixed(2)})</span></span><AlDestinationBadge ledger={incomeName} chartOfAccounts={acct?chartOfAccounts:[{name:incomeName,type:"income"}]} compact={true} /></div>
+                                    {Number(q.tax||0)>0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>VAT Payable <span style={{color:"#888"}}>(Cr {Number(q.tax||0).toFixed(2)})</span></span><AlDestinationBadge ledger="VAT Payable" chartOfAccounts={[{name:"VAT Payable",type:"other current liability"}]} compact={true} /></div>}
+                                  </div>
+                                </div>
+                              ); })()}
                             </div>
                             <div>
                               <label style={{fontSize:10,color:"#888888"}}>VAT %</label>
@@ -7204,7 +7258,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <div style={{borderRadius:8,border:"1px solid #e2e2ea",overflow:"hidden",maxHeight:400,overflowY:"auto"}}>
               <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                 <thead><tr style={{background:"#ffffff",position:"sticky",top:0}}>
-                  {["Date","Description","Debit","Credit","Ledger","Confidence","Status"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:10}}>{h}</th>)}
+                  {["Date","Description","Debit","Credit","Ledger","Lands on","Confidence","Status"].map(h=><th key={h} style={{padding:"8px 10px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#888888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:10}}>{h}</th>)}
                 </tr></thead>
                 <tbody>{(viewingProject.data.transactions||[]).map((t,i)=><tr key={i} style={{borderBottom:"1px solid #ffffff",background:i%2===0?"transparent":"rgba(0,20,65,0.03)"}}>
                   <td style={{padding:"5px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:10,whiteSpace:"nowrap"}}>{t.date}</td>
@@ -7212,6 +7266,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <td style={{padding:"5px 10px",textAlign:"right",color:t.debit?"#dc2626":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>{t.debit?fmt(t.debit):""}</td>
                   <td style={{padding:"5px 10px",textAlign:"right",color:t.credit?"#16a34a":"#cccccc",fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>{t.credit?fmt(t.credit):""}</td>
                   <td style={{padding:"5px 10px",color:"#6958C2",fontSize:10}}>{t.selectedLedger}</td>
+                  <td style={{padding:"5px 10px"}}><AlDestinationBadge ledger={t.selectedLedger} chartOfAccounts={chartOfAccounts} compact={true} /></td>
                   <td style={{padding:"5px 10px",textAlign:"center"}}><span style={{fontSize:9,fontWeight:600,color:t.confidence===100?"#16a34a":t.confidence===50?"#d97706":"#dc2626"}}>{t.confidence}%</span></td>
                   <td style={{padding:"5px 10px"}}><span style={{fontSize:8,fontWeight:600,padding:"1px 5px",borderRadius:3,background:t.status==="Confirmed"?"rgba(22,163,74,0.1)":t.status==="Auto-Assigned"?"rgba(105,88,194,0.1)":"rgba(217,119,6,0.1)",color:t.status==="Confirmed"?"#16a34a":t.status==="Auto-Assigned"?"#6958C2":"#d97706"}}>{t.status}</span></td>
                 </tr>)}</tbody>
@@ -7717,6 +7772,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>
                 ) : (
                 <><div onClick={()=>{setCoaDropdownOpen(p=>({...p,[t.id]:!p[t.id]}));setHighlightIdx(0);}} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"8px 12px",color:"#1a1a2e",fontSize:12,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",minHeight:36}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.selectedLedger}</span><span style={{color:"#777777",marginLeft:6}}>▾</span></div>
+                <div style={{marginTop:4}}><AlDestinationBadge ledger={t.selectedLedger} chartOfAccounts={chartOfAccounts} compact={true} /></div>
                 {coaDropdownOpen[t.id]&&(()=>{
                   // Context filter: expenses tab shows expense accounts, revenue tab
                   // shows income accounts; Journal entry-mode sees everything.
@@ -7803,7 +7859,10 @@ td,th{padding:8px 12px;vertical-align:middle}
 
                   <div style={{display:"flex",flexDirection:"column",gap:10}}>
                     <div>
-                      <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase",marginBottom:4}}>Ledger</div>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,gap:6}}>
+                        <span style={{fontSize:9,fontWeight:700,letterSpacing:"0.04em",color:"#888888",textTransform:"uppercase"}}>Ledger</span>
+                        <AlDestinationBadge ledger={focused.selectedLedger} chartOfAccounts={chartOfAccounts} compact={false} />
+                      </div>
                       <div style={{padding:"7px 10px",background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,fontSize:11,color:focused.selectedLedger==="Review Required"?"#d97706":"#1a1a2e",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={focused.selectedLedger}>{focused.selectedLedger||"—"}</div>
                     </div>
 
