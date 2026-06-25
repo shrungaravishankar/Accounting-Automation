@@ -10,14 +10,49 @@
 <base href="/">
 <title>BCL AutoLedger — Transforming Lives With Wisdom</title>
 <link rel="icon" type="image/png" href="bcl-logo.png">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<!-- Core runtime: React + Babel. `defer` lets the HTML parse without
+     blocking; the three scripts execute in document order on
+     DOMContentLoaded. -->
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<!-- XLSX, PDF.js, Tesseract.js and JSZip total ~7 MB and are only
+     needed AFTER login (bank-statement upload, invoice OCR fallback,
+     ZIP exports). They are lazy-loaded on demand via __al_loadScript()
+     below — keeping the initial login render under ~500 KB of JS. -->
+<script>
+  // De-duplicating async loader. Returns a Promise resolved once the
+  // requested URL has executed; repeated calls for the same URL share
+  // the same in-flight download.
+  window.__al_scriptCache = window.__al_scriptCache || {};
+  window.__al_loadScript = function(url){
+    if(window.__al_scriptCache[url]) return window.__al_scriptCache[url];
+    window.__al_scriptCache[url] = new Promise(function(resolve,reject){
+      var s=document.createElement('script');
+      s.src=url; s.async=true;
+      s.onload=function(){ resolve(); };
+      s.onerror=function(){ reject(new Error('Failed to load '+url)); };
+      document.head.appendChild(s);
+    });
+    return window.__al_scriptCache[url];
+  };
+  window.__al_loadXLSX     = function(){ return window.__al_loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'); };
+  window.__al_loadPdfJs    = function(){
+    return window.__al_loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js')
+      .then(function(){
+        if(window.pdfjsLib && !window.pdfjsLib.GlobalWorkerOptions.workerSrc){
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+      });
+  };
+  window.__al_loadTesseract= function(){ return window.__al_loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'); };
+  window.__al_loadJSZip    = function(){ return window.__al_loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'); };
+</script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; }
@@ -1770,8 +1805,8 @@ $('invite-submit').addEventListener('click', async () => {
 <script type="text/babel">
 const { useState, useCallback, useRef, useEffect, useMemo } = React;
 
-// PDF.js worker for bill OCR (paid version)
-if(typeof pdfjsLib!=="undefined")pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+// PDF.js worker for bill OCR. Configured after pdf.js is lazy-loaded
+// — pdfjsLib doesn't exist at module-eval time anymore.
 const BCL_LOGO="bcl-logo.png";
 
 
@@ -2360,7 +2395,10 @@ function classifyTransaction(description, learnedRules, refDB, chartOfAccounts, 
   return { ledger: "Review Required", confidence: 0, source: "new" };
 }
 
-function parseXLSXFile(arrayBuffer) {
+async function parseXLSXFile(arrayBuffer) {
+  // XLSX is lazy-loaded — the library isn't included in the initial
+  // page bundle, so ensure it's downloaded before first use.
+  await window.__al_loadXLSX();
   const wb = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
   return XLSX.utils.sheet_to_csv(ws, { forceQuotes: true });
@@ -2507,7 +2545,19 @@ function classifyFromKeywords(description, keywordIndex) {
   return { ledger: bestLedger, confidence, source: "keyword", matchCount: bestVotes, matchedKeywords: bestKeywords };
 }
 
-const STEPS=[{id:1,label:"Upload",icon:"↑"},{id:2,label:"Parse",icon:"⚙"},{id:3,label:"Classify",icon:"🤖"},{id:4,label:"Review",icon:"✓"},{id:5,label:"Preview",icon:"📋"},{id:6,label:"Done",icon:"✅"}];
+// User-visible workflow stages — accountant-platform language.
+// Step 3 (legacy "Classify") is intentionally omitted: classification
+// runs automatically when the user advances from step 2 → step 4, so
+// it never had its own screen. The forward/back nav skips id 3 to
+// keep the visible flow tight. Internal step numbers are preserved so
+// every existing `step===N` check keeps working.
+const STEPS=[
+  {id:1,label:"Upload",icon:"↑"},
+  {id:2,label:"AI Processing",icon:"⚙"},
+  {id:4,label:"Accountant Review",icon:"✓"},
+  {id:5,label:"Ready For Posting",icon:"📋"},
+  {id:6,label:"Posted",icon:"✅"},
+];
 
 /* ─── CLIENT STORAGE HELPERS ─── */
 function getClientList() {
@@ -2891,7 +2941,7 @@ function App(){
       let text;
       const nm=file.name.toLowerCase();
       if(nm.endsWith(".xlsx")||nm.endsWith(".xls")){
-        const buf=await file.arrayBuffer();text=parseXLSXFile(buf);
+        const buf=await file.arrayBuffer();text=await parseXLSXFile(buf);
       } else {
         text=await new Promise((res,rej)=>{const r=new FileReader();r.onload=ev=>res(ev.target.result);r.onerror=()=>rej(new Error("Read error"));r.readAsText(file);});
       }
@@ -3339,7 +3389,7 @@ function App(){
     const file=e.target.files[0];if(!file)return;setParseError("");const nm=file.name.toLowerCase();
     if(nm.endsWith(".xlsx")||nm.endsWith(".xls")){
       setFileType("xlsx");
-      try{const buf=await file.arrayBuffer();const csv=parseXLSXFile(buf);const txns=parseBankStatementCSV(csv);if(txns.length===0)throw new Error("Could not detect transactions in this Excel file.");setTransactions(txns);setBankFileName(file.name);}
+      try{const buf=await file.arrayBuffer();const csv=await parseXLSXFile(buf);const txns=parseBankStatementCSV(csv);if(txns.length===0)throw new Error("Could not detect transactions in this Excel file.");setTransactions(txns);setBankFileName(file.name);}
       catch(err){setParseError(err.message||"Failed to parse Excel file");}
     }else{
       setFileType("csv");const reader=new FileReader();
@@ -3350,7 +3400,7 @@ function App(){
 
   const handleCoaFile=useCallback(async(e)=>{
     const file=e.target.files[0];if(!file)return;setCoaFileName(file.name);let text;
-    if(file.name.toLowerCase().endsWith(".xlsx")||file.name.toLowerCase().endsWith(".xls")){const buf=await file.arrayBuffer();text=parseXLSXFile(buf);}
+    if(file.name.toLowerCase().endsWith(".xlsx")||file.name.toLowerCase().endsWith(".xls")){const buf=await file.arrayBuffer();text=await parseXLSXFile(buf);}
     else{text=await new Promise(r=>{const fr=new FileReader();fr.onload=ev=>r(ev.target.result);fr.readAsText(file);});}
     const lines=text.split("\n").filter(l=>l.trim());if(lines.length<2)return;
     const headers=parseCSVLine(lines[0]).map(h=>h.toLowerCase().replace(/[^a-z0-9 ]/g,"").trim());
@@ -3389,7 +3439,7 @@ function App(){
   const handleVendorFile=useCallback(async(e)=>{
     const file=e.target.files[0];if(!file)return;setVendorFileName(file.name);
     let text;
-    if(file.name.toLowerCase().endsWith(".xlsx")||file.name.toLowerCase().endsWith(".xls")){const buf=await file.arrayBuffer();text=parseXLSXFile(buf);}
+    if(file.name.toLowerCase().endsWith(".xlsx")||file.name.toLowerCase().endsWith(".xls")){const buf=await file.arrayBuffer();text=await parseXLSXFile(buf);}
     else{text=await new Promise(r=>{const fr=new FileReader();fr.onload=ev=>r(ev.target.result);fr.readAsText(file);});}
     const names=parseNameList(text);
     if(names.length>0)setVendors(names);
@@ -3398,7 +3448,7 @@ function App(){
   const handleCustomerFile=useCallback(async(e)=>{
     const file=e.target.files[0];if(!file)return;setCustomerFileName(file.name);
     let text;
-    if(file.name.toLowerCase().endsWith(".xlsx")||file.name.toLowerCase().endsWith(".xls")){const buf=await file.arrayBuffer();text=parseXLSXFile(buf);}
+    if(file.name.toLowerCase().endsWith(".xlsx")||file.name.toLowerCase().endsWith(".xls")){const buf=await file.arrayBuffer();text=await parseXLSXFile(buf);}
     else{text=await new Promise(r=>{const fr=new FileReader();fr.onload=ev=>r(ev.target.result);fr.readAsText(file);});}
     const names=parseNameList(text);
     if(names.length>0)setCustomers(names);
@@ -3614,8 +3664,9 @@ function App(){
   const expandOcrFiles = useCallback(async (fileList)=>{
     const out=[];
     for(const f of Array.from(fileList||[])){
-      if(/\.zip$/i.test(f.name) && window.JSZip){
+      if(/\.zip$/i.test(f.name)){
         try{
+          await window.__al_loadJSZip();
           const zip = await window.JSZip.loadAsync(f);
           const names = Object.keys(zip.files).filter(n=>!zip.files[n].dir && /\.(pdf|png|jpe?g|webp)$/i.test(n));
           for(const n of names){
@@ -4201,6 +4252,30 @@ function App(){
     if(allSelected) setSelectedIds(prev=>{const next=new Set(prev);visibleIds.forEach(id=>next.delete(id));return next;});
     else setSelectedIds(prev=>{const next=new Set(prev);visibleIds.forEach(id=>next.add(id));return next;});
   },[filteredTxns,selectedIds]);
+
+  // Keyboard shortcuts on the Accountant Review step:
+  //   Cmd/Ctrl+A  → select all visible rows
+  //   Esc         → clear selection
+  //   Cmd/Ctrl+↵  → confirm currently-selected rows
+  // Ignored while the user is typing into an input or select (e.g.
+  // editing a ledger inline) so we don't hijack normal text editing.
+  useEffect(()=>{
+    if(view!=="workflow" || step!==4) return;
+    const onKey=(e)=>{
+      const t=e.target;
+      if(t && (t.tagName==='INPUT' || t.tagName==='SELECT' || t.tagName==='TEXTAREA' || t.isContentEditable)) return;
+      const meta = e.metaKey || e.ctrlKey;
+      if(meta && (e.key==='a' || e.key==='A')){
+        e.preventDefault(); toggleSelectAll();
+      } else if(e.key==='Escape'){
+        if(selectedIds.size>0){ e.preventDefault(); setSelectedIds(new Set()); }
+      } else if(meta && (e.key==='Enter' || e.key==='Return')){
+        if(selectedIds.size>0){ e.preventDefault(); confirmSelected(); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return ()=>window.removeEventListener('keydown', onKey);
+  },[view,step,toggleSelectAll,confirmSelected,selectedIds]);
 
   // Reference DB import/export
   const exportRefDB=useCallback(()=>{
@@ -5121,6 +5196,7 @@ td,th{padding:8px 12px;vertical-align:middle}
       if(nm.endsWith(".pdf")){
         // Try PDF.js text extraction
         setBillProgress("Extracting text from PDF...");
+        await window.__al_loadPdfJs();
         const buf=await bill.file.arrayBuffer();
         const pdf=await pdfjsLib.getDocument({data:buf}).promise;
         for(let p=1;p<=pdf.numPages;p++){
@@ -5131,6 +5207,7 @@ td,th{padding:8px 12px;vertical-align:middle}
         // If not enough text, fall back to OCR
         if(text.replace(/\s/g,"").length<50){
           setBillProgress("Running OCR...");
+          await window.__al_loadTesseract();
           for(let p=1;p<=pdf.numPages;p++){
             const page=await pdf.getPage(p);
             const vp=page.getViewport({scale:2.5});
@@ -5145,6 +5222,7 @@ td,th{padding:8px 12px;vertical-align:middle}
       } else {
         // Image file — OCR directly
         setBillProgress("Running OCR on image...");
+        await window.__al_loadTesseract();
         const{data:{text:t}}=await Tesseract.recognize(bill.file,"eng");
         text=t;
       }
@@ -5333,26 +5411,41 @@ td,th{padding:8px 12px;vertical-align:middle}
           })()}
         </div>}
 
-        {/* Primary navigation */}
-        <div style={{padding:sidebarOpen?"8px 10px":"8px 4px",display:"flex",flexDirection:"column",gap:4}}>
+        {/* Primary navigation — grouped into Workspace / Accounting Close
+            / System sections. Section headers render only when expanded
+            so the collapsed rail stays icon-only. New pages (Exception
+            Center, Review Center, Zoho Posting) are scheduled for Phase
+            2 of the redesign; we don't stub them here. */}
+        <div style={{padding:sidebarOpen?"8px 10px":"8px 4px",display:"flex",flexDirection:"column",gap:2}}>
           {(()=>{
             const role=window.AUTH_USER&&window.AUTH_USER.role;
             const isAdmin=["admin","team-lead"].includes(role);
-            const NAV=[
-              {key:"dashboard",label:"Home",icon:"🏠"},
-              {key:"clients",label:"Clients",icon:"👥",count:clients.length},
-              {key:"projects",label:"Projects",icon:"📁",count:recentProjectsAll.length||undefined},
-              {key:"guide",label:"Guide",icon:"📖"},
+            const SECTIONS=[
+              {title:"Workspace", items:[
+                {key:"dashboard",label:"Dashboard",icon:"⌂"},
+                {key:"clients",label:"Clients",icon:"👥",count:clients.length},
+              ]},
+              {title:"Accounting Close", items:[
+                {key:"projects",label:"Projects",icon:"📁",count:recentProjectsAll.length||undefined},
+              ]},
+              {title:"System", items:[
+                {key:"guide",label:"Guide",icon:"📖"},
+                ...(isAdmin?[{key:"admin",label:"Administration",icon:"⚙"}]:[]),
+              ]},
             ];
-            if(isAdmin) NAV.push({key:"admin",label:"Admin",icon:"👮"});
-            return NAV.map(n=>{
-              const active = view===n.key || (n.key==="clients" && view==="clientDetail");
-              return <div key={n.key} onClick={()=>{ setView(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
-                <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
-                {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
-                {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
-              </div>;
-            });
+            return SECTIONS.map((sec,i)=>(
+              <React.Fragment key={sec.title}>
+                {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:i===0?"4px 10px 6px":"12px 10px 6px"}}>{sec.title}</div>}
+                {sec.items.map(n=>{
+                  const active = view===n.key || (n.key==="clients" && view==="clientDetail");
+                  return <div key={n.key} onClick={()=>{ setView(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                    <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
+                    {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
+                    {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
+                  </div>;
+                })}
+              </React.Fragment>
+            ));
           })()}
         </div>
 
@@ -5391,7 +5484,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               return <div key={s.id} onClick={()=>{ if(reachable) setStep(s.id); }} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",borderRadius:4,cursor:reachable?"pointer":"default",fontSize:11,color:active?"#4D3FA0":done?"#16a34a":"#999999",background:active?"rgba(77,63,160,0.08)":"transparent",fontWeight:active?600:400}}>
                 <span style={{fontSize:12,minWidth:16,textAlign:"center"}}>{s.icon}</span>
                 <span style={{flex:1}}>{s.label}</span>
-                {active && <span style={{fontSize:9,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{s.id}/6</span>}
+                {active && <span style={{fontSize:9,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>{STEPS.findIndex(x=>x.id===s.id)+1}/{STEPS.length}</span>}
               </div>;
             })}
           </div>
@@ -5415,7 +5508,7 @@ td,th{padding:8px 12px;vertical-align:middle}
         {/* Breadcrumb (always) + workflow step nav (only when inside workflow) */}
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",flex:1,marginLeft:18,marginRight:60}}>
           <div style={{fontSize:13,color:"#666666",display:"flex",alignItems:"center",gap:6}}>
-            {view==="dashboard" && <span style={{color:"#1a1a2e",fontWeight:600}}>Home</span>}
+            {view==="dashboard" && <span style={{color:"#1a1a2e",fontWeight:600}}>Dashboard</span>}
             {view==="clients" && <span style={{color:"#1a1a2e",fontWeight:600}}>Clients</span>}
             {view==="clientDetail" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>{activeClientName||"—"}</span></>}
             {view==="workflow" && <><span onClick={()=>setView("clients")} style={{cursor:"pointer",color:"#6958C2"}}>Clients</span><span style={{color:"#cccccc"}}>›</span><span onClick={()=>setView("clientDetail")} style={{cursor:"pointer",color:"#6958C2"}}>{activeClientName||"—"}</span><span style={{color:"#cccccc"}}>›</span><span style={{color:"#1a1a2e",fontWeight:600}}>New Statement</span></>}
@@ -5424,7 +5517,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             {view==="admin" && <span style={{color:"#1a1a2e",fontWeight:600}}>Admin</span>}
           </div>
           {view==="workflow"&&appMode==="bank"&&<div style={{display:"flex",alignItems:"center",gap:6,marginLeft:"auto"}}>
-            <button onClick={()=>{if(step>1)setStep(step-1);}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:step>1?"#6958C2":"#e2e2ea",fontSize:13,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
+            <button onClick={()=>{if(step>1){ if(step===4) setStep(2); else setStep(step-1); }}} disabled={step<=1} style={{background:"none",border:"1px solid "+(step>1?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:step>1?"#6958C2":"#e2e2ea",fontSize:13,cursor:step>1?"pointer":"default",lineHeight:1,fontWeight:700}}>‹</button>
             {STEPS.map(s=><div key={s.id} onClick={()=>{if(s.id<=step||(s.id===2&&transactions.length>0)||(s.id===4&&classifiedTxns.length>0)||(s.id===5&&((journalEntries.expenses||[]).length>0||(journalEntries.journals||[]).length>0||(journalEntries.revenue||[]).length>0)))setStep(s.id);}} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:5,fontSize:11,fontWeight:500,background:step===s.id?"rgba(77,63,160,0.2)":"transparent",color:step===s.id?"#6958C2":step>s.id?"#16a34a":"#999999",border:step===s.id?"1px solid rgba(77,63,160,0.4)":"1px solid transparent",cursor:s.id<=step?"pointer":"default",whiteSpace:"nowrap"}}><span>{s.icon}</span>{s.label}</div>)}
             <button onClick={()=>{if(step<6){ if(step===1&&transactions.length>0)setStep(2); else if(step===2)setStep(4); else if(step>=2&&step<6)setStep(step+1); }}} disabled={step>=6||(step===1&&transactions.length===0)} style={{background:"none",border:"1px solid "+((step<6&&!(step===1&&transactions.length===0))?"#e2e2ea":"transparent"),borderRadius:6,padding:"4px 9px",color:(step<6&&!(step===1&&transactions.length===0))?"#6958C2":"#e2e2ea",fontSize:13,cursor:(step<6&&!(step===1&&transactions.length===0))?"pointer":"default",lineHeight:1,fontWeight:700}}>›</button>
           </div>}
@@ -5471,36 +5564,54 @@ td,th{padding:8px 12px;vertical-align:middle}
               <KPI label="Calls remaining" val={apiUsage&&apiUsage.remaining!=null?apiUsage.remaining:"—"} color={apiUsage&&Number(apiUsage.remaining)<100?"#dc2626":"#d97706"} bg={apiUsage&&Number(apiUsage.remaining)<100?"rgba(220,38,38,0.06)":"rgba(217,119,6,0.06)"} icon="🪫" />
             </div>
             <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+              {/* Client status summary — replaces 'Recent projects' (which
+                  now lives on its dedicated Projects view). Shows each
+                  visible client with a status chip derived from project
+                  history + Zoho linkage so the user sees the close-cycle
+                  state at a glance, not a duplicate of the project list. */}
               <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:18}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                  <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em"}}>Recent projects</h3>
-                  {recent.length>0 && <span style={{fontSize:11,color:"#888888"}}>across {new Set(recent.map(p=>p.clientId)).size} client{new Set(recent.map(p=>p.clientId)).size===1?"":"s"}</span>}
+                  <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em"}}>Client status summary</h3>
+                  <span onClick={()=>setView("clients")} style={{fontSize:11,color:"#4D3FA0",cursor:"pointer",fontWeight:600}}>All clients →</span>
                 </div>
-                {recent.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"30px 10px",textAlign:"center"}}>No projects yet. Pick a client and process a statement to see it here.</div> : (
-                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {recent.map(p=>(
-                      <div key={p.id||p.clientId+(p.name||p.exportedAt)} onClick={()=>openProjectViewer(p)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",border:"1px solid #f0f0f4",borderRadius:8,cursor:"pointer",gap:10}}>
+                {clients.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"30px 10px",textAlign:"center"}}>No clients yet.</div> : (
+                  <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:380,overflowY:"auto"}}>
+                    {clients.slice(0,12).map(c=>{
+                      const projs = (projectLog[c.id]||[]);
+                      const latest = projs[0];
+                      const latestDate = latest && (latest.exportedAt || latest.date);
+                      // Status chip: prefer most recent project state. We
+                      // don't have an "exceptions" count cross-client yet
+                      // (Phase 2 — Exception Center), so today this is a
+                      // close-state proxy.
+                      let chip;
+                      if(latest && latest.locked) chip = {label:'Posted',color:'#16a34a',bg:'rgba(22,163,74,0.08)'};
+                      else if(latest)             chip = {label:'In review',color:'#d97706',bg:'rgba(217,119,6,0.08)'};
+                      else if(c.zohoOrgId)        chip = {label:'Linked · untouched',color:'#0891b2',bg:'rgba(8,145,178,0.08)'};
+                      else                        chip = {label:'No Zoho link',color:'#888888',bg:'rgba(0,0,0,0.04)'};
+                      return <div key={c.id} onClick={()=>switchClient(c.id)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",border:"1px solid #f0f0f4",borderRadius:8,cursor:"pointer",gap:10}}>
                         <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||"Project"}</div>
-                          <div style={{fontSize:10,color:"#888888",marginTop:2}}>{p.clientName}{p.period?(" · "+p.period):""}</div>
+                          <div style={{fontSize:12,fontWeight:600,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
+                          <div style={{fontSize:10,color:"#888888",marginTop:2}}>
+                            {projs.length} project{projs.length===1?'':'s'}{latestDate?(' · last '+new Date(latestDate).toLocaleDateString()):''}
+                          </div>
                         </div>
-                        <div style={{textAlign:"right"}}>
-                          <div style={{fontSize:10,color:"#888888",fontFamily:"'IBM Plex Mono',monospace"}}>{p.exportedAt?new Date(p.exportedAt).toLocaleDateString():""}</div>
-                          {p.txnCount!=null && <div style={{fontSize:9,color:"#4D3FA0"}}>{p.txnCount} txns</div>}
-                        </div>
-                      </div>
-                    ))}
+                        <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:chip.bg,color:chip.color,fontWeight:600,whiteSpace:"nowrap"}}>{chip.label}</span>
+                      </div>;
+                    })}
                   </div>
                 )}
               </div>
+              {/* Recent activity (activity log proxy — Zoho API calls per
+                  client today). True audit-log feed is Phase 2. */}
               <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:12,padding:18}}>
-                <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em",marginBottom:12}}>Top clients by activity today</h3>
-                {apiCountsList.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"24px 10px",textAlign:"center"}}>No Zoho calls today.</div> : (
+                <h3 style={{fontSize:13,fontWeight:700,color:"#1a1a2e",letterSpacing:"0.02em",marginBottom:12}}>Recent activity</h3>
+                {apiCountsList.length===0 ? <div style={{fontSize:12,color:"#999999",padding:"24px 10px",textAlign:"center"}}>No Zoho activity today.</div> : (
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
                     {apiCountsList.slice(0,8).map(r=>(
                       <div key={r.cid} onClick={()=>{ if(r.cid && r.cid!=='__unassigned__') switchClient(r.cid); }} style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",border:"1px solid #f0f0f4",borderRadius:6,cursor:r.cid!=='__unassigned__'?"pointer":"default",fontSize:11}}>
                         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"#1a1a2e"}}>{r.name||"—"}</span>
-                        <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#4D3FA0",fontWeight:600}}>{r.today}</span>
+                        <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#4D3FA0",fontWeight:600}}>{r.today} calls</span>
                       </div>
                     ))}
                   </div>
@@ -5584,7 +5695,14 @@ td,th{padding:8px 12px;vertical-align:middle}
                   'Partially Paid':{c:'#d97706',b:'rgba(217,119,6,0.1)'},
                   'Paid':{c:'#16a34a',b:'rgba(22,163,74,0.12)'}
                 }[s]||{c:'#777777',b:'rgba(0,0,0,0.05)'};
-                return <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:cfg.b,color:cfg.c,fontWeight:600,whiteSpace:"nowrap"}}>{s}</span>;
+                // Display labels — accounting-platform language. Internal
+                // status keys (Pushed To Zoho, Ready To Push, etc.) stay
+                // unchanged so existing queue rows persist correctly.
+                const STATUS_LABEL = {
+                  'Ready To Push': 'Ready To Post',
+                  'Pushed To Zoho': 'Posted To Zoho',
+                };
+                return <span style={{fontSize:10,padding:"3px 9px",borderRadius:5,background:cfg.b,color:cfg.c,fontWeight:600,whiteSpace:"nowrap"}}>{STATUS_LABEL[s]||s}</span>;
               };
               const vBadge=(st)=> st==='pass'?<span style={{color:"#16a34a",fontWeight:700}}>PASS</span>
                 : st==='warn'?<span style={{color:"#d97706",fontWeight:700}}>WARNING</span>
@@ -5944,7 +6062,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                           </>}
                           <button onClick={()=>deleteOcrItems([q.id])} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:7,padding:"7px 14px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>Delete draft</button>
                           <button onClick={()=>{ setOcrReviewId(""); setOcrBulkReviewIds([]); setOcrBulkIndex(0); }} style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:7,padding:"7px 14px",color:"#1a1a2e",fontSize:11,fontWeight:600,cursor:"pointer"}}>Close</button>
-                          {q.status!=='Pushed To Zoho'&&<button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing||fails>0} style={{background:(ocrPushing||fails>0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:(ocrPushing||fails>0)?"default":"pointer"}}>{ocrPushing?"Pushing…":"⚡ Push to Zoho"}</button>}
+                          {q.status!=='Pushed To Zoho'&&<button onClick={()=>pushOcrItems([q.id])} disabled={ocrPushing||fails>0} style={{background:(ocrPushing||fails>0)?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:7,padding:"7px 18px",fontSize:11,fontWeight:700,cursor:(ocrPushing||fails>0)?"default":"pointer"}}>{ocrPushing?"Posting…":"⚡ Post to Zoho"}</button>}
                         </div>
                       </div>
                     </div>
@@ -6750,7 +6868,7 @@ td,th{padding:8px 12px;vertical-align:middle}
 
           {transactions.length > 0 ? (
             <div style={{textAlign:"center",padding:16}}>
-              <button onClick={()=>setStep(2)} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 40px",fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:"0.02em"}}>Continue to Parse →</button>
+              <button onClick={()=>setStep(2)} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 40px",fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:"0.02em"}}>Continue to AI Processing →</button>
               <div style={{fontSize:11,color:"#777777",marginTop:8}}>{transactions.length} transactions ready for classification</div>
             </div>
           ) : (
@@ -7007,10 +7125,15 @@ td,th{padding:8px 12px;vertical-align:middle}
               </div>
               <button onClick={confirmSelected} disabled={selectedIds.size===0} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:selectedIds.size>0?"#16a34a":"#cccccc",fontSize:11,fontWeight:600,cursor:selectedIds.size>0?"pointer":"default"}}>✓ Confirm{selectedIds.size>0?" ("+selectedIds.size+")":""}</button>
               <button onClick={unconfirmSelected} disabled={selectedIds.size===0} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:selectedIds.size>0?"#d97706":"#cccccc",fontSize:11,fontWeight:600,cursor:selectedIds.size>0?"pointer":"default"}}>✗ Unconfirm{selectedIds.size>0?" ("+selectedIds.size+")":""}</button>
+              <div title="Keyboard shortcuts" style={{display:"flex",alignItems:"center",gap:6,borderLeft:"1px solid #e2e2ea",paddingLeft:12,marginLeft:4,fontSize:10,color:"#888888"}}>
+                <kbd style={{background:"#f0f0f4",border:"1px solid #d8d8e0",borderRadius:3,padding:"1px 5px",fontFamily:"'IBM Plex Mono',monospace",fontSize:9}}>{navigator.platform.match(/Mac/i)?'⌘':'Ctrl'}+A</kbd><span>select all</span>
+                <kbd style={{background:"#f0f0f4",border:"1px solid #d8d8e0",borderRadius:3,padding:"1px 5px",fontFamily:"'IBM Plex Mono',monospace",fontSize:9}}>{navigator.platform.match(/Mac/i)?'⌘':'Ctrl'}+↵</kbd><span>confirm</span>
+                <kbd style={{background:"#f0f0f4",border:"1px solid #d8d8e0",borderRadius:3,padding:"1px 5px",fontFamily:"'IBM Plex Mono',monospace",fontSize:9}}>Esc</kbd><span>clear</span>
+              </div>
               <button onClick={confirmAll} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:"#888888",fontSize:10,cursor:"pointer"}}>✓ All</button>
               <button onClick={unconfirmAll} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:"#888888",fontSize:10,cursor:"pointer"}}>✗ All</button>
               <button onClick={()=>setShowAddLedger(!showAddLedger)} style={{background:showAddLedger?"rgba(8,145,178,0.15)":"#f8f9fc",border:"1px solid "+(showAddLedger?"rgba(8,145,178,0.4)":"#e2e2ea"),borderRadius:6,padding:"6px 12px",color:"#0891b2",fontSize:10,fontWeight:600,cursor:"pointer"}}>+ New Ledger</button>
-              <button onClick={generateExport} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:6,padding:"6px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Generate Export →</button>
+              <button onClick={generateExport} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:6,padding:"6px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Prepare Accounting Entries →</button>
             </div>
           </div>
 
@@ -7270,12 +7393,12 @@ td,th{padding:8px 12px;vertical-align:middle}
             return <>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
-                <button onClick={()=>setStep(4)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,fontWeight:600,cursor:"pointer"}}>← Back to Review</button>
+                <button onClick={()=>setStep(4)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 14px",color:"#6958C2",fontSize:11,fontWeight:600,cursor:"pointer"}}>← Back to Accountant Review</button>
                 <div><h2 style={{fontSize:22,fontWeight:600}}>Export Preview</h2>
                   <p style={{color:"#888888",fontSize:13}}>Bank: <strong style={{color:"#16a34a"}}>{bankAccount}</strong></p>
                 </div>
               </div>
-              <button onClick={exportCSV} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📤 Export All Files</button>
+              <button onClick={exportCSV} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:12,fontWeight:700,cursor:"pointer"}}>⬇ Download Accounting Package</button>
             </div>
 
             {/* Summary cards */}
@@ -7428,7 +7551,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
           </div>
           <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:14}}>
-            <button onClick={prePushCheck} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Pushing…":"Push to Zoho"}</button>
+            <button onClick={prePushCheck} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Posting…":"Post to Zoho Books"}</button>
             {(()=>{
               // Rebuild pushed list from any zohoId-stamped rows so reopened
               // projects can still revert individual entries.
@@ -7462,7 +7585,7 @@ td,th{padding:8px 12px;vertical-align:middle}
         {pushModalOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
           <div style={{background:"#ffffff",borderRadius:12,maxWidth:720,width:"100%",maxHeight:"90vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
             <div style={{padding:"18px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <h3 style={{fontSize:16,fontWeight:700,color:"#1a1a2e"}}>⚡ Push to Zoho — {pushing?"in progress":(pushFailures.length===0?"complete":"completed with errors")}</h3>
+              <h3 style={{fontSize:16,fontWeight:700,color:"#1a1a2e"}}>⚡ Post to Zoho Books — {pushing?"in progress":(pushFailures.length===0?"complete":"completed with errors")}</h3>
               {!pushing&&<button onClick={()=>setPushModalOpen(false)} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>}
             </div>
             <div style={{padding:"18px 22px",overflowY:"auto",flex:1}}>
