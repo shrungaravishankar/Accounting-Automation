@@ -1071,7 +1071,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -2700,6 +2700,9 @@ function App(){
   const[bankAccountsLoading,setBankAccountsLoading]=useState(false);
   const[bankAccountsError,setBankAccountsError]=useState("");
   const[bankAccount,setBankAccount]=useState("Bank Account");
+  // Types of supplies the client makes for sales. Drives downstream VAT
+  // assumptions (which zero-rated / exempt branches are even allowed).
+  const[supplyTypes,setSupplyTypes]=useState([]);
   const[learnedRules,setLearnedRules]=useState({});
   const[refDB,setRefDB]=useState({});
   const[vendors,setVendors]=useState([]);
@@ -2945,6 +2948,7 @@ function App(){
       setVendors(getClientData(activeClientId, "vendors", []));
       setCustomers(getClientData(activeClientId, "customers", []));
       setBankAccounts(getClientData(activeClientId, "bank_accounts", []));
+      setSupplyTypes(getClientData(activeClientId, "supply_types", []));
       setVendorFileName(getClientData(activeClientId, "vendor_file", ""));
       setCustomerFileName(getClientData(activeClientId, "customer_file", ""));
       const c = clients.find(c=>c.id===activeClientId);
@@ -2960,7 +2964,11 @@ function App(){
   useEffect(()=>{ if(activeClientId && chartOfAccounts!==SAMPLE_COA) setClientData(activeClientId,"coa",chartOfAccounts); },[chartOfAccounts,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"coa_name",coaFileName); },[coaFileName,activeClientId]);
   useEffect(()=>{ if(activeClientId && vendors.length>0) setClientData(activeClientId,"vendors",vendors); },[vendors,activeClientId]);
-  useEffect(()=>{ if(activeClientId && bankAccounts.length>0) setClientData(activeClientId,"bank_accounts",bankAccounts); },[bankAccounts,activeClientId]);
+  // Note: no reactive save effect for bankAccounts. The effect would race
+  // with the per-client load when activeClientId changes — it would fire
+  // with the OLD bankAccounts and the NEW activeClientId, overwriting the
+  // incoming client's data. The sync handlers persist bank_accounts
+  // explicitly via setClientData where the data is set.
   useEffect(()=>{ if(activeClientId && customers.length>0) setClientData(activeClientId,"customers",customers); },[customers,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"vendor_file",vendorFileName); },[vendorFileName,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"customer_file",customerFileName); },[customerFileName,activeClientId]);
@@ -5839,17 +5847,14 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div>
                 <div style={{fontSize:11,color:"#6958C2",cursor:"pointer",marginBottom:4}} onClick={()=>setView("clients")}>‹ All Clients</div>
                 <h1 style={{fontSize:24,fontWeight:700,color:"#1a1a2e"}}>{c.name}</h1>
+                {/* Only the Zoho-linked badge remains on the header. The
+                    bank-name pill duplicated the Bank Accounts strip and
+                    the assigned-users pill was visual noise — both moved
+                    out of the way; full info still lives in Settings. */}
                 <div style={{display:"flex",gap:8,marginTop:6,flexWrap:"wrap"}}>
                   {c.zohoOrgId && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>🔗 Zoho linked</span>}
-                  {getClientData(c.id,"bank","")&&getClientData(c.id,"bank","")!=="Bank Account" && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(105,88,194,0.08)",color:"#4D3FA0",border:"1px solid rgba(105,88,194,0.2)"}}>{getClientData(c.id,"bank","")}</span>}
-                  {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length>0 && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(8,145,178,0.08)",color:"#0891b2",border:"1px solid rgba(8,145,178,0.2)"}}>👥 {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length} assigned</span>}
                 </div>
               </div>
-              {/* Header actions only make sense on the Bank Statement Upload tab. */}
-              {clientDetailTab==="projects" && <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                <button onClick={startNewStatement} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 12px rgba(22,163,74,0.25)"}}>+ New Bank Statement</button>
-                {c.zohoOrgId && isAdmin && <button onClick={syncFromZoho} title="Refresh Chart of Accounts / Vendors / Customers from Zoho" style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"10px 16px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>}
-              </div>}
             </div>
             {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
             {clientDetailTab==="projects" && (<>
@@ -6429,6 +6434,32 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <label style={{fontSize:10,color:"#888888"}}>Base currency</label>
                     <div style={{padding:"8px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:4,background:"#f8f9fc",color:"#1a1a2e",fontWeight:600}}>AED <span style={{fontSize:10,color:"#888888",fontWeight:400}}>(fixed — UAE tool)</span></div>
                   </div>
+                </div>
+              </div>
+              {/* Types of supplies the client makes for SALES. Drives the
+                  VAT-treatment options the Revenue OCR is willing to push
+                  to Zoho. Multi-select — a single client can run several
+                  treatments side by side. */}
+              <div style={{padding:14,background:"rgba(8,145,178,0.04)",border:"1px solid rgba(8,145,178,0.15)",borderRadius:8}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#0891b2",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:8}}>Types of supplies for sales</div>
+                <div style={{fontSize:11,color:"#666",marginBottom:10}}>Tick every VAT treatment this client uses on its sales invoices. The Invoice OCR will only allow these treatments when pushing to Zoho.</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {[
+                    {key:"standard",   label:"Standard (5%)",   color:"#4D3FA0"},
+                    {key:"zero_rated", label:"Zero-Rated (0%)",  color:"#0891b2"},
+                    {key:"exempt",     label:"Exempt",           color:"#d97706"},
+                    {key:"out_of_scope", label:"Out of Scope",   color:"#777"},
+                  ].map(opt=>{
+                    const on = (supplyTypes||[]).includes(opt.key);
+                    return <label key={opt.key} style={{display:"inline-flex",alignItems:"center",gap:8,padding:"7px 12px",borderRadius:8,border:"1px solid "+(on?opt.color:"#e2e2ea"),background:on?opt.color+"15":"#ffffff",color:on?opt.color:"#555",fontSize:12,fontWeight:on?700:500,cursor:"pointer"}}>
+                      <input type="checkbox" checked={on} onChange={(e)=>{
+                        const next = e.target.checked ? Array.from(new Set([...(supplyTypes||[]),opt.key])) : (supplyTypes||[]).filter(k=>k!==opt.key);
+                        setSupplyTypes(next);
+                        setClientData(c.id,"supply_types",next);
+                      }} style={{accentColor:opt.color,cursor:"pointer"}} />
+                      {opt.label}
+                    </label>;
+                  })}
                 </div>
               </div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Zoho organization</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.zohoOrgId||<span style={{color:"#999999"}}>Not linked</span>}</div></div>

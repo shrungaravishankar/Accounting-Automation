@@ -289,6 +289,9 @@ export const handler = async (event: Event) => {
       }
       const accounts = all
         .filter((a: any) => a.is_active !== false)
+        // Only real bank accounts — drop cash, credit_card, paypal and any
+        // other non-bank ledgers that Zoho also exposes via /bankaccounts.
+        .filter((a: any) => (a.account_type || '').toLowerCase() === 'bank')
         .map((a: any) => ({
           account_id: a.account_id,
           account_name: a.account_name,
