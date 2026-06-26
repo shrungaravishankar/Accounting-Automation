@@ -11,6 +11,7 @@
     "aws-amplify": "^6.6.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.668.0",
     "@aws-sdk/client-dynamodb": "3.668.0",
+    "@aws-sdk/client-s3": "3.668.0",
     "@aws-sdk/client-textract": "3.668.0",
     "@aws-sdk/lib-dynamodb": "3.668.0"
   },

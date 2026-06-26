@@ -2,16 +2,86 @@ declare const process: { env: Record<string, string | undefined> };
 declare const Buffer: {
   from(input: string, encoding: string): Uint8Array;
 };
+declare function setTimeout(cb: () => void, ms: number): unknown;
 
 import {
   TextractClient,
   AnalyzeExpenseCommand,
+  StartExpenseAnalysisCommand,
+  GetExpenseAnalysisCommand,
   ExpenseField,
   ExpenseDocument,
   LineItemFields
 } from '@aws-sdk/client-textract';
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand
+} from '@aws-sdk/client-s3';
 
 const textract = new TextractClient({});
+const s3 = new S3Client({});
+const OCR_BUCKET = process.env.OCR_BUCKET || '';
+
+/** True if the bytes / mime indicate a PDF (sync Textract only takes 1-page PDFs). */
+function isPdf(bytes: Uint8Array, mimeType?: string): boolean {
+  if (mimeType && mimeType.toLowerCase().includes('pdf')) return true;
+  // PDF magic number: "%PDF" = 0x25 0x50 0x44 0x46
+  return bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
+}
+
+/** Synchronous AnalyzeExpense for single-page images / single-page PDFs. */
+async function analyzeSync(bytes: Uint8Array): Promise<ExpenseDocument[]> {
+  const res = await textract.send(new AnalyzeExpenseCommand({ Document: { Bytes: bytes } }));
+  return res.ExpenseDocuments || [];
+}
+
+/**
+ * Asynchronous Expense analysis for multi-page PDFs. Stages the file in S3,
+ * starts the job, polls until it finishes, and paginates the full result set.
+ * The staged object is always cleaned up. Bounded to stay under the 60s
+ * Lambda timeout.
+ */
+async function analyzeAsync(bytes: Uint8Array): Promise<ExpenseDocument[]> {
+  if (!OCR_BUCKET) throw new Error('OCR_BUCKET is not configured — cannot process multi-page PDFs.');
+  const key = 'textract-temp/' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.pdf';
+  await s3.send(new PutObjectCommand({ Bucket: OCR_BUCKET, Key: key, Body: bytes, ContentType: 'application/pdf' }));
+  try {
+    const start = await textract.send(new StartExpenseAnalysisCommand({
+      DocumentLocation: { S3Object: { Bucket: OCR_BUCKET, Name: key } }
+    }));
+    const jobId = start.JobId;
+    if (!jobId) throw new Error('Textract did not return a job id.');
+
+    const docs: ExpenseDocument[] = [];
+    let nextToken: string | undefined;
+    // AppSync caps the whole request at ~30s (shorter than the Lambda's 60s),
+    // so bail at ~25s to return a clean "split the PDF" message rather than a
+    // generic gateway timeout. Typical 2-5 page bills finish well within this.
+    const deadline = Date.now() + 25 * 1000;
+    for (;;) {
+      const g = await textract.send(new GetExpenseAnalysisCommand({ JobId: jobId, NextToken: nextToken }));
+      const status = g.JobStatus;
+      if (status === 'SUCCEEDED' || status === 'PARTIAL_SUCCESS') {
+        docs.push(...(g.ExpenseDocuments || []));
+        if (g.NextToken) { nextToken = g.NextToken; continue; }  // page through results
+        return docs;
+      }
+      if (status === 'FAILED') {
+        throw new Error('Textract job failed' + (g.StatusMessage ? ': ' + g.StatusMessage : '.'));
+      }
+      // IN_PROGRESS — wait and re-poll from the start of the result set.
+      if (Date.now() > deadline) {
+        throw new Error('OCR timed out on a large PDF. Try splitting it into fewer pages.');
+      }
+      await new Promise<void>((r) => setTimeout(() => r(), 2000));
+      nextToken = undefined;
+    }
+  } finally {
+    // Best-effort cleanup of the staged file.
+    try { await s3.send(new DeleteObjectCommand({ Bucket: OCR_BUCKET, Key: key })); } catch (_) { /* ignore */ }
+  }
+}
 
 type Event = {
   arguments: { fileBase64: string; mimeType?: string };
@@ -145,10 +215,27 @@ export const handler = async (event: Event) => {
 
     const bytes = decodeBase64(b64);
 
-    const cmd = new AnalyzeExpenseCommand({ Document: { Bytes: bytes } });
-    const res = await textract.send(cmd);
+    // Sync AnalyzeExpense is fast but only accepts single-page PDFs / images.
+    // For PDFs we try sync first (covers single-page bills) and fall back to
+    // the async S3 job when Textract rejects a multi-page PDF with
+    // UnsupportedDocumentException ("Request has unsupported document format").
+    let docs: ExpenseDocument[];
+    if (isPdf(bytes, event.arguments?.mimeType)) {
+      try {
+        docs = await analyzeSync(bytes);
+      } catch (e: any) {
+        const name = e?.name || '';
+        const msg = e?.message || '';
+        if (name === 'UnsupportedDocumentException' || /unsupported document format/i.test(msg)) {
+          docs = await analyzeAsync(bytes);
+        } else {
+          throw e;
+        }
+      }
+    } else {
+      docs = await analyzeSync(bytes);
+    }
 
-    const docs = res.ExpenseDocuments || [];
     const doc = docs[0];
     if (!doc) {
       return JSON.stringify({ error: 'Textract returned no expense documents — is this an invoice/receipt image?' });
@@ -245,7 +332,7 @@ export const handler = async (event: Event) => {
         if (type && type !== 'OTHER') rawText.push(type);
       }
     };
-    for (const d of (res.ExpenseDocuments || [])) {
+    for (const d of docs) {
       collectText(d.SummaryFields as ExpenseField[]);
       for (const g of (d.LineItemGroups || [])) {
         for (const li of (g.LineItems || [])) {
@@ -404,7 +491,7 @@ export const handler = async (event: Event) => {
       is_credit_note: isCreditNote,
       currency,
       vat_flags: vatFlags,
-      page_count: (res.ExpenseDocuments || []).length,
+      page_count: docs.length,
       confidences: {
         vendor: vendor?.confidence || 0,
         receiver: receiver?.confidence || 0,

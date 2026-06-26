@@ -173,14 +173,32 @@ backend.replaceUser.resources.lambda.addToRolePolicy(
   })
 );
 
-// ---- invoice-ocr: AWS Textract AnalyzeExpense (synchronous, in-line bytes) ----
-// AnalyzeExpense lets us hand Textract a base64-encoded invoice and get back
-// structured fields (vendor, customer, totals, VAT, line items). The action
-// is resource-less, so "*" is the standard policy.
+// ---- invoice-ocr: AWS Textract AnalyzeExpense ----
+// Single-page images/PDFs use the SYNCHRONOUS AnalyzeExpense with in-line
+// bytes. Multi-page PDFs are not accepted by the sync API (it throws
+// "Request has unsupported document format"), so those are routed through
+// the ASYNCHRONOUS Expense API: the PDF is staged in S3, StartExpenseAnalysis
+// kicks off the job, and we poll GetExpenseAnalysis until it completes. The
+// Textract actions are resource-less, so "*" is the standard policy.
+const ocrBucket = backend.storage.resources.bucket;
+backend.invoiceOcr.addEnvironment('OCR_BUCKET', ocrBucket.bucketName);
 backend.invoiceOcr.resources.lambda.addToRolePolicy(
   new PolicyStatement({
     effect: Effect.ALLOW,
-    actions: ['textract:AnalyzeExpense'],
+    actions: [
+      'textract:AnalyzeExpense',
+      'textract:StartExpenseAnalysis',
+      'textract:GetExpenseAnalysis'
+    ],
     resources: ['*']
+  })
+);
+// The async path stages the PDF under textract-temp/ and deletes it after the
+// job finishes. Scope the Lambda's S3 rights to just that prefix.
+backend.invoiceOcr.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
+    resources: [ocrBucket.bucketArn + '/textract-temp/*']
   })
 );
