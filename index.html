@@ -2716,6 +2716,11 @@ function App(){
   const[openInvoicesLoading,setOpenInvoicesLoading]=useState(false);
   const[openInvoicesError,setOpenInvoicesError]=useState("");
   const[invoicePickerOpen,setInvoicePickerOpen]=useState({});
+  // Vendor bills (Bills flow on the debit side). Mirrors openInvoices.
+  const[openBills,setOpenBills]=useState([]);
+  const[openBillsLoading,setOpenBillsLoading]=useState(false);
+  const[openBillsError,setOpenBillsError]=useState("");
+  const[billPickerOpen,setBillPickerOpen]=useState({});
   // UAE tax list from Zoho /settings/taxes — lazy-loaded once per session.
   const[zohoTaxes,setZohoTaxes]=useState([]);
   const[zohoTaxesLoading,setZohoTaxesLoading]=useState(false);
@@ -3620,6 +3625,61 @@ function App(){
       return {...t,invoiceId:invoice.invoice_id,invoiceNumber:invoice.invoice_number,revenueMode:"linked"};
     }));
   },[]);
+
+  // Bills: parallel of openInvoices. Pulls outstanding bills for the active
+  // client's Zoho org so a Bill-type debit row can be applied against an
+  // existing vendor bill instead of recorded as a stand-alone AP journal.
+  const loadOpenBills=useCallback(async(force)=>{
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ setOpenBillsError("Client is not linked to a Zoho organization."); return; }
+    if(!force && openBills.length>0) return;
+    setOpenBillsLoading(true); setOpenBillsError("");
+    try {
+      const bills=await window.zohoFetch('openBills', orgId);
+      setOpenBills(bills||[]);
+    } catch(e){ setOpenBillsError(e.message||String(e)); }
+    finally { setOpenBillsLoading(false); }
+  },[activeClientId,clients,openBills.length]);
+
+  // Pick a bill for a Bill-type debit row. Pass null to clear and revert
+  // to "advance to vendor".
+  const handleBillChange=useCallback((id,bill)=>{
+    setClassifiedTxns(prev=>prev.map(t=>{
+      if(t.id!==id) return t;
+      if(!bill) return {...t,billId:"",billNumber:"",billMode:""};
+      return {...t,billId:bill.bill_id,billNumber:bill.bill_number,billMode:"linked",advanceVendorLedger:""};
+    }));
+  },[]);
+
+  // Mark a Bill-type debit row as "advance / overpayment to vendor".
+  // The chosen ledger must exist in the Chart of Accounts; if it does not,
+  // we refuse and prompt the accountant to create it first. Vendor advances
+  // typically sit under "Other Current Asset" (a debit-balance vendor
+  // deposit) — we accept either an explicit advance account or any
+  // accounts_payable / other_current_asset / other_asset entry whose name
+  // mentions "advance" / "vendor deposit".
+  const handleVendorAdvance=useCallback((id,ledgerName)=>{
+    setClassifiedTxns(prev=>prev.map(t=>{
+      if(t.id!==id) return t;
+      if(!ledgerName) return {...t,advanceVendorLedger:"",billMode:""};
+      return {...t,advanceVendorLedger:ledgerName,billMode:"advance",billId:"",billNumber:""};
+    }));
+  },[]);
+  // Filter the Chart of Accounts for accounts the accountant can park a
+  // vendor advance in. Empty array means there is no suitable account and
+  // the UI should prompt the user to create one in Zoho.
+  const vendorAdvanceAccounts=useMemo(()=>{
+    const coa=chartOfAccounts||[];
+    const re=/(advance.*vendor|vendor.*advance|vendor.*deposit|advance.*supplier|supplier.*advance|advance.*paid|prepaid.*vendor)/i;
+    const matched=coa.filter(a=>re.test(a.name||""));
+    if(matched.length) return matched;
+    // Fallback: any other-current-asset whose name contains "advance".
+    return coa.filter(a=>{
+      const t=(a.type||"").toLowerCase();
+      return /advance/i.test(a.name||"") && (t.includes("asset")||t.includes("payable"));
+    });
+  },[chartOfAccounts]);
 
   // Mark a revenue row as "advance/unapplied" against a chosen ledger.
   // No invoice gets created; the push will produce a customer payment
@@ -5497,6 +5557,39 @@ td,th{padding:8px 12px;vertical-align:middle}
             const exceptionsOpen = (ocrQueue||[]).reduce((n,q)=>n + (q.validations||[]).filter(v=>v.status==='fail'||v.status==='warn').length, 0);
             const reviewQueue    = (ocrQueue||[]).filter(q=>q.submittedForReview && q.status!=='Pushed To Zoho').length;
             const postingQueue   = (ocrQueue||[]).filter(q=>q.status!=='Pushed To Zoho' && !(q.validations||[]).some(v=>v.status==='fail')).length;
+            // When the user has drilled into a client, replace the global
+            // nav with a client-scoped one. Clicking these sets clientDetailTab
+            // instead of view, so the user stays inside the client. The
+            // "← All Clients" item escapes back to the global Clients page.
+            const inClient = view==="clientDetail" && activeClientId;
+            if(inClient){
+              const c = clients.find(x=>x.id===activeClientId);
+              const projects = projectLog[activeClientId] || [];
+              const cName = (c && c.name) || activeClientName || "Client";
+              const clientItems = [
+                {key:"projects",   label:"Projects",     icon:"📁", count: projects.length||undefined},
+                {key:"revenue",    label:"Revenue",      icon:"💰", count: ocrQueue.length||undefined},
+                {key:"masterData", label:"Master Data",  icon:"📚"},
+                {key:"settings",   label:"Settings",     icon:"⚙"},
+                {key:"activity",   label:"Activity",     icon:"📊"},
+              ];
+              return <>
+                {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:"4px 10px 6px"}}>Client</div>}
+                <div onClick={()=>{ setView("clients"); }} title="Back to all clients" style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:"transparent",color:"#6958C2",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:600,marginBottom:4}}>
+                  <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>‹</span>
+                  {sidebarOpen && <span style={{flex:1}}>All Clients</span>}
+                </div>
+                {sidebarOpen && <div style={{padding:"4px 10px 10px",fontSize:11,fontWeight:700,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={cName}>{cName}</div>}
+                {clientItems.map(n=>{
+                  const active = clientDetailTab===n.key;
+                  return <div key={n.key} onClick={()=>setClientDetailTab(n.key)} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                    <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
+                    {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
+                    {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
+                  </div>;
+                })}
+              </>;
+            }
             const SECTIONS=[
               {title:"Workspace", items:[
                 {key:"dashboard",label:"Dashboard",icon:"⌂"},
@@ -5516,7 +5609,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               <React.Fragment key={sec.title}>
                 {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:i===0?"4px 10px 6px":"12px 10px 6px"}}>{sec.title}</div>}
                 {sec.items.map(n=>{
-                  const active = view===n.key || (n.key==="clients" && view==="clientDetail");
+                  const active = view===n.key;
                   return <div key={n.key} onClick={()=>{ setView(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
                     <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
                     {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
@@ -5733,13 +5826,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {c.zohoOrgId && isAdmin && <button onClick={syncFromZoho} title="Refresh Chart of Accounts / Vendors / Customers from Zoho" style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"10px 16px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>}
               </div>
             </div>
-            <div style={{display:"flex",gap:0,marginBottom:18,borderBottom:"1px solid #e2e2ea"}}>
-              {TABS.map(t=>(
-                <div key={t.key} onClick={()=>setClientDetailTab(t.key)} style={{padding:"10px 18px",fontSize:12,fontWeight:600,cursor:"pointer",borderBottom:"2px solid "+(clientDetailTab===t.key?"#4D3FA0":"transparent"),color:clientDetailTab===t.key?"#4D3FA0":"#777777",display:"flex",alignItems:"center",gap:6}}>
-                  <span>{t.icon}</span> {t.label}{t.count!=null&&" ("+t.count+")"}
-                </div>
-              ))}
-            </div>
+            {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
             {clientDetailTab==="projects" && (
               projects.length===0 ? <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888888"}}>
                 <div style={{fontSize:32,marginBottom:8}}>📁</div>
@@ -7740,6 +7827,72 @@ td,th{padding:8px 12px;vertical-align:middle}
                             <span onClick={()=>{handleAdvanceChoose(t.id,"");handleInvoiceChange(t.id,null);setInvoicePickerOpen(p=>({...p,[t.id]:false}));}} style={{fontSize:10,color:"#888888",cursor:"pointer"}}>Clear selection</span>
                           </div>
                         </div>
+                      </div>}
+                    </div>
+                  </div>
+                ) : (reviewTab==="expenses"&&t.entryMode==="billpay"&&t.contactName) ? (
+                  // BILL row with a vendor picked — show a bills picker
+                  // mirroring the Revenue invoice picker. Two branches:
+                  //   1. Apply payment to an existing open bill (linked)
+                  //   2. Treat as Advance to Vendor (requires an
+                  //      "Advance to Vendor" account in the COA — if it
+                  //      doesn't exist, the picker blocks selection and
+                  //      asks the user to create it in Zoho).
+                  <div>
+                    <div style={{background:"rgba(8,145,178,0.05)",border:"1px solid rgba(8,145,178,0.2)",borderRadius:6,padding:"6px 10px",color:"#0891b2",fontSize:12,display:"flex",alignItems:"center",gap:6}}>
+                      <span style={{fontSize:11}}>🧾</span> Bill Payment → {t.contactName}
+                    </div>
+                    <div style={{marginTop:4,position:"relative"}}>
+                      <div onClick={()=>{ setBillPickerOpen(p=>({...p,[t.id]:!p[t.id]})); loadOpenBills(false); }}
+                        style={{background:"#f8f9fc",border:"1px solid "+(t.billId?"rgba(8,145,178,0.45)":t.billMode==="advance"?"rgba(217,119,6,0.4)":"#e2e2ea"),borderRadius:6,padding:"5px 10px",fontSize:11,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",color:t.billId?"#0891b2":t.billMode==="advance"?"#d97706":"#777777"}}>
+                        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                          {t.billId ? ("📎 "+t.billNumber)
+                            : t.billMode==="advance" ? ("⏳ Advance to vendor → "+(t.advanceVendorLedger||"(pick account)"))
+                            : "Pick: apply to bill · advance to vendor"}
+                        </span>
+                        <span style={{color:"#777777",marginLeft:4}}>▾</span>
+                      </div>
+                      {billPickerOpen[t.id]&&<div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:120,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:8,boxShadow:"0 8px 32px rgba(105,88,194,0.18)",maxHeight:340,overflow:"hidden",display:"flex",flexDirection:"column",marginTop:2}}>
+                        <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#0891b2",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <span>1 · Apply to open bill</span>
+                          <span onClick={(e)=>{e.stopPropagation();loadOpenBills(true);}} style={{color:"#6958C2",cursor:"pointer",fontSize:9}}>↻ Refresh</span>
+                        </div>
+                        {openBillsLoading&&<div style={{padding:"8px 10px",fontSize:11,color:"#777777"}}>Loading bills…</div>}
+                        {openBillsError&&<div style={{padding:"8px 10px",fontSize:11,color:"#dc2626"}}>{openBillsError}</div>}
+                        {!openBillsLoading&&!openBillsError&&(()=>{
+                          const list = openBills.filter(b => (b.vendor_name||"").toLowerCase() === (t.contactName||"").toLowerCase());
+                          if(list.length===0) return <div style={{padding:"8px 10px",fontSize:10,color:"#999999"}}>No open bills for {t.contactName}. Use "Advance to vendor" below if this is an overpayment.</div>;
+                          return <div style={{maxHeight:140,overflowY:"auto"}}>{list.map(b=><div key={b.bill_id} onClick={()=>{handleBillChange(t.id,b);setBillPickerOpen(p=>({...p,[t.id]:false}));}}
+                            style={{padding:"6px 10px",fontSize:11,cursor:"pointer",background:b.bill_id===t.billId?"rgba(8,145,178,0.08)":"transparent",borderBottom:"1px solid #f8f9fc"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                              <span style={{fontWeight:600,color:"#1a1a2e"}}>{b.bill_number}</span>
+                              <span style={{fontFamily:"'IBM Plex Mono',monospace",color:"#0891b2"}}>{fmt(b.balance)}</span>
+                            </div>
+                            <div style={{fontSize:9,color:"#777777",marginTop:2}}>{b.date} · {b.status}{b.due_date?(" · due "+b.due_date):""}</div>
+                          </div>)}</div>;
+                        })()}
+                        {/* Advance to vendor — only allowed if the COA has a
+                            suitable "Advance to Vendor" account. If not, we
+                            display a blocker explaining how to fix it. */}
+                        <div style={{padding:"6px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#d97706",borderTop:"1px solid #f0f0f4",borderBottom:"1px solid #f0f0f4",marginTop:2}}>2 · No matching bill — Advance to Vendor</div>
+                        {vendorAdvanceAccounts.length===0 ? (
+                          <div style={{padding:"10px",fontSize:11,color:"#92400e",background:"rgba(217,119,6,0.06)"}}>
+                            <div style={{fontWeight:700,marginBottom:4}}>⚠ No "Advance to Vendor" account in your Chart of Accounts.</div>
+                            <div style={{fontSize:10,color:"#774f12",lineHeight:1.5}}>Create one in Zoho (type: <strong>Other Current Asset</strong>, name should contain "Advance to Vendor"), then click <strong>Sync from Zoho</strong> on the client page and reopen this picker.</div>
+                            <button onClick={()=>{ setBillPickerOpen(p=>({...p,[t.id]:false})); if(typeof syncFromZoho==='function') syncFromZoho(); else alert('Open the client page and click "Sync from Zoho" to refresh the COA.'); }} style={{marginTop:8,background:"#fff",border:"1px solid rgba(217,119,6,0.4)",borderRadius:5,padding:"5px 10px",fontSize:10,color:"#a16207",fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho now</button>
+                          </div>
+                        ) : (
+                          <div style={{padding:"6px 10px"}}>
+                            <div style={{fontSize:10,color:"#777777",marginBottom:5}}>Pick the vendor-advance account to park this payment. Push will treat it as an overpayment / deposit against {t.contactName}.</div>
+                            <select value={t.advanceVendorLedger||""} onChange={(e)=>handleVendorAdvance(t.id,e.target.value)} onClick={(e)=>e.stopPropagation()} style={{width:"100%",background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:5,padding:"5px 8px",fontSize:11,color:"#1a1a2e"}}>
+                              <option value="">— Choose advance account —</option>
+                              {vendorAdvanceAccounts.map(a=><option key={a.name} value={a.name}>{a.name}{a.type?(" — "+a.type):""}</option>)}
+                            </select>
+                            <div style={{display:"flex",justifyContent:"flex-end",marginTop:6}}>
+                              <span onClick={()=>{handleVendorAdvance(t.id,"");handleBillChange(t.id,null);setBillPickerOpen(p=>({...p,[t.id]:false}));}} style={{fontSize:10,color:"#888888",cursor:"pointer"}}>Clear selection</span>
+                            </div>
+                          </div>
+                        )}
                       </div>}
                     </div>
                   </div>

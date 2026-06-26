@@ -268,6 +268,42 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: null, items: invoices, apiUsage: lastApiUsage });
     }
 
+    // Open bills for a given org — used by the Bills flow on the bank
+    // statement review to apply a debit payment against an existing vendor
+    // bill instead of creating a standalone expense. Mirrors openInvoices.
+    if (kind === 'openBills') {
+      const all: any[] = [];
+      let page = 1;
+      while (true) {
+        // Zoho Books bills filter values: Status.Open (open + overdue +
+        // partially paid). Anything else with balance>0 is filtered below.
+        const j = await zohoGet('bills', accessToken, region, {
+          organization_id: orgId,
+          filter_by: 'Status.Open',
+          per_page: '200',
+          page: String(page)
+        });
+        all.push(...(j.bills || []));
+        if (!j.page_context || !j.page_context.has_more_page) break;
+        page++;
+        if (page > 20) break;
+      }
+      const bills = all
+        .filter((b: any) => Number(b.balance) > 0)
+        .map((b: any) => ({
+          bill_id: b.bill_id,
+          bill_number: b.bill_number,
+          vendor_id: b.vendor_id,
+          vendor_name: b.vendor_name,
+          date: b.date,
+          due_date: b.due_date,
+          total: Number(b.total),
+          balance: Number(b.balance),
+          status: b.status
+        }));
+      return JSON.stringify({ error: null, items: bills, apiUsage: lastApiUsage });
+    }
+
     // Look up invoices by exact invoice_number — duplicate detection for
     // the OCR module. params = JSON { invoiceNumber }. Returns matches
     // (possibly across customers; the frontend narrows by customer name).
@@ -792,27 +828,29 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: null, success: true, message: j.message || 'Attached', apiUsage: lastApiUsage });
     }
 
-    if (kind === 'pushExpense' || kind === 'pushJournal' || kind === 'pushPayment') {
+    if (kind === 'pushExpense' || kind === 'pushJournal' || kind === 'pushPayment' || kind === 'pushBillPayment') {
       const payloadStr = event.arguments?.payload || '';
       let payload: any;
       try { payload = JSON.parse(payloadStr); }
       catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
       const path = kind === 'pushExpense' ? 'expenses'
         : kind === 'pushJournal' ? 'journals'
+        : kind === 'pushBillPayment' ? 'vendorpayments'
         : 'customerpayments';
       const j = await zohoPost(path, accessToken, region, { organization_id: orgId }, payload);
       // Surface the new resource id where applicable.
-      const resourceId = j.expense?.expense_id || j.journal?.journal_id || j.payment?.payment_id || null;
+      const resourceId = j.expense?.expense_id || j.journal?.journal_id || j.payment?.payment_id || j.vendorpayment?.payment_id || null;
       return JSON.stringify({ error: null, success: true, id: resourceId, raw: j, apiUsage: lastApiUsage });
     }
 
     // Revert a previously-pushed entry. resourceId comes through `payload`
     // (the existing string argument, reused so we don't need a schema bump).
-    if (kind === 'deleteExpense' || kind === 'deleteJournal' || kind === 'deletePayment') {
+    if (kind === 'deleteExpense' || kind === 'deleteJournal' || kind === 'deletePayment' || kind === 'deleteBillPayment') {
       const resourceId = (event.arguments?.payload || '').trim();
       if (!resourceId) return JSON.stringify({ error: 'resourceId is required (pass via payload)' });
       const path = kind === 'deleteExpense' ? `expenses/${resourceId}`
         : kind === 'deleteJournal' ? `journals/${resourceId}`
+        : kind === 'deleteBillPayment' ? `vendorpayments/${resourceId}`
         : `customerpayments/${resourceId}`;
       const j = await zohoDelete(path, accessToken, region, { organization_id: orgId });
       return JSON.stringify({ error: null, success: true, message: j.message || 'Deleted', apiUsage: lastApiUsage });
