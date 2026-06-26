@@ -3811,11 +3811,14 @@ function App(){
     } else push('math','Subtotal + VAT = Total','warn','Total is zero or missing.');
 
     // 5 — Required for Zoho push
+    const lines = d.lineItems || [];
+    const linesWithoutAccount = lines.filter(li => !li.accountId).length;
     if(!d.vendorName) push('push','Ready for Zoho','fail','Vendor required.');
     else if(!d.billNumber) push('push','Ready for Zoho','fail','Bill number required.');
     else if(!tot) push('push','Ready for Zoho','fail','Total must be > 0.');
-    else if(!d.lineAccountId) push('push','Ready for Zoho','warn','Expense account not chosen — Zoho will use a default.');
-    else push('push','Ready for Zoho','pass','All Zoho-required fields present.');
+    else if(lines.length === 0) push('push','Ready for Zoho','warn','No line items extracted — push will fall back to a single subtotal line.');
+    else if(linesWithoutAccount > 0) push('push','Ready for Zoho','warn',linesWithoutAccount+' of '+lines.length+' line(s) have no expense account chosen — Zoho will use the default for those.');
+    else push('push','Ready for Zoho','pass','All '+lines.length+' line(s) have an account chosen.');
     return out;
   },[activeClientId,vendors]);
 
@@ -3832,33 +3835,46 @@ function App(){
         let ocr;
         try { ocr = await window.invoiceOcr(b64, f.type); } catch(e){ ocr = { error: e.message||String(e) }; }
         const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (String(Date.now())+Math.random());
-        // The OCR Lambda was built for invoices; for a bill we flip the
-        // roles: vendor = invoice's "VENDOR_NAME" (issuer); bill-to is the
-        // receiver. TRN comes from RECEIVER side on an invoice but for a
-        // bill we want the ISSUER's TRN, which Textract surfaces under
-        // VENDOR_VAT_NUMBER or similar — fallback chain below.
-        const fields = (ocr && ocr.fields) || {};
+        // The OCR Lambda returns fields at the TOP LEVEL (not nested
+        // under `fields`). For a bill, semantics:
+        //   vendor_name / vendor_trn  → the supplier (issuer of the bill)
+        //   receiver_name             → the client we're paying on behalf of
+        // The line_items array gives us description + amount per row;
+        // user picks the expense account for each in the review panel.
+        const lineItemsRaw = Array.isArray(ocr && ocr.line_items) ? ocr.line_items : [];
+        const lineItems = lineItemsRaw.map((li,i)=>({
+          id: 'li-'+id.slice(0,8)+'-'+i,
+          description: li.description || '',
+          quantity: Number(li.quantity || 1),
+          rate: Number(li.rate || li.amount || 0),
+          amount: Number(li.amount || (li.rate||0) * (li.quantity||1) || 0),
+          accountId: '',  // chosen by the user, like Zoho's manual bill entry
+        }));
         const draft = {
           id,
           docType: 'bill',
           fileName: f.name,
           fileType: f.type,
+          fileBase64: b64,  // kept so we can render a preview alongside the review
           uploadedAt: Date.now(),
-          vendorName: fields.vendor_name || fields.vendorName || '',
-          vendorTrn:  fields.vendor_trn  || fields.vendor_vat || fields.vendor_tax_id || '',
-          billToName: fields.receiver_name || fields.customer_name || '',
-          billNumber: fields.invoice_number || fields.bill_number || '',
-          billDate:   fields.invoice_date  || fields.bill_date  || '',
-          dueDate:    fields.due_date || '',
-          currency:   (fields.currency || 'AED').toUpperCase(),
-          subtotal:   Number(fields.subtotal||0),
-          vat:        Number(fields.tax || fields.vat || 0),
-          total:      Number(fields.total||0),
-          vatPercent: Number(fields.tax_percent || 5),
+          vendorName: (ocr && (ocr.vendor_name || '')) || '',
+          vendorTrn:  (ocr && (ocr.vendor_trn  || '')) || '',
+          billToName: (ocr && (ocr.receiver_name || '')) || '',
+          billNumber: (ocr && (ocr.invoice_number || '')) || '',
+          billDate:   (ocr && (ocr.invoice_date  || '')) || '',
+          dueDate:    (ocr && (ocr.due_date || '')) || '',
+          currency:   ((ocr && ocr.currency) || 'AED').toUpperCase(),
+          subtotal:   Number((ocr && ocr.subtotal) || 0),
+          vat:        Number((ocr && ocr.tax) || 0),
+          total:      Number((ocr && ocr.total) || 0),
+          vatPercent: Number((ocr && ocr.vat_percent) || 5),
+          vendorAddress: (ocr && ocr.vendor_address) || '',
+          docTypeDetected: (ocr && ocr.doc_type) || '',
+          lineItems,
           vendorId:   '',
-          lineAccountId: '',
           status: 'Draft',
           ocrError: ocr && ocr.error ? String(ocr.error) : '',
+          ocrRaw: ocr || null,  // full Textract payload — useful for debugging
         };
         draft.validations = runBillValidators(draft);
         drafts.push(draft);
@@ -3900,19 +3916,27 @@ function App(){
           if(!confirm('A bill with number "'+d.billNumber+'" already exists in Zoho for this vendor (status: '+sameVendor.status+'). Push anyway?')){ setBillOcrPushing(false); return; }
         }
       } catch(_){}
-      const line = {
-        name: 'Bill line (OCR)',
-        rate: Number(d.subtotal||0),
-        quantity: 1,
-      };
-      if(d.lineAccountId) line.account_id = d.lineAccountId;
+      // Build line_items from the OCR lines if we have any, else a single
+      // fallback line carrying the subtotal. Per-line account_id is what
+      // the user picked in the review panel.
+      const lines = (d.lineItems && d.lineItems.length>0)
+        ? d.lineItems.map(li=>{
+            const out = {
+              name: li.description || 'Bill line',
+              rate: Number(li.amount||li.rate||0),
+              quantity: 1, // amount-as-rate to preserve the OCR'd line total
+            };
+            if(li.accountId) out.account_id = li.accountId;
+            return out;
+          })
+        : [{ name:'Bill line (OCR)', rate: Number(d.subtotal||0), quantity: 1 }];
       const payload = {
         vendor_id: vendorId,
         bill_number: d.billNumber,
         date: d.billDate,
         due_date: d.dueDate || d.billDate,
         currency_code: d.currency || 'AED',
-        line_items: [line],
+        line_items: lines,
         notes: 'Created via AutoLedger Bill OCR · file: '+d.fileName,
       };
       const r = await window.zohoCreateBill(orgId, payload);
@@ -6643,20 +6667,27 @@ td,th{padding:8px 12px;vertical-align:middle}
                     </div>
                   )}
 
-                  {/* Inline review panel */}
+                  {/* Inline review panel — PDF preview on the left, form on the right */}
                   {reviewDraft && (()=>{
                     const d = reviewDraft;
-                    const incomeOrExpenseAccts = alFilterAccountsForContext(chartOfAccounts,'expense');
+                    const expenseAccts = alFilterAccountsForContext(chartOfAccounts,'expense');
+                    const allAccts = chartOfAccounts || [];
                     const setField = (patch) => {
                       const next = updateBillDraft(d.id, patch);
                       const updated = next.find(x=>x.id===d.id);
                       if(updated){ updateBillDraft(d.id, { validations: runBillValidators(updated) }); }
                     };
+                    const setLine = (lineId, patch) => {
+                      const nextLines = (d.lineItems||[]).map(li => li.id===lineId ? {...li, ...patch} : li);
+                      setField({ lineItems: nextLines });
+                    };
+                    const dataUri = d.fileBase64 ? ("data:"+(d.fileType||'application/pdf')+";base64,"+d.fileBase64) : null;
+                    const isPdf = (d.fileType||'').includes('pdf') || /\.pdf$/i.test(d.fileName||'');
                     return <div style={{marginTop:14,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,gap:10,flexWrap:"wrap"}}>
                         <div>
                           <div style={{fontSize:14,fontWeight:700,color:"#1a1a2e"}}>Review · {d.fileName}</div>
-                          <div style={{fontSize:11,color:"#777",marginTop:2}}>Cross-check the extracted fields, then push to Zoho.</div>
+                          <div style={{fontSize:11,color:"#777",marginTop:2}}>Cross-check against the bill on the left, pick an expense account per line, then push to Zoho.</div>
                         </div>
                         <div style={{display:"flex",gap:8}}>
                           <button onClick={()=>setBillOcrReviewId("")} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 14px",color:"#555",fontSize:12,fontWeight:600,cursor:"pointer"}}>Close</button>
@@ -6675,59 +6706,128 @@ td,th{padding:8px 12px;vertical-align:middle}
                         })}
                       </div>
 
-                      {/* Editable fields */}
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Vendor name (from bill)</label>
-                          <input type="text" value={d.vendorName||""} onChange={e=>setField({vendorName:e.target.value})} list="bill-vendor-list" style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
-                          <datalist id="bill-vendor-list">{(vendors||[]).map(v=><option key={v} value={v} />)}</datalist>
+                      {/* Two-column body: PDF preview · form */}
+                      <div style={{display:"grid",gridTemplateColumns:"minmax(360px,1fr) minmax(420px,1.2fr)",gap:14}}>
+                        {/* LEFT — original document preview */}
+                        <div style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,overflow:"hidden",minHeight:520,display:"flex",flexDirection:"column"}}>
+                          <div style={{padding:"6px 10px",borderBottom:"1px solid #e2e2ea",fontSize:10,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#666",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                            <span>Original bill</span>
+                            {dataUri && <a href={dataUri} download={d.fileName} style={{fontSize:10,color:"#4D3FA0",textDecoration:"none",fontWeight:600}}>⬇ Download</a>}
+                          </div>
+                          {!dataUri ? (
+                            <div style={{padding:"40px 14px",textAlign:"center",color:"#999",fontSize:11}}>Original file not stored with this draft (uploaded before the preview feature). Re-upload to see the preview.</div>
+                          ) : isPdf ? (
+                            <iframe title={d.fileName} src={dataUri} style={{flex:1,minHeight:520,border:"none",background:"#fff"}} />
+                          ) : (
+                            <div style={{flex:1,overflowY:"auto",padding:8,display:"flex",alignItems:"flex-start",justifyContent:"center"}}>
+                              <img src={dataUri} alt={d.fileName} style={{maxWidth:"100%",height:"auto"}} />
+                            </div>
+                          )}
                         </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Vendor TRN (15 digits)</label>
-                          <input type="text" value={d.vendorTrn||""} onChange={e=>setField({vendorTrn:e.target.value.replace(/\D/g,'').slice(0,15)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
-                        </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Bill number</label>
-                          <input type="text" value={d.billNumber||""} onChange={e=>setField({billNumber:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
-                        </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Bill To (must match client)</label>
-                          <input type="text" value={d.billToName||""} onChange={e=>setField({billToName:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
-                        </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Bill date</label>
-                          <input type="date" value={d.billDate||""} onChange={e=>setField({billDate:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
-                        </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Due date (optional)</label>
-                          <input type="date" value={d.dueDate||""} onChange={e=>setField({dueDate:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
-                        </div>
-                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,gridColumn:"1 / -1"}}>
-                          <div><label style={{fontSize:10,color:"#888"}}>Subtotal</label><input type="number" step="0.01" value={d.subtotal||0} onChange={e=>setField({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                          <div><label style={{fontSize:10,color:"#888"}}>VAT amount</label><input type="number" step="0.01" value={d.vat||0} onChange={e=>setField({vat:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                          <div><label style={{fontSize:10,color:"#888"}}>Total</label><input type="number" step="0.01" value={d.total||0} onChange={e=>setField({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                        </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Currency</label>
-                          <select value={d.currency||'AED'} onChange={e=>setField({currency:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select>
-                        </div>
-                        <div>
-                          <label style={{fontSize:10,color:"#888"}}>Expense account (Zoho)</label>
-                          <select value={d.lineAccountId||''} onChange={e=>setField({lineAccountId:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>
-                            <option value="">— Default expense account —</option>
-                            {incomeOrExpenseAccts.map(a=><option key={a.id||a.name} value={a.id||''}>{a.name}{a.type?(' — '+a.type):''}</option>)}
-                          </select>
+
+                        {/* RIGHT — header form + line items table */}
+                        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Vendor name (from bill)</label>
+                              <input type="text" value={d.vendorName||""} onChange={e=>setField({vendorName:e.target.value})} list="bill-vendor-list" style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                              <datalist id="bill-vendor-list">{(vendors||[]).map(v=><option key={v} value={v} />)}</datalist>
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Vendor TRN (15 digits)</label>
+                              <input type="text" value={d.vendorTrn||""} onChange={e=>setField({vendorTrn:e.target.value.replace(/\D/g,'').slice(0,15)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Bill number</label>
+                              <input type="text" value={d.billNumber||""} onChange={e=>setField({billNumber:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Bill To (must match client)</label>
+                              <input type="text" value={d.billToName||""} onChange={e=>setField({billToName:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Bill date</label>
+                              <input type="date" value={d.billDate||""} onChange={e=>setField({billDate:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Due date (optional)</label>
+                              <input type="date" value={d.dueDate||""} onChange={e=>setField({dueDate:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Currency</label>
+                              <select value={d.currency||'AED'} onChange={e=>setField({currency:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select>
+                            </div>
+                            <div>
+                              <label style={{fontSize:10,color:"#888"}}>Document type detected</label>
+                              <div style={{padding:"7px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:3,background:"#f8f9fc",color:d.docTypeDetected?"#1a1a2e":"#999",textTransform:"capitalize"}}>{(d.docTypeDetected||'unknown').replace(/_/g,' ')}</div>
+                            </div>
+                          </div>
+
+                          {/* Line items — description from OCR (read-only), user picks account per line */}
+                          <div style={{marginTop:6,border:"1px solid #e2e2ea",borderRadius:8,overflow:"hidden"}}>
+                            <div style={{padding:"7px 12px",background:"#f8f9fc",borderBottom:"1px solid #e2e2ea",fontSize:10,fontWeight:700,letterSpacing:"0.04em",textTransform:"uppercase",color:"#666",display:"flex",justifyContent:"space-between"}}>
+                              <span>Line items · description from bill</span>
+                              <button onClick={()=>{
+                                const id = 'li-manual-'+Math.random().toString(36).slice(2,8);
+                                setField({ lineItems:[...(d.lineItems||[]), {id, description:'', quantity:1, rate:0, amount:0, accountId:''}] });
+                              }} style={{background:"transparent",border:"none",fontSize:10,color:"#4D3FA0",fontWeight:600,cursor:"pointer"}}>+ Add line</button>
+                            </div>
+                            {(!d.lineItems || d.lineItems.length===0) ? (
+                              <div style={{padding:14,fontSize:11,color:"#888"}}>No line items extracted. Add one manually or rely on subtotal-only fallback.</div>
+                            ) : (
+                              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                                <thead><tr style={{background:"#fafbfc"}}>
+                                  {["Description","Qty","Amount","Expense account","" ].map(h=><th key={h} style={{padding:"7px 10px",textAlign:"left",fontSize:10,color:"#888",fontWeight:600,borderBottom:"1px solid #f0f0f4"}}>{h}</th>)}
+                                </tr></thead>
+                                <tbody>{d.lineItems.map(li=>(
+                                  <tr key={li.id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                                    <td style={{padding:"6px 10px"}}>
+                                      <input type="text" value={li.description||""} onChange={e=>setLine(li.id,{description:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11}} />
+                                    </td>
+                                    <td style={{padding:"6px 10px",width:60}}>
+                                      <input type="number" step="0.01" value={li.quantity||1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} />
+                                    </td>
+                                    <td style={{padding:"6px 10px",width:100}}>
+                                      <input type="number" step="0.01" value={li.amount||0} onChange={e=>setLine(li.id,{amount:Number(e.target.value)})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}} />
+                                    </td>
+                                    <td style={{padding:"6px 10px",minWidth:180}}>
+                                      <select value={li.accountId||''} onChange={e=>setLine(li.id,{accountId:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid "+(li.accountId?"rgba(8,145,178,0.4)":"rgba(217,119,6,0.4)"),borderRadius:5,fontSize:11,color:li.accountId?"#0891b2":"#a16207"}}>
+                                        <option value="">— Choose account —</option>
+                                        {expenseAccts.map(a=><option key={a.id||a.name} value={a.id||''}>{a.name}{a.type?(' — '+a.type):''}</option>)}
+                                      </select>
+                                    </td>
+                                    <td style={{padding:"6px 10px",width:30,textAlign:"right"}}>
+                                      <span onClick={()=>setField({lineItems:(d.lineItems||[]).filter(x=>x.id!==li.id)})} title="Remove line" style={{cursor:"pointer",color:"#999",fontSize:14,lineHeight:1}}>×</span>
+                                    </td>
+                                  </tr>
+                                ))}</tbody>
+                              </table>
+                            )}
+                          </div>
+
+                          {/* Totals row */}
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                            <div><label style={{fontSize:10,color:"#888"}}>Subtotal</label><input type="number" step="0.01" value={d.subtotal||0} onChange={e=>setField({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                            <div><label style={{fontSize:10,color:"#888"}}>VAT amount</label><input type="number" step="0.01" value={d.vat||0} onChange={e=>setField({vat:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                            <div><label style={{fontSize:10,color:"#888"}}>Total</label><input type="number" step="0.01" value={d.total||0} onChange={e=>setField({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                          </div>
                         </div>
                       </div>
 
                       {/* Posting preview */}
                       {(()=>{
-                        const acct = (chartOfAccounts||[]).find(a => String(a.id||'') === String(d.lineAccountId||''));
-                        const expName = acct ? acct.name : 'Expense (default)';
+                        const lineSummaries = (d.lineItems||[]).map(li => {
+                          const acct = allAccts.find(a => String(a.id||'')===String(li.accountId||''));
+                          return { name: acct?acct.name:'Expense (default)', amount:Number(li.amount||0), acct };
+                        });
                         return <div style={{marginTop:14,padding:"10px 14px",background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,fontSize:11,color:"#555"}}>
                           <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888",textTransform:"uppercase",marginBottom:6}}>Posting preview · this bill will hit</div>
                           <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>{expName} <span style={{color:"#888"}}>(Dr {Number(d.subtotal||0).toFixed(2)})</span></span><AlDestinationBadge ledger={expName} chartOfAccounts={acct?chartOfAccounts:[{name:expName,type:"expense"}]} compact={true} /></div>
+                            {lineSummaries.length>0 ? lineSummaries.map((ls,i)=>(
+                              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>{ls.name} <span style={{color:"#888"}}>(Dr {ls.amount.toFixed(2)})</span></span><AlDestinationBadge ledger={ls.name} chartOfAccounts={ls.acct?allAccts:[{name:ls.name,type:"expense"}]} compact={true} /></div>
+                            )) : (
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>Expense (default) <span style={{color:"#888"}}>(Dr {Number(d.subtotal||0).toFixed(2)})</span></span><AlDestinationBadge ledger="Expense" chartOfAccounts={[{name:"Expense",type:"expense"}]} compact={true} /></div>
+                            )}
                             {Number(d.vat||0)>0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>Input VAT Receivable <span style={{color:"#888"}}>(Dr {Number(d.vat||0).toFixed(2)})</span></span><AlDestinationBadge ledger="Input VAT Receivable" chartOfAccounts={[{name:"Input VAT Receivable",type:"other current asset"}]} compact={true} /></div>}
                             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>Accounts Payable <span style={{color:"#888"}}>(Cr {Number(d.total||0).toFixed(2)})</span></span><AlDestinationBadge ledger="Accounts Payable" chartOfAccounts={[{name:"Accounts Payable",type:"accounts_payable"}]} compact={true} /></div>
                           </div>
