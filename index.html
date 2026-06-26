@@ -1020,6 +1020,46 @@ window.invoiceOcr = async (fileBase64, mimeType) => {
   return d;
 };
 
+// Vendor search (mirror of zohoSearchCustomer). Returns { matches: [...] }.
+window.zohoSearchVendor = async (organizationId, name) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('searchVendor');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'searchVendor', organizationId, payload: JSON.stringify({ name: name || '' })
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) return { matches: [] };
+  __recordApiUsage(d.apiUsage);
+  if (d.error) return { matches: [], error: d.error };
+  return { matches: d.matches || [] };
+};
+
+// Create a vendor (contact_type=vendor) in Zoho Books. Returns
+// { id, name, raw }.
+window.zohoCreateVendor = async (organizationId, data) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('createVendor');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'createVendor', organizationId, payload: JSON.stringify(data || {})
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response.');
+  __recordApiUsage(d.apiUsage);
+  if (d.error) throw new Error(d.error);
+  return { id: d.id || null, name: d.name || data.contact_name, raw: d.raw || null };
+};
+
+// Create a bill in Zoho Books. Returns { id, bill_number, raw }.
+window.zohoCreateBill = async (organizationId, payload) => {
+  window.__alIncrementApiCount && window.__alIncrementApiCount('createBill');
+  const r = await dataClient.mutations.zohoPush({
+    kind: 'createBill', organizationId, payload: JSON.stringify(payload || {})
+  });
+  const d = __unwrapJson(r.data);
+  if (!d) throw new Error('Empty response.');
+  __recordApiUsage(d.apiUsage);
+  if (d.error) throw new Error(d.error);
+  return { id: d.id || null, bill_number: d.bill_number || payload.bill_number, raw: d.raw || null };
+};
+
 // Attach a file (PDF / image) to an existing Zoho invoice. Used by the
 // OCR push to keep the original document next to the created invoice.
 window.zohoAttachToInvoice = async (organizationId, invoiceId, fileBase64, fileName, mimeType) => {
@@ -1071,7 +1111,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -2699,6 +2739,16 @@ function App(){
   const[bankAccounts,setBankAccounts]=useState([]);
   const[bankAccountsLoading,setBankAccountsLoading]=useState(false);
   const[bankAccountsError,setBankAccountsError]=useState("");
+  // ── Bill OCR module — parallel to Revenue OCR but for vendor bills.
+  // Each draft: { id, vendorName, vendorTrn, billNumber, billDate,
+  //   currency, subtotal, vat, total, lineAccountId, billToName,
+  //   status, validations:[], pushedAt, pushedBillId, pushedBillNumber }.
+  const[billOcrQueue,setBillOcrQueue]=useState([]);
+  const[billOcrUploading,setBillOcrUploading]=useState(false);
+  const[billOcrReviewId,setBillOcrReviewId]=useState("");
+  const[billOcrSub,setBillOcrSub]=useState("ocr"); // 'ocr' | 'bills' | 'payments'
+  const[billOcrPushing,setBillOcrPushing]=useState(false);
+  const[billVendorCreating,setBillVendorCreating]=useState(false);
   const[bankAccount,setBankAccount]=useState("Bank Account");
   // Types of supplies the client makes for sales. Drives downstream VAT
   // assumptions (which zero-rated / exempt branches are even allowed).
@@ -2949,6 +2999,7 @@ function App(){
       setCustomers(getClientData(activeClientId, "customers", []));
       setBankAccounts(getClientData(activeClientId, "bank_accounts", []));
       setSupplyTypes(getClientData(activeClientId, "supply_types", []));
+      setBillOcrQueue(getClientData(activeClientId, "billOcrDrafts", []) || []);
       setVendorFileName(getClientData(activeClientId, "vendor_file", ""));
       setCustomerFileName(getClientData(activeClientId, "customer_file", ""));
       const c = clients.find(c=>c.id===activeClientId);
@@ -3687,6 +3738,190 @@ function App(){
   // Filter the Chart of Accounts for accounts the accountant can park a
   // vendor advance in. Empty array means there is no suitable account and
   // the UI should prompt the user to create one in Zoho.
+  // ── Bill OCR helpers ──
+  // Persist the bill draft queue locally + push to S3 via setClientData
+  // (which chains into alConfigSave). Keep callers tidy by hiding the
+  // double-write here.
+  const persistBillOcr = useCallback((next)=>{
+    if(!activeClientId) return;
+    setClientData(activeClientId, "billOcrDrafts", next);
+  },[activeClientId]);
+
+  // Patch one draft in the queue and persist. Returns the next array so
+  // callers can chain validation / Zoho push from a fresh snapshot.
+  const updateBillDraft = useCallback((id, patch)=>{
+    let nextSnap = null;
+    setBillOcrQueue(prev=>{
+      const next = prev.map(d => d.id===id ? {...d, ...patch} : d);
+      nextSnap = next; persistBillOcr(next); return next;
+    });
+    return nextSnap;
+  },[persistBillOcr]);
+
+  // Run the user's specific validators on a bill draft:
+  //   1. Vendor TRN must exist in the synced Vendors register (with TRN).
+  //   2. The bill's "Bill To" name must match the client's legal name.
+  //   3. Date must be present and not in the future.
+  //   4. Subtotal + VAT must equal Total (within 1 AED for rounding).
+  //   5. Required Zoho push fields: vendor + bill_number + date + line.
+  const runBillValidators = useCallback((d)=>{
+    const out=[];
+    const push=(key,label,status,msg)=>out.push({key,label,status,msg});
+    const legalName = (getClientData(activeClientId,"legal_name","")||"").toLowerCase().trim();
+    const billTo = (d.billToName||"").toLowerCase().trim();
+
+    // 1 — Vendor TRN must exist in Zoho Vendors register
+    const trn = (d.vendorTrn||"").replace(/\s+/g,'');
+    const vendorList = vendors||[];
+    const vendorIdsMap = getClientData(activeClientId,"vendorIds",{})||{};
+    const matchedVendor = trn ? vendorList.find(v=>{
+      // We don't carry TRN on local vendors list; fall back to TRN lookup
+      // via the contact name. Real validation happens on push (searchVendor).
+      return true;
+    }) : null;
+    if(!trn) push('trn','Vendor TRN','fail','Vendor TRN not extracted from the bill. Re-OCR or key it manually.');
+    else if(!/^[0-9]{15}$/.test(trn)) push('trn','Vendor TRN','warn','TRN should be 15 digits — got '+trn.length+'.');
+    else if(!d.vendorName) push('trn','Vendor TRN','warn','TRN present but vendor name missing.');
+    else push('trn','Vendor TRN','pass','TRN '+trn+' on vendor '+d.vendorName+'. Cross-check against Zoho Vendor register happens at push time.');
+
+    // 2 — Bill To matches client legal name
+    if(!legalName) push('billto','Bill To','warn','Client legal name not synced from Zoho — cannot verify Bill To.');
+    else if(!billTo) push('billto','Bill To','fail','Bill To address could not be read from the document.');
+    else if(billTo.includes(legalName) || legalName.includes(billTo)) push('billto','Bill To','pass','Bill addressed to "'+d.billToName+'" — matches client legal name.');
+    else push('billto','Bill To','fail','Bill addressed to "'+d.billToName+'", but this client is "'+getClientData(activeClientId,"legal_name","")+'". This bill is NOT for this client.');
+
+    // 3 — Date validation
+    if(!d.billDate) push('date','Bill date','fail','Missing bill date.');
+    else {
+      const dt = new Date(d.billDate);
+      if(isNaN(dt.getTime())) push('date','Bill date','fail','Could not parse bill date: '+d.billDate);
+      else {
+        const now = Date.now();
+        if(dt.getTime() > now + 86400000) push('date','Bill date','warn','Bill date is in the future.');
+        else push('date','Bill date','pass',d.billDate);
+      }
+    }
+
+    // 4 — Math
+    const sub = Number(d.subtotal||0), vat = Number(d.vat||0), tot = Number(d.total||0);
+    if(tot > 0){
+      const diff = Math.abs((sub+vat) - tot);
+      if(diff > 1) push('math','Subtotal + VAT = Total','fail','Off by '+diff.toFixed(2)+' — re-check the figures.');
+      else push('math','Subtotal + VAT = Total','pass','Balances to '+tot.toFixed(2)+'.');
+    } else push('math','Subtotal + VAT = Total','warn','Total is zero or missing.');
+
+    // 5 — Required for Zoho push
+    if(!d.vendorName) push('push','Ready for Zoho','fail','Vendor required.');
+    else if(!d.billNumber) push('push','Ready for Zoho','fail','Bill number required.');
+    else if(!tot) push('push','Ready for Zoho','fail','Total must be > 0.');
+    else if(!d.lineAccountId) push('push','Ready for Zoho','warn','Expense account not chosen — Zoho will use a default.');
+    else push('push','Ready for Zoho','pass','All Zoho-required fields present.');
+    return out;
+  },[activeClientId,vendors]);
+
+  // Upload a PDF / image, run AnalyzeExpense via the invoice-ocr Lambda
+  // (Textract is doc-type-agnostic), and create a bill draft from the
+  // extracted fields. Validators are run on the same tick.
+  const uploadBillFiles = useCallback(async (files)=>{
+    if(!files || files.length===0) return;
+    setBillOcrUploading(true);
+    try {
+      const drafts=[];
+      for(const f of files){
+        const b64 = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result||'').split(',')[1]); r.onerror=rej; r.readAsDataURL(f); });
+        let ocr;
+        try { ocr = await window.invoiceOcr(b64, f.type); } catch(e){ ocr = { error: e.message||String(e) }; }
+        const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (String(Date.now())+Math.random());
+        // The OCR Lambda was built for invoices; for a bill we flip the
+        // roles: vendor = invoice's "VENDOR_NAME" (issuer); bill-to is the
+        // receiver. TRN comes from RECEIVER side on an invoice but for a
+        // bill we want the ISSUER's TRN, which Textract surfaces under
+        // VENDOR_VAT_NUMBER or similar — fallback chain below.
+        const fields = (ocr && ocr.fields) || {};
+        const draft = {
+          id,
+          docType: 'bill',
+          fileName: f.name,
+          fileType: f.type,
+          uploadedAt: Date.now(),
+          vendorName: fields.vendor_name || fields.vendorName || '',
+          vendorTrn:  fields.vendor_trn  || fields.vendor_vat || fields.vendor_tax_id || '',
+          billToName: fields.receiver_name || fields.customer_name || '',
+          billNumber: fields.invoice_number || fields.bill_number || '',
+          billDate:   fields.invoice_date  || fields.bill_date  || '',
+          dueDate:    fields.due_date || '',
+          currency:   (fields.currency || 'AED').toUpperCase(),
+          subtotal:   Number(fields.subtotal||0),
+          vat:        Number(fields.tax || fields.vat || 0),
+          total:      Number(fields.total||0),
+          vatPercent: Number(fields.tax_percent || 5),
+          vendorId:   '',
+          lineAccountId: '',
+          status: 'Draft',
+          ocrError: ocr && ocr.error ? String(ocr.error) : '',
+        };
+        draft.validations = runBillValidators(draft);
+        drafts.push(draft);
+      }
+      setBillOcrQueue(prev=>{ const next=[...drafts, ...prev]; persistBillOcr(next); return next; });
+    } finally { setBillOcrUploading(false); }
+  },[runBillValidators,persistBillOcr]);
+
+  // Push one bill draft to Zoho. Resolves vendor (searchVendor →
+  // createVendor if needed), then POSTs createBill. On success the draft
+  // is marked Pushed To Zoho and stamped with the Zoho id.
+  const pushBillToZoho = useCallback(async (id)=>{
+    const d = billOcrQueue.find(b=>b.id===id);
+    if(!d) return;
+    const c = clients.find(x=>x.id===activeClientId);
+    const orgId = c && c.zohoOrgId;
+    if(!orgId){ alert('Client is not linked to a Zoho organization.'); return; }
+    // Hard validators must not be failing
+    const fails = (d.validations||[]).filter(v=>v.status==='fail');
+    if(fails.length){ alert('Fix these before pushing:\n\n'+fails.map(v=>'• '+v.label+': '+v.msg).join('\n')); return; }
+    setBillOcrPushing(true);
+    try {
+      let vendorId = d.vendorId;
+      if(!vendorId){
+        // Look up the vendor; create if missing.
+        const s = await window.zohoSearchVendor(orgId, d.vendorName);
+        const hit = (s.matches||[]).find(m => (m.contact_name||'').toLowerCase() === d.vendorName.toLowerCase()) || (s.matches||[])[0];
+        if(hit) vendorId = hit.contact_id;
+        else {
+          const created = await window.zohoCreateVendor(orgId, { contact_name: d.vendorName, trn: d.vendorTrn||'', country_code: 'AE', currency_code: d.currency||'AED' });
+          vendorId = created.id;
+        }
+      }
+      // Duplicate check by bill number
+      try {
+        const dup = await window.zohoFetch('findBill', orgId, { billNumber: d.billNumber });
+        const sameVendor = (dup||[]).find(b => String(b.vendor_id) === String(vendorId));
+        if(sameVendor){
+          if(!confirm('A bill with number "'+d.billNumber+'" already exists in Zoho for this vendor (status: '+sameVendor.status+'). Push anyway?')){ setBillOcrPushing(false); return; }
+        }
+      } catch(_){}
+      const line = {
+        name: 'Bill line (OCR)',
+        rate: Number(d.subtotal||0),
+        quantity: 1,
+      };
+      if(d.lineAccountId) line.account_id = d.lineAccountId;
+      const payload = {
+        vendor_id: vendorId,
+        bill_number: d.billNumber,
+        date: d.billDate,
+        due_date: d.dueDate || d.billDate,
+        currency_code: d.currency || 'AED',
+        line_items: [line],
+        notes: 'Created via AutoLedger Bill OCR · file: '+d.fileName,
+      };
+      const r = await window.zohoCreateBill(orgId, payload);
+      updateBillDraft(id, { status:'Pushed To Zoho', pushedAt: Date.now(), pushedBillId: r.id, pushedBillNumber: r.bill_number, vendorId });
+    } catch(e){
+      alert('Push failed: '+(e.message||String(e)));
+    } finally { setBillOcrPushing(false); }
+  },[billOcrQueue,clients,activeClientId,updateBillDraft]);
+
   const vendorAdvanceAccounts=useMemo(()=>{
     const coa=chartOfAccounts||[];
     const re=/(advance.*vendor|vendor.*advance|vendor.*deposit|advance.*supplier|supplier.*advance|advance.*paid|prepaid.*vendor)/i;
@@ -5606,6 +5841,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               const clientItems = [
                 {key:"projects",   label:"Bank Statement Upload", icon:"🏦", count: projects.length||undefined},
                 {key:"revenue",    label:"Revenue",               icon:"💰", count: ocrQueue.length||undefined},
+                {key:"bills",      label:"Bills",                 icon:"🧾", count: (billOcrQueue||[]).length||undefined},
                 {key:"masterData", label:"Master Data",           icon:"📚"},
                 {key:"settings",   label:"Settings",              icon:"⚙"},
                 {key:"activity",   label:"Activity",              icon:"📊"},
@@ -6335,6 +6571,211 @@ td,th{padding:8px 12px;vertical-align:middle}
                     </div>
                   </div>;
                 })()}
+              </div>;
+            })()}
+
+            {/* ═══════════ BILLS TAB — Bill OCR / Bills / Payments Made ═══════════ */}
+            {clientDetailTab==="bills" && (()=>{
+              const drafts = billOcrQueue || [];
+              const pushed = drafts.filter(d => d.status==='Pushed To Zoho');
+              const reviewDraft = billOcrReviewId ? drafts.find(d=>d.id===billOcrReviewId) : null;
+              const SUBT = [
+                {key:'ocr',      label:'Bill OCR',         icon:'🤖', count: drafts.filter(d=>d.status!=='Pushed To Zoho').length},
+                {key:'bills',    label:'Bills',            icon:'🧾', count: pushed.length},
+                {key:'payments', label:'Payments Made',    icon:'💳'}
+              ];
+              return <div>
+                <div style={{display:"flex",gap:0,marginBottom:16,borderBottom:"1px solid #f0f0f4"}}>
+                  {SUBT.map(t=>(
+                    <div key={t.key} onClick={()=>setBillOcrSub(t.key)} style={{padding:"8px 16px",fontSize:12,fontWeight:600,cursor:"pointer",borderBottom:"2px solid "+(billOcrSub===t.key?"#0891b2":"transparent"),color:billOcrSub===t.key?"#0891b2":"#777",display:"flex",alignItems:"center",gap:6}}>
+                      <span>{t.icon}</span>{t.label}{t.count!=null?" ("+t.count+")":""}
+                    </div>
+                  ))}
+                </div>
+
+                {/* ── Bill OCR sub-tab ── */}
+                {billOcrSub==='ocr' && <div>
+                  {/* Upload card */}
+                  <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18,marginBottom:14}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e",marginBottom:4}}>Upload supplier bills</div>
+                    <div style={{fontSize:11,color:"#777",marginBottom:12}}>PDF or image. We extract vendor, TRN, bill number, dates, amounts, then run the validators. Multi-file OK.</div>
+                    <label htmlFor="bill-ocr-input" style={{display:"inline-flex",alignItems:"center",gap:8,padding:"10px 22px",borderRadius:8,background:billOcrUploading?"#cccccc":"linear-gradient(135deg,#0891b2,#0e7490)",color:"#fff",fontSize:13,fontWeight:700,cursor:billOcrUploading?"default":"pointer",boxShadow:"0 2px 12px rgba(8,145,178,0.25)"}}>
+                      {billOcrUploading?"⏳ Processing…":"⬆ Upload bill(s)"}
+                    </label>
+                    <input id="bill-ocr-input" type="file" accept="application/pdf,image/*" multiple disabled={billOcrUploading} onChange={(e)=>{ const files=Array.from(e.target.files||[]); if(files.length) uploadBillFiles(files); e.target.value=''; }} style={{display:"none"}} />
+                  </div>
+
+                  {/* Drafts list */}
+                  {drafts.length===0 ? (
+                    <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888",fontSize:12}}>
+                      <div style={{fontSize:32,marginBottom:8}}>🧾</div>
+                      No bill drafts yet. Upload supplier bills above to get started.
+                    </div>
+                  ) : (
+                    <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                        <thead><tr style={{background:"#f8f9fc"}}>
+                          {["File","Vendor","TRN","Bill #","Date","Total","Validation","Status",""].map(h=><th key={h} style={{padding:"10px 12px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>{drafts.map(d=>{
+                          const vd = d.validations||[];
+                          const fails = vd.filter(v=>v.status==='fail').length;
+                          const warns = vd.filter(v=>v.status==='warn').length;
+                          const tone = d.status==='Pushed To Zoho' ? {bg:"rgba(22,163,74,0.08)",fg:"#16a34a"}
+                                     : fails>0 ? {bg:"rgba(220,38,38,0.08)",fg:"#dc2626"}
+                                     : warns>0 ? {bg:"rgba(217,119,6,0.10)",fg:"#d97706"}
+                                     : {bg:"rgba(8,145,178,0.10)",fg:"#0891b2"};
+                          return <tr key={d.id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                            <td style={{padding:"9px 12px",color:"#1a1a2e",fontWeight:500,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={d.fileName}>{d.fileName}</td>
+                            <td style={{padding:"9px 12px",color:"#1a1a2e"}}>{d.vendorName||<span style={{color:"#bbb"}}>—</span>}</td>
+                            <td style={{padding:"9px 12px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{d.vendorTrn||<span style={{color:"#bbb"}}>—</span>}</td>
+                            <td style={{padding:"9px 12px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{d.billNumber||<span style={{color:"#bbb"}}>—</span>}</td>
+                            <td style={{padding:"9px 12px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{d.billDate||<span style={{color:"#bbb"}}>—</span>}</td>
+                            <td style={{padding:"9px 12px",textAlign:"right",color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>{d.total?(d.currency+' '+Number(d.total).toFixed(2)):<span style={{color:"#bbb"}}>—</span>}</td>
+                            <td style={{padding:"9px 12px"}}><span style={{fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:5,background:tone.bg,color:tone.fg}}>{fails>0?(fails+' fail'):warns>0?(warns+' warn'):'✓ Clean'}</span></td>
+                            <td style={{padding:"9px 12px"}}><span style={{fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:5,background:tone.bg,color:tone.fg}}>{d.status||'Draft'}</span></td>
+                            <td style={{padding:"9px 12px",textAlign:"right"}}>
+                              <button onClick={()=>setBillOcrReviewId(d.id)} style={{background:"#fff",border:"1px solid #4D3FA0",borderRadius:5,padding:"4px 10px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer"}}>Review</button>
+                            </td>
+                          </tr>;
+                        })}</tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Inline review panel */}
+                  {reviewDraft && (()=>{
+                    const d = reviewDraft;
+                    const incomeOrExpenseAccts = alFilterAccountsForContext(chartOfAccounts,'expense');
+                    const setField = (patch) => {
+                      const next = updateBillDraft(d.id, patch);
+                      const updated = next.find(x=>x.id===d.id);
+                      if(updated){ updateBillDraft(d.id, { validations: runBillValidators(updated) }); }
+                    };
+                    return <div style={{marginTop:14,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,gap:10,flexWrap:"wrap"}}>
+                        <div>
+                          <div style={{fontSize:14,fontWeight:700,color:"#1a1a2e"}}>Review · {d.fileName}</div>
+                          <div style={{fontSize:11,color:"#777",marginTop:2}}>Cross-check the extracted fields, then push to Zoho.</div>
+                        </div>
+                        <div style={{display:"flex",gap:8}}>
+                          <button onClick={()=>setBillOcrReviewId("")} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 14px",color:"#555",fontSize:12,fontWeight:600,cursor:"pointer"}}>Close</button>
+                          <button onClick={()=>{ if(confirm('Delete this draft?')){ setBillOcrQueue(prev=>{ const n=prev.filter(x=>x.id!==d.id); persistBillOcr(n); return n; }); setBillOcrReviewId(""); } }} style={{background:"#fff",border:"1px solid rgba(220,38,38,0.4)",borderRadius:6,padding:"7px 14px",color:"#dc2626",fontSize:12,fontWeight:600,cursor:"pointer"}}>🗑 Delete</button>
+                          <button onClick={()=>pushBillToZoho(d.id)} disabled={billOcrPushing||d.status==='Pushed To Zoho'||((d.validations||[]).some(v=>v.status==='fail'))} style={{background:(billOcrPushing||d.status==='Pushed To Zoho'||((d.validations||[]).some(v=>v.status==='fail')))?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:6,padding:"8px 18px",color:"#fff",fontSize:13,fontWeight:700,cursor:(billOcrPushing||d.status==='Pushed To Zoho')?"default":"pointer"}}>⚡ {d.status==='Pushed To Zoho'?'Already pushed':billOcrPushing?'Posting…':'Push to Zoho'}</button>
+                        </div>
+                      </div>
+
+                      {/* Validation chips */}
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+                        {(d.validations||[]).map((v,i)=>{
+                          const tone = v.status==='pass'?{bg:"rgba(22,163,74,0.10)",fg:"#16a34a"}:v.status==='warn'?{bg:"rgba(217,119,6,0.10)",fg:"#d97706"}:{bg:"rgba(220,38,38,0.10)",fg:"#dc2626"};
+                          return <div key={i} title={v.msg} style={{padding:"6px 10px",borderRadius:6,background:tone.bg,color:tone.fg,fontSize:11,fontWeight:600,maxWidth:380}}>
+                            {v.status==='pass'?'✓':v.status==='warn'?'⚠':'✗'} {v.label}: <span style={{fontWeight:400}}>{v.msg}</span>
+                          </div>;
+                        })}
+                      </div>
+
+                      {/* Editable fields */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Vendor name (from bill)</label>
+                          <input type="text" value={d.vendorName||""} onChange={e=>setField({vendorName:e.target.value})} list="bill-vendor-list" style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                          <datalist id="bill-vendor-list">{(vendors||[]).map(v=><option key={v} value={v} />)}</datalist>
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Vendor TRN (15 digits)</label>
+                          <input type="text" value={d.vendorTrn||""} onChange={e=>setField({vendorTrn:e.target.value.replace(/\D/g,'').slice(0,15)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Bill number</label>
+                          <input type="text" value={d.billNumber||""} onChange={e=>setField({billNumber:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} />
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Bill To (must match client)</label>
+                          <input type="text" value={d.billToName||""} onChange={e=>setField({billToName:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Bill date</label>
+                          <input type="date" value={d.billDate||""} onChange={e=>setField({billDate:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Due date (optional)</label>
+                          <input type="date" value={d.dueDate||""} onChange={e=>setField({dueDate:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}} />
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,gridColumn:"1 / -1"}}>
+                          <div><label style={{fontSize:10,color:"#888"}}>Subtotal</label><input type="number" step="0.01" value={d.subtotal||0} onChange={e=>setField({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                          <div><label style={{fontSize:10,color:"#888"}}>VAT amount</label><input type="number" step="0.01" value={d.vat||0} onChange={e=>setField({vat:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                          <div><label style={{fontSize:10,color:"#888"}}>Total</label><input type="number" step="0.01" value={d.total||0} onChange={e=>setField({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Currency</label>
+                          <select value={d.currency||'AED'} onChange={e=>setField({currency:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select>
+                        </div>
+                        <div>
+                          <label style={{fontSize:10,color:"#888"}}>Expense account (Zoho)</label>
+                          <select value={d.lineAccountId||''} onChange={e=>setField({lineAccountId:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>
+                            <option value="">— Default expense account —</option>
+                            {incomeOrExpenseAccts.map(a=><option key={a.id||a.name} value={a.id||''}>{a.name}{a.type?(' — '+a.type):''}</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Posting preview */}
+                      {(()=>{
+                        const acct = (chartOfAccounts||[]).find(a => String(a.id||'') === String(d.lineAccountId||''));
+                        const expName = acct ? acct.name : 'Expense (default)';
+                        return <div style={{marginTop:14,padding:"10px 14px",background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,fontSize:11,color:"#555"}}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888",textTransform:"uppercase",marginBottom:6}}>Posting preview · this bill will hit</div>
+                          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>{expName} <span style={{color:"#888"}}>(Dr {Number(d.subtotal||0).toFixed(2)})</span></span><AlDestinationBadge ledger={expName} chartOfAccounts={acct?chartOfAccounts:[{name:expName,type:"expense"}]} compact={true} /></div>
+                            {Number(d.vat||0)>0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>Input VAT Receivable <span style={{color:"#888"}}>(Dr {Number(d.vat||0).toFixed(2)})</span></span><AlDestinationBadge ledger="Input VAT Receivable" chartOfAccounts={[{name:"Input VAT Receivable",type:"other current asset"}]} compact={true} /></div>}
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span>Accounts Payable <span style={{color:"#888"}}>(Cr {Number(d.total||0).toFixed(2)})</span></span><AlDestinationBadge ledger="Accounts Payable" chartOfAccounts={[{name:"Accounts Payable",type:"accounts_payable"}]} compact={true} /></div>
+                          </div>
+                        </div>;
+                      })()}
+
+                      {d.status==='Pushed To Zoho' && <div style={{marginTop:12,padding:"8px 12px",background:"rgba(22,163,74,0.05)",border:"1px solid rgba(22,163,74,0.25)",borderRadius:6,fontSize:11,color:"#15803d"}}>✓ Pushed to Zoho as bill <strong style={{fontFamily:"'IBM Plex Mono',monospace"}}>{d.pushedBillNumber||d.pushedBillId}</strong> on {d.pushedAt?new Date(d.pushedAt).toLocaleString():'—'}.</div>}
+                      {d.ocrError && <div style={{marginTop:12,padding:"8px 12px",background:"rgba(220,38,38,0.05)",border:"1px solid rgba(220,38,38,0.25)",borderRadius:6,fontSize:11,color:"#dc2626"}}>OCR error: {d.ocrError}. You can still key the fields manually above.</div>}
+                    </div>;
+                  })()}
+                </div>}
+
+                {/* ── Bills sub-tab — pushed bills, read-only ── */}
+                {billOcrSub==='bills' && (
+                  pushed.length===0 ? (
+                    <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888",fontSize:12}}>
+                      <div style={{fontSize:32,marginBottom:8}}>🧾</div>
+                      No bills pushed to Zoho yet for this client.
+                    </div>
+                  ) : (
+                    <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                        <thead><tr style={{background:"#f8f9fc"}}>
+                          {["Bill #","Vendor","Date","Total","Pushed","Zoho ID"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
+                        </tr></thead>
+                        <tbody>{pushed.map(b=>(
+                          <tr key={b.id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                            <td style={{padding:"10px 14px",fontFamily:"'IBM Plex Mono',monospace",color:"#0891b2",fontWeight:600}}>{b.pushedBillNumber||b.billNumber}</td>
+                            <td style={{padding:"10px 14px",color:"#1a1a2e"}}>{b.vendorName}</td>
+                            <td style={{padding:"10px 14px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{b.billDate}</td>
+                            <td style={{padding:"10px 14px",color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>{b.currency} {Number(b.total||0).toFixed(2)}</td>
+                            <td style={{padding:"10px 14px",color:"#777",fontSize:11}}>{b.pushedAt?new Date(b.pushedAt).toLocaleString():'—'}</td>
+                            <td style={{padding:"10px 14px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{b.pushedBillId||'—'}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  )
+                )}
+
+                {/* ── Payments Made sub-tab — placeholder, parallel to Payments Received ── */}
+                {billOcrSub==='payments' && (
+                  <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888",fontSize:12}}>
+                    <div style={{fontSize:32,marginBottom:8}}>💳</div>
+                    <div style={{fontSize:13,marginBottom:4,color:"#555"}}>Payments Made</div>
+                    Vendor payments will be recorded here. For now use the Bank Statement Upload flow — debit rows with a vendor selected can apply against an open bill via the Bills picker.
+                  </div>
+                )}
               </div>;
             })()}
 

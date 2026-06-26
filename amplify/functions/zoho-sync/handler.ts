@@ -371,6 +371,60 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: null, items: matches, apiUsage: lastApiUsage });
     }
 
+    // Bills by exact bill_number — duplicate detection for the Bill OCR
+    // module. Mirrors findInvoice. params = JSON { billNumber, vendorName? }.
+    if (kind === 'findBill') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const billNo = (p.billNumber || '').trim();
+      if (!billNo) return JSON.stringify({ error: 'billNumber is required (pass via params)' });
+      const j = await zohoGet('bills', accessToken, region, {
+        organization_id: orgId,
+        bill_number: billNo
+      });
+      const matches = (j.bills || []).map((b: any) => ({
+        bill_id: b.bill_id,
+        bill_number: b.bill_number,
+        vendor_id: b.vendor_id,
+        vendor_name: b.vendor_name,
+        date: b.date,
+        total: Number(b.total),
+        balance: Number(b.balance),
+        status: b.status
+      }));
+      return JSON.stringify({ error: null, items: matches, apiUsage: lastApiUsage });
+    }
+
+    // Vendor search — mirror of searchCustomer. Used by Bill OCR push to
+    // detect existing vendors before createVendor.
+    if (kind === 'searchVendor') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      const name = String(p.name || '').trim();
+      if (!name) return JSON.stringify({ error: null, matches: [], apiUsage: lastApiUsage });
+      try {
+        const j = await zohoGet('contacts', accessToken, region, {
+          organization_id: orgId!,
+          contact_name_contains: name,
+          contact_type: 'vendor',
+          per_page: '20'
+        });
+        const matches = (j?.contacts || []).map((c: any) => ({
+          contact_id: c.contact_id,
+          contact_name: c.contact_name,
+          contact_type: c.contact_type,
+          email: c.email,
+          status: c.status,
+          // TRN is the key field for Bill OCR validation.
+          trn: c.tax_reg_no || c.trn || ''
+        }));
+        return JSON.stringify({ error: null, matches, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), matches: [], apiUsage: lastApiUsage });
+      }
+    }
+
     // Historical FX rate for foreign-currency invoices. params = JSON
     // { from, to, date }. GCC pegs are constants (USD/SAR/QAR/OMR/KWD/BHD
     // are all pegged to USD, hence stable against AED); floating pairs
@@ -752,6 +806,89 @@ export const handler = async (event: Event) => {
         success: true,
         id: contact.contact_id || null,
         name: contact.contact_name || p.contact_name,
+        raw: j,
+        apiUsage: lastApiUsage
+      });
+    }
+
+    // Create a vendor (contact_type=vendor). Mirror of createCustomer —
+    // used by Bill OCR when the extracted vendor isn't in Zoho yet.
+    // payload = { contact_name, email?, phone?, country_code?, trn?,
+    //   currency_code? }.
+    if (kind === 'createVendor') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      if (!p.contact_name) return JSON.stringify({ error: 'contact_name is required' });
+      const wantedCode = (p.currency_code || 'AED').toUpperCase();
+      let resolvedCurrencyId: string | null = null;
+      try {
+        const curList = await zohoGet('settings/currencies', accessToken, region, { organization_id: orgId! });
+        const all = (curList?.currencies || []) as any[];
+        const hit = all.find((c: any) => String(c.currency_code || '').toUpperCase() === wantedCode);
+        if (hit) resolvedCurrencyId = String(hit.currency_id);
+        else {
+          const enabled = all.map((c: any) => c.currency_code).join(', ');
+          throw new Error(`Currency ${wantedCode} is not enabled in this Zoho organisation. Enabled: ${enabled || '(none)'}. Add it in Zoho → Settings → Currencies, then retry.`);
+        }
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e) });
+      }
+      const body: any = {
+        contact_name: p.contact_name,
+        contact_type: 'vendor',
+        currency_id: resolvedCurrencyId,
+        currency_code: wantedCode
+      };
+      if (p.email) body.email = p.email;
+      if (p.phone) body.phone = p.phone;
+      const cc = String(p.country_code || '').toUpperCase();
+      const isAE = cc === 'AE' || !cc; // default UAE
+      const isGCC = ['SA','OM','BH','QA','KW'].includes(cc);
+      const hasTrn = !!p.trn;
+      if (isAE) body.tax_treatment = hasTrn ? 'vat_registered' : 'vat_not_registered';
+      else if (isGCC) body.tax_treatment = hasTrn ? 'gcc_vat_registered' : 'gcc_vat_not_registered';
+      if (hasTrn) body.tax_reg_no = p.trn;
+      const j = await zohoPost('contacts', accessToken, region, { organization_id: orgId }, body);
+      const contact = j.contact || {};
+      return JSON.stringify({
+        error: null,
+        success: true,
+        id: contact.contact_id || null,
+        name: contact.contact_name || p.contact_name,
+        raw: j,
+        apiUsage: lastApiUsage
+      });
+    }
+
+    // Create a bill. Mirror of createInvoice but posts to /bills.
+    // payload = { vendor_id, bill_number, date, due_date?, line_items[],
+    //   currency_code, notes?, terms? }. Each line_item carries tax_id
+    //   from /settings/taxes (input VAT for bills).
+    if (kind === 'createBill') {
+      const payloadStr = event.arguments?.payload || '';
+      let p: any;
+      try { p = JSON.parse(payloadStr); } catch (_) { return JSON.stringify({ error: 'payload must be a JSON string' }); }
+      if (!p.vendor_id) return JSON.stringify({ error: 'vendor_id is required' });
+      if (!Array.isArray(p.line_items) || p.line_items.length === 0) return JSON.stringify({ error: 'at least one line_item is required' });
+      let j: any;
+      try {
+        j = await zohoPost('bills', accessToken, region, { organization_id: orgId }, p);
+      } catch (e: any) {
+        const hints: string[] = [];
+        if (p.tax_treatment !== undefined) hints.push(`tax_treatment="${p.tax_treatment}"`);
+        if (p.currency_code !== undefined) hints.push(`currency_code="${p.currency_code}"`);
+        if (p.bill_number  !== undefined) hints.push(`bill_number="${p.bill_number}"`);
+        const suffix = hints.length ? ' · sent: ' + hints.join(', ') : '';
+        console.error('[zoho-sync] createBill failed', { message: e?.message, payload: p });
+        throw new Error((e?.message || String(e)) + suffix);
+      }
+      const bill = j.bill || {};
+      return JSON.stringify({
+        error: null,
+        success: true,
+        id: bill.bill_id || null,
+        bill_number: bill.bill_number || p.bill_number,
         raw: j,
         apiUsage: lastApiUsage
       });
