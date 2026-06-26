@@ -5489,7 +5489,7 @@ td,th{padding:8px 12px;vertical-align:middle}
     <div style={{fontFamily:"'IBM Plex Sans',-apple-system,sans-serif",background:"#f7f5fc",color:"#1a1a2e",minHeight:"100vh",paddingLeft:SIDEBAR_W,transition:"padding-left 0.2s"}}>
 
       {/* ═══════════════ Left sidebar — steps + API usage ═══════════════ */}
-      <aside style={{position:"fixed",top:0,left:0,bottom:0,width:SIDEBAR_W,background:"linear-gradient(180deg,#ffffff,#f5f3fc)",borderRight:"1px solid #e2e2ea",display:"flex",flexDirection:"column",zIndex:50,transition:"width 0.2s",overflow:"hidden"}}>
+      <aside style={{position:"fixed",top:0,left:0,bottom:0,width:SIDEBAR_W,background:"linear-gradient(180deg,#ffffff,#f5f3fc)",borderRight:"1px solid #e2e2ea",display:"flex",flexDirection:"column",zIndex:50,transition:"width 0.2s",overflowX:"hidden",overflowY:"auto"}}>
         {/* Logo + collapse */}
         <div style={{padding:sidebarOpen?"12px 14px":"12px 6px",display:"flex",alignItems:"center",justifyContent:sidebarOpen?"space-between":"center",borderBottom:"1px solid #f0f0f4"}}>
           {sidebarOpen && <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase"}}>Navigation</span>}
@@ -5567,11 +5567,11 @@ td,th{padding:8px 12px;vertical-align:middle}
               const projects = projectLog[activeClientId] || [];
               const cName = (c && c.name) || activeClientName || "Client";
               const clientItems = [
-                {key:"projects",   label:"Projects",     icon:"📁", count: projects.length||undefined},
-                {key:"revenue",    label:"Revenue",      icon:"💰", count: ocrQueue.length||undefined},
-                {key:"masterData", label:"Master Data",  icon:"📚"},
-                {key:"settings",   label:"Settings",     icon:"⚙"},
-                {key:"activity",   label:"Activity",     icon:"📊"},
+                {key:"projects",   label:"Bank Statement Upload", icon:"🏦", count: projects.length||undefined},
+                {key:"revenue",    label:"Revenue",               icon:"💰", count: ocrQueue.length||undefined},
+                {key:"masterData", label:"Master Data",           icon:"📚"},
+                {key:"settings",   label:"Settings",              icon:"⚙"},
+                {key:"activity",   label:"Activity",              icon:"📊"},
               ];
               return <>
                 {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:"4px 10px 6px"}}>Client</div>}
@@ -5594,11 +5594,6 @@ td,th{padding:8px 12px;vertical-align:middle}
               {title:"Workspace", items:[
                 {key:"dashboard",label:"Dashboard",icon:"⌂"},
                 {key:"clients",label:"Clients",icon:"👥",count:clients.length},
-              ]},
-              {title:"Accounting Close", items:[
-                {key:"exceptions",label:"Exceptions",icon:"⚠",count:exceptionsOpen||undefined},
-                {key:"review",label:"Review Center",icon:"▤",count:reviewQueue||undefined},
-                {key:"posting",label:"Zoho Posting",icon:"↗",count:postingQueue||undefined},
               ]},
               {title:"System", items:[
                 {key:"guide",label:"Guide",icon:"📖"},
@@ -5821,10 +5816,11 @@ td,th{padding:8px 12px;vertical-align:middle}
                   {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length>0 && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(8,145,178,0.08)",color:"#0891b2",border:"1px solid rgba(8,145,178,0.2)"}}>👥 {(c.assignedTo||"").split(',').map(s=>s.trim()).filter(Boolean).length} assigned</span>}
                 </div>
               </div>
-              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {/* Header actions only make sense on the Bank Statement Upload tab. */}
+              {clientDetailTab==="projects" && <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                 <button onClick={startNewStatement} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 12px rgba(22,163,74,0.25)"}}>+ New Bank Statement</button>
                 {c.zohoOrgId && isAdmin && <button onClick={syncFromZoho} title="Refresh Chart of Accounts / Vendors / Customers from Zoho" style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"10px 16px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🔄 Sync from Zoho</button>}
-              </div>
+              </div>}
             </div>
             {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
             {clientDetailTab==="projects" && (
@@ -5881,8 +5877,8 @@ td,th{padding:8px 12px;vertical-align:middle}
               const pushed=drafts.filter(q=>['Pushed To Zoho','Sent','Partially Paid','Paid'].includes(q.status));
               const reviewItem=drafts.find(q=>q.id===ocrReviewId);
               const SUBT=[
-                {key:'invoices',label:'Revenue Invoices',icon:'🧾',count:pushed.length},
                 {key:'ocr',label:'Invoice OCR',icon:'🤖',count:drafts.filter(q=>!pushed.includes(q)).length},
+                {key:'invoices',label:'Revenue Invoices',icon:'🧾',count:pushed.length},
                 {key:'payments',label:'Payments Received',icon:'💳'}
               ];
               return <div>
@@ -6319,10 +6315,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <div>
                     <label style={{fontSize:10,color:"#888888"}}>Legal name (synced from Zoho organization)</label>
                     <div style={{padding:"8px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:4,background:"#f8f9fc",color:getClientData(c.id,"legal_name","")?"#1a1a2e":"#999999"}}>{getClientData(c.id,"legal_name","")||"— sync to fetch —"}</div>
-                  </div>
-                  <div>
-                    <label style={{fontSize:10,color:"#888888"}}>Trade name (optional, manual)</label>
-                    <input type="text" defaultValue={getClientData(c.id,"trade_name","")} onBlur={(e)=>setClientData(c.id,"trade_name",e.target.value.trim())} placeholder="e.g. shorter brand name" style={{width:"100%",padding:"8px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:4}} />
                   </div>
                   <div>
                     <label style={{fontSize:10,color:"#888888"}}>VAT TRN (synced from Zoho Settings → Taxes)</label>
