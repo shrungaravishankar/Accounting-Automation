@@ -345,9 +345,19 @@ export const handler = async (event: Event) => {
       (line.match(/\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?/g) || [])
         .map(parseAmount).filter((n) => n > 0);
     const labeledAmount = (labelRe: RegExp, excludeRe: RegExp | null): number | null => {
-      for (const ln of fullLines) {
+      for (let i = 0; i < fullLines.length; i++) {
+        const ln = fullLines[i];
         if (excludeRe && excludeRe.test(ln)) continue;
-        if (labelRe.test(ln)) { const a = amountsOn(ln); if (a.length) return a[a.length - 1]; }
+        if (!labelRe.test(ln)) continue;
+        const a = amountsOn(ln);
+        if (a.length) return a[a.length - 1];
+        // Table layouts split the label and its value into separate LINE
+        // blocks — look at the next few lines for the first amount.
+        for (let j = i + 1; j < Math.min(i + 4, fullLines.length); j++) {
+          if (excludeRe && excludeRe.test(fullLines[j])) continue;
+          const b = amountsOn(fullLines[j]);
+          if (b.length) return b[0];
+        }
       }
       return null;
     };
@@ -379,32 +389,41 @@ export const handler = async (event: Event) => {
     // (c) Grand total — the "Total" line, never a sub-total / balance / paid row.
     const rawGrandTotal = labeledAmount(/\btotal\b/i, /(sub[\s-]*total|balance|payment|paid|amount\s+(?:due|paid))/i);
 
-    // VAT percent — Textract gives us the TAX amount, not the rate. Derive
-    // from total/subtotal when possible. For UAE this usually rounds to 5.
+    // Totals reconciliation. Goal: subtotal = sum of taxable values, VAT is
+    // the tax amount, total = subtotal + VAT. Textract is unreliable here —
+    // it grabs the VAT-inclusive column as SUBTOTAL and "Balance Due 0.00" as
+    // TOTAL — so we derive from the most trustworthy anchors in order.
+    const round2 = (n: number) => Math.round(n * 100) / 100;
     let vatPercent: number | null = null;
     let subtotalN = parseAmount(subtotal?.value);
     const taxN = parseAmount(tax?.value);
     let totalN = parseAmount(total?.value);
-    // AnalyzeExpense often picks "Balance Due 0.00" or a payment row as TOTAL.
-    // Trust the labelled grand total from the raw text when they disagree.
-    if (rawGrandTotal && (totalN <= 0 || Math.abs(rawGrandTotal - totalN) > Math.max(1, rawGrandTotal * 0.02))) {
+
+    // Detected VAT rate (UAE standard supply is 5%; any printed % wins).
+    let detectedRate = 0;
+    const pctMatches = (fullText.match(/(\d{1,2}(?:\.\d+)?)\s*%/g) || [])
+      .map((s) => parseFloat(s)).filter((p) => p > 0 && p <= 20);
+    if (pctMatches.length) detectedRate = pctMatches.find((p) => Math.round(p) === 5) || pctMatches[0];
+    if (!detectedRate && taxN > 0) detectedRate = 5;  // UAE default when VAT is charged
+
+    if (rawGrandTotal && rawGrandTotal > 0) {
+      // (1) A labelled grand total is ground truth → taxable = total − VAT.
       totalN = rawGrandTotal;
+      if (taxN >= 0) { const t = round2(totalN - taxN); if (t > 0) subtotalN = t; }
+    } else if (taxN > 0 && detectedRate > 0) {
+      // (2) No clean total, but VAT amount + rate gives us the taxable base.
+      subtotalN = round2(taxN / (detectedRate / 100));
+      totalN = round2(subtotalN + taxN);
+    } else if (totalN > 0 && taxN >= 0) {
+      // (3) Trust Textract's total; back out the taxable base.
+      const t = round2(totalN - taxN); if (t > 0) subtotalN = t;
+    } else if (subtotalN > 0) {
+      // (4) Last resort: build the total up from the subtotal.
+      totalN = round2(subtotalN + taxN);
     }
-    // Reconciliation: when Textract returns a subtotal that clearly does not
-    // match total/VAT (busy invoice layouts often grab a stray figure from
-    // another column), prefer total − VAT. Threshold: ≥ AED 1 OR 5 % of total.
-    if (totalN > 0 && taxN >= 0) {
-      const expected = subtotalN + taxN;
-      const drift = Math.abs(expected - totalN);
-      const tolerance = Math.max(1, totalN * 0.05);
-      if (subtotalN <= 0 || drift > tolerance) {
-        const derived = totalN - taxN;
-        if (derived > 0) subtotalN = Math.round(derived * 100) / 100;
-      }
-    }
+
     if (subtotalN > 0 && taxN > 0) {
-      const pct = (taxN / subtotalN) * 100;
-      vatPercent = Math.round(pct * 100) / 100;
+      vatPercent = round2((taxN / subtotalN) * 100);
     }
 
     // Aggregate line items across every page, de-duplicating identical
@@ -418,6 +437,19 @@ export const handler = async (event: Event) => {
         liSeen.add(key);
         lineItems.push(li);
       }
+    }
+    // Normalize line amounts to the TAXABLE base (what VAT is computed on) and
+    // default missing quantities to 1. Textract often returns each line's
+    // VAT-inclusive "Amount" column; when the line total sums to the grand
+    // total (gross) rather than the subtotal, strip VAT proportionally so the
+    // amounts reconcile with the taxable subtotal.
+    const sumLines = lineItems.reduce((s, li) => s + (li.amount || 0), 0);
+    const near = (a: number, b: number) => b > 0 && Math.abs(a - b) <= Math.max(1, b * 0.03);
+    const linesAreGross = subtotalN > 0 && sumLines > 0 && near(sumLines, totalN) && !near(sumLines, subtotalN);
+    for (const li of lineItems) {
+      if (!li.quantity || li.quantity <= 0) li.quantity = 1;
+      if (linesAreGross) li.amount = round2(li.amount * (subtotalN / sumLines));
+      li.rate = li.quantity > 0 ? round2(li.amount / li.quantity) : li.amount;
     }
 
     // ---- Raw text corpus (labels + values from every detected field) ----
