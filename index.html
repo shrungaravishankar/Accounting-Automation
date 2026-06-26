@@ -7572,27 +7572,18 @@ td,th{padding:8px 12px;vertical-align:middle}
               <p style={{color:"#888888",fontSize:13}}>{transactions.length} transactions from {bankFileName}<span style={{marginLeft:8,fontSize:10,padding:"2px 8px",borderRadius:4,background:typeBadge.bg,color:typeBadge.color,border:"1px solid "+typeBadge.border}}>{typeBadge.text}</span></p>
             </div>
             <button onClick={()=>{
-              // Validate balances are verified before classification
-              if(!userOpeningBal&&!userClosingBal){
-                alert("⚠ Please verify balances before running classification.\n\nEnter the Opening Balance (as per your books) and Closing Balance (as per the bank statement) in the verification fields below.\n\nThis ensures the imported data is complete and accurate before processing.");
-                return;
-              }
-              if(!userOpeningBal){
-                alert("⚠ Please enter the Opening Balance as per your books.\n\nThis is required to confirm no transactions are missing from the beginning of the statement.");
-                return;
-              }
-              if(!userClosingBal){
-                alert("⚠ Please enter the Closing Balance as per the bank statement.\n\nThis is required to confirm no transactions are missing from the end of the statement.");
-                return;
-              }
+              // The statement-vs-Zoho closing balance is now an inline
+              // panel below — non-blocking. If there's a mismatch the
+              // accountant sees the diff before clicking; we no longer
+              // hand-key opening/closing balances.
               const totalDebit=transactions.reduce((s,t)=>s+t.debit,0);
               const totalCredit=transactions.reduce((s,t)=>s+t.credit,0);
-              const userOB=parseFloat(userOpeningBal);
-              const userCB=parseFloat(userClosingBal);
-              const expectedClosing=userOB+totalCredit-totalDebit;
-              if(Math.abs(expectedClosing-userCB)>=0.01){
-                const diff=Math.abs(expectedClosing-userCB);
-                if(!confirm("⚠ Balance mismatch detected!\n\nOpening Balance: "+fmt(userOB)+"\n+ Total Credits: "+fmt(totalCredit)+"\n− Total Debits: "+fmt(totalDebit)+"\n= Expected Closing: "+fmt(expectedClosing)+"\n\nYour Closing Balance: "+fmt(userCB)+"\nDifference: "+fmt(diff)+"\n\nPossible reasons:\n• Missing transactions in the statement\n• Duplicate entries\n• Opening balance is incorrect\n\nDo you still want to proceed with classification?")){return;}
+              const last=transactions[transactions.length-1];
+              const stmtClosing = last && last.balance ? last.balance : null;
+              const sb = (bankAccounts||[]).find(ba => ba.account_name === bankAccount);
+              if(sb && stmtClosing!==null && Math.abs(Number(sb.balance||0) - stmtClosing) >= 0.01){
+                const diff = Math.abs(Number(sb.balance||0) - stmtClosing);
+                if(!confirm("⚠ Closing balance differs from Zoho.\n\nStatement closing: "+fmt(stmtClosing)+"\nZoho closing:     "+fmt(sb.balance)+"\nDifference:       "+fmt(diff)+"\n\nReasons could be missing transactions, unposted entries in Zoho, or out-of-date sync. Proceed anyway?")){return;}
               }
               runClassification();
             }} disabled={processing} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 24px",fontSize:13,fontWeight:600,cursor:processing?"wait":"pointer",opacity:processing?0.7:1}}>{processing?"🤖 Classifying...":"🤖 Run Classification"}</button>
@@ -7627,18 +7618,20 @@ td,th{padding:8px 12px;vertical-align:middle}
               openingBal=closingBal-net;
             }
 
-            // Verification against user-entered balances
-            const userOB=userOpeningBal!==""?parseFloat(userOpeningBal):null;
-            const userCB=userClosingBal!==""?parseFloat(userClosingBal):null;
-            const obMatch=userOB!==null?Math.abs(userOB-openingBal)<0.01:null;
-            const cbMatch=userCB!==null?Math.abs(userCB-closingBal)<0.01:null;
-            // Cross-check: user opening + credits - debits should = user closing
-            const crossCheck=(userOB!==null&&userCB!==null)?Math.abs((userOB+totalCredit-totalDebit)-userCB)<0.01:null;
+            // Look up the selected bank in the synced list to surface Zoho's
+            // current book balance + last-synced date. This replaces the
+            // old "Verify as per books" panel — the accountant no longer
+            // hand-keys balances; we use Zoho's source of truth directly.
+            const selectedBank = (bankAccounts||[]).find(ba => ba.account_name === bankAccount);
+            const bookBalance = selectedBank ? Number(selectedBank.balance||0) : null;
+            const bookSyncedAt = selectedBank ? (selectedBank.last_synced_date||"") : "";
+            const closingMatch = bookBalance!==null ? Math.abs(bookBalance - closingBal) < 0.01 : null;
+            const closingDiff = bookBalance!==null ? Math.abs(bookBalance - closingBal) : 0;
 
-            return <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            return <div style={{display:"flex",flexDirection:"column",gap:10}}>
               {/* Auto-calculated row */}
               <div style={{display:"flex",gap:16,padding:"12px 16px",background:"#f8f9fc",borderRadius:8,border:"1px solid #e2e2ea",flexWrap:"wrap",alignItems:"center"}}>
-                <span style={{fontSize:11,color:"#777777",fontWeight:600}}>Auto-Calculated:</span>
+                <span style={{fontSize:11,color:"#777777",fontWeight:600}}>From statement:</span>
                 <span style={{fontSize:12,color:"#888888"}}>Txns: <strong style={{color:"#1a1a2e"}}>{transactions.length}</strong></span>
                 <span style={{fontSize:12,color:"#888888"}}>Opening: <strong style={{color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(openingBal)}</strong></span>
                 <span style={{fontSize:12,color:"#888888"}}>Total Dr: <strong style={{color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(totalDebit)}</strong></span>
@@ -7646,28 +7639,20 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <span style={{fontSize:12,color:"#888888"}}>Closing: <strong style={{color:"#0891b2",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(closingBal)}</strong></span>
               </div>
 
-              {/* User verification row */}
-              <div style={{display:"flex",gap:12,padding:"14px 16px",background:"rgba(8,145,178,0.03)",borderRadius:8,border:"1px solid rgba(8,145,178,0.15)",flexWrap:"wrap",alignItems:"center"}}>
-                <span style={{fontSize:11,color:"#0891b2",fontWeight:600,whiteSpace:"nowrap"}}>🔍 Verify (as per books):</span>
-                <div style={{display:"flex",alignItems:"center",gap:4}}>
-                  <span style={{fontSize:11,color:"#888888",whiteSpace:"nowrap"}}>Opening Bal:</span>
-                  <input type="number" value={userOpeningBal} onChange={e=>setUserOpeningBal(e.target.value)} placeholder={fmt(openingBal)} style={{width:120,background:"#ffffff",border:"1px solid "+(obMatch===true?"rgba(22,163,74,0.5)":obMatch===false?"rgba(220,38,38,0.5)":"#e2e2ea"),borderRadius:6,padding:"6px 10px",color:"#1a1a2e",fontSize:12,outline:"none",fontFamily:"'IBM Plex Mono',monospace"}} />
-                  {obMatch===true&&<span style={{color:"#16a34a",fontSize:12}}>✓</span>}
-                  {obMatch===false&&<span style={{color:"#dc2626",fontSize:10}}>Diff: {fmt(Math.abs(userOB-openingBal))}</span>}
+              {/* Zoho Books reconciliation snapshot — fetched on bank sync. */}
+              {selectedBank ? (
+                <div style={{display:"flex",gap:14,padding:"12px 16px",background:closingMatch?"rgba(22,163,74,0.04)":closingMatch===false?"rgba(220,38,38,0.04)":"#f8f9fc",border:"1px solid "+(closingMatch?"rgba(22,163,74,0.25)":closingMatch===false?"rgba(220,38,38,0.25)":"#e2e2ea"),borderRadius:8,flexWrap:"wrap",alignItems:"center"}}>
+                  <span style={{fontSize:11,fontWeight:700,color:"#4D3FA0",whiteSpace:"nowrap"}}>📊 Per Zoho Books</span>
+                  <span style={{fontSize:11,color:"#777"}}>{selectedBank.account_name}</span>
+                  <span style={{fontSize:12,color:"#888"}}>Balance in Zoho: <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>{fmt(bookBalance)}</strong></span>
+                  {bookSyncedAt && <span style={{fontSize:11,color:"#888"}}>Last synced: <strong style={{color:"#1a1a2e",fontFamily:"'IBM Plex Mono',monospace"}}>{bookSyncedAt}</strong></span>}
+                  <div style={{flex:1}}/>
+                  {closingMatch===true && <span style={{fontSize:11,color:"#16a34a",fontWeight:700,whiteSpace:"nowrap"}}>✓ Statement closing matches Zoho ({fmt(closingBal)})</span>}
+                  {closingMatch===false && <span style={{fontSize:11,color:"#dc2626",fontWeight:700,whiteSpace:"nowrap"}}>⚠ Difference vs statement closing: {fmt(closingDiff)}</span>}
                 </div>
-                <div style={{display:"flex",alignItems:"center",gap:4}}>
-                  <span style={{fontSize:11,color:"#888888",whiteSpace:"nowrap"}}>Closing Bal:</span>
-                  <input type="number" value={userClosingBal} onChange={e=>setUserClosingBal(e.target.value)} placeholder={fmt(closingBal)} style={{width:120,background:"#ffffff",border:"1px solid "+(cbMatch===true?"rgba(22,163,74,0.5)":cbMatch===false?"rgba(220,38,38,0.5)":"#e2e2ea"),borderRadius:6,padding:"6px 10px",color:"#1a1a2e",fontSize:12,outline:"none",fontFamily:"'IBM Plex Mono',monospace"}} />
-                  {cbMatch===true&&<span style={{color:"#16a34a",fontSize:12}}>✓</span>}
-                  {cbMatch===false&&<span style={{color:"#dc2626",fontSize:10}}>Diff: {fmt(Math.abs(userCB-closingBal))}</span>}
-                </div>
-                {crossCheck!==null&&<div style={{borderLeft:"1px solid rgba(8,145,178,0.2)",paddingLeft:12,display:"flex",alignItems:"center",gap:4}}>
-                  {crossCheck?
-                    <span style={{fontSize:11,color:"#16a34a",fontWeight:600}}>✅ Balances tally</span>:
-                    <span style={{fontSize:11,color:"#dc2626",fontWeight:600}}>⚠ Mismatch: Opening ({fmt(userOB)}) + Cr ({fmt(totalCredit)}) - Dr ({fmt(totalDebit)}) = {fmt(userOB+totalCredit-totalDebit)} ≠ Closing ({fmt(userCB)})</span>
-                  }
-                </div>}
-              </div>
+              ) : (
+                <div style={{padding:"10px 14px",background:"rgba(217,119,6,0.06)",border:"1px solid rgba(217,119,6,0.2)",borderRadius:8,fontSize:11,color:"#92400e"}}>This bank is not in the synced Zoho bank list. Sync from Zoho on the Bank Statement Upload tab to enable the Zoho-side balance check.</div>
+              )}
             </div>;
           })()}
           <div style={{borderRadius:10,border:"1px solid #e2e2ea",overflow:"hidden"}}><div style={{overflowX:"auto"}}>
@@ -7710,24 +7695,13 @@ td,th{padding:8px 12px;vertical-align:middle}
             {[{label:"Expenses",val:expenseCount,color:"#dc2626",bg:"rgba(220,38,38,0.08)"},{label:"Revenue",val:revenueCount,color:"#16a34a",bg:"rgba(22,163,74,0.08)"},{label:"Auto-Assigned",val:stats.auto,color:"#6958C2",bg:"rgba(105,88,194,0.08)"},{label:"Suspense",val:stats.suspense,color:"#d97706",bg:"rgba(217,119,6,0.08)"},{label:"Confirmed",val:stats.confirmed,color:"#16a34a",bg:"rgba(22,163,74,0.08)"}].map(s=><div key={s.label} style={{background:s.bg,borderRadius:8,padding:"8px 14px",border:"1px solid "+s.color+"22",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18,fontWeight:700,color:s.color,fontFamily:"'IBM Plex Mono',monospace",lineHeight:1}}>{s.val}</span><span style={{fontSize:12,color:"#555",fontWeight:500}}>{s.label}</span></div>)}
           </div>
 
-          {/* Zoho-style sub-tabs: Journal / Expenses / Bills (debits) · Revenue Invoices (credits) */}
-          {(()=>{
-            const debits = classifiedTxns.filter(t=>t.debit>0);
-            const journalCount = debits.filter(t=>(t.entryMode||"expense")==="journal").length;
-            const billCount = debits.filter(t=>(t.entryMode||"expense")==="billpay").length;
-            const expenseOnlyCount = debits.filter(t=>(t.entryMode||"expense")==="expense").length;
-            const TAB = ({active,onClick,color,label,count,icon})=>(
-              <button onClick={onClick} style={{padding:"10px 20px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:active?"2px solid "+color:"2px solid transparent",background:"transparent",color:active?color:"#777",display:"inline-flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}}>{icon}{label} <span style={{fontSize:11,color:active?color:"#aaa",background:active?color+"15":"#f0f0f4",padding:"1px 7px",borderRadius:10,fontWeight:700}}>{count}</span></button>
-            );
-            return <div style={{display:"flex",gap:0,borderBottom:"1px solid #e2e2ea",flexWrap:"wrap"}}>
-              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="expense"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("expense");setFilterStatus("all");}} color="#dc2626" label="Expenses" count={expenseOnlyCount} icon="💸" />
-              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="billpay"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("billpay");setFilterStatus("all");}} color="#0891b2" label="Bills" count={billCount} icon="🧾" />
-              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="journal"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("journal");setFilterStatus("all");}} color="#6958C2" label="Journals" count={journalCount} icon="📓" />
-              <TAB active={reviewTab==="expenses"&&txnTypeFilter==="all"} onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("all");setFilterStatus("all");}} color="#888" label="All debits" count={expenseCount} icon="⇩" />
-              <div style={{flex:1,borderBottom:"1px solid transparent"}}/>
-              <TAB active={reviewTab==="revenue"} onClick={()=>{setReviewTab("revenue");setTxnTypeFilter("all");setFilterStatus("all");}} color="#16a34a" label="Revenue Invoices" count={revenueCount} icon="💰" />
-            </div>;
-          })()}
+          {/* Simple Debits / Credits tabs. Per-row Type (Expense / Bill /
+              Journal) is still selectable inline; the sub-tab bifurcation
+              was removed by request. */}
+          <div style={{display:"flex",gap:0,borderBottom:"1px solid #e2e2ea"}}>
+            <button onClick={()=>{setReviewTab("expenses");setTxnTypeFilter("all");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="expenses"?"2px solid #dc2626":"2px solid transparent",background:"transparent",color:reviewTab==="expenses"?"#dc2626":"#777777"}}>💸 Debits ({expenseCount})</button>
+            <button onClick={()=>{setReviewTab("revenue");setTxnTypeFilter("all");setFilterStatus("all");}} style={{padding:"10px 24px",fontSize:13,fontWeight:600,cursor:"pointer",border:"none",borderBottom:reviewTab==="revenue"?"2px solid #16a34a":"2px solid transparent",background:"transparent",color:reviewTab==="revenue"?"#16a34a":"#777777"}}>💰 Credits ({revenueCount})</button>
+          </div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
               <input type="text" placeholder="Search..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 12px",color:"#1a1a2e",fontSize:12,width:180}}/>
@@ -7773,9 +7747,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               </div>
               <button onClick={confirmAll} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:"#888888",fontSize:10,cursor:"pointer"}}>✓ All</button>
               <button onClick={unconfirmAll} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:"#888888",fontSize:10,cursor:"pointer"}}>✗ All</button>
-              <button onClick={()=>setShowAddLedger(!showAddLedger)} style={{background:showAddLedger?"rgba(8,145,178,0.15)":"#f8f9fc",border:"1px solid "+(showAddLedger?"rgba(8,145,178,0.4)":"#e2e2ea"),borderRadius:6,padding:"6px 12px",color:"#0891b2",fontSize:10,fontWeight:600,cursor:"pointer"}}>+ New Ledger</button>
               <button onClick={generateExport} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:6,padding:"6px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Prepare Accounting Entries →</button>
-              <button onClick={()=>{ setPushAfterPrepare(true); generateExport(); }} disabled={pushing} title="Build the journal entries and push them straight to Zoho — skips the Step 5 preview." style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:6,padding:"6px 18px",fontSize:12,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 2px 10px rgba(22,163,74,0.25)"}}>⚡ {pushing?"Posting…":"Generate & Push to Zoho"}</button>
             </div>
           </div>
 
@@ -7871,7 +7843,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,tableLayout:"auto"}}><thead><tr style={{background:"#f8f9fc"}}>
               <th style={{padding:"10px 8px",width:34,textAlign:"center",borderBottom:"1px solid #e2e2ea"}}><input type="checkbox" checked={filteredTxns.length>0&&filteredTxns.every(t=>selectedIds.has(t.id))} onChange={toggleSelectAll} style={{cursor:"pointer",accentColor:"#6958C2"}} /></th>
               {["Date","Description",reviewTab==="expenses"?"Debit":"Credit",reviewTab==="expenses"?"":"Customer",reviewTab==="expenses"?"Ledger":"Ledger / Payment","Posts To",reviewTab==="expenses"?"Type":"",reviewTab==="expenses"?"Vendor":"","Conf.","Status"].filter(Boolean).map(h=><th key={h} style={{padding:"10px 10px",textAlign:h==="Debit"||h==="Credit"?"right":"left",color:"#666666",fontWeight:700,borderBottom:"1px solid #e2e2ea",whiteSpace:"nowrap",fontSize:11,letterSpacing:"0.02em"}}>{h}</th>)}
-            </tr></thead><tbody>{filteredTxns.map((t,i)=><tr key={t.id} style={{borderBottom:"1px solid #ffffff",background:selectedIds.has(t.id)?"rgba(105,88,194,0.08)":t.status==="Suspense"?"rgba(217,119,6,0.04)":i%2===0?"transparent":"rgba(0,20,65,0.025)"}}>
+            </tr></thead><tbody>{filteredTxns.map((t,i)=><tr key={t.id} style={{borderBottom:"1px solid #f0f0f4",background:selectedIds.has(t.id)?"rgba(105,88,194,0.06)":i%2===0?"#ffffff":"#fafbfc"}}>
               <td style={{padding:"9px 8px",textAlign:"center"}}><input type="checkbox" checked={selectedIds.has(t.id)} onChange={()=>toggleSelect(t.id)} style={{cursor:"pointer",accentColor:"#6958C2"}} /></td>
               <td style={{padding:"9px 10px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,whiteSpace:"nowrap",color:"#444"}}>{t.date}</td>
               <td style={{padding:"9px 10px",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:"#1a1a2e"}} title={t.description}>{t.description}</td>
@@ -8136,7 +8108,10 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <p style={{color:"#888888",fontSize:13}}>Bank: <strong style={{color:"#16a34a"}}>{bankAccount}</strong></p>
                 </div>
               </div>
-              <button onClick={exportCSV} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:12,fontWeight:700,cursor:"pointer"}}>⬇ Download Accounting Package</button>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                <button onClick={exportCSV} style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"10px 20px",color:"#4D3FA0",fontSize:12,fontWeight:700,cursor:"pointer"}}>⬇ Download Import files for Zoho</button>
+                <button onClick={prePushCheck} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:8,padding:"10px 22px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Posting…":"Generate & Push to Zoho"}</button>
+              </div>
             </div>
 
             {/* Summary cards */}

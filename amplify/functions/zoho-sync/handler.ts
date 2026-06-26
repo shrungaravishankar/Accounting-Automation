@@ -301,6 +301,10 @@ export const handler = async (event: Event) => {
           currency_code: a.currency_code || '',
           uncategorized_transactions: Number(a.uncategorized_transactions || 0),
           is_primary_account: !!a.is_primary_account,
+          // Books balance + last-synced date — used by the upload screen
+          // to sanity-check the CSV's auto-calculated closing balance.
+          balance: Number(a.balance || 0),
+          last_synced_date: a.last_synced_date || a.last_imported_date || '',
           status: a.status || 'active'
         }));
       return JSON.stringify({ error: null, items: accounts, apiUsage: lastApiUsage });
