@@ -3831,9 +3831,18 @@ function App(){
     try {
       const drafts=[];
       for(const f of files){
-        const b64 = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result||'').split(',')[1]); r.onerror=rej; r.readAsDataURL(f); });
+        if(f.size > 10*1024*1024){ alert(f.name+' exceeds 10 MB — Textract sync limit.'); continue; }
+        // Match Revenue OCR's reader pattern: read as a data URL ("data:...;base64,xxx")
+        // and send the full string. The Lambda strips the prefix itself.
+        // For preview storage we keep only the base64 chunk so it embeds cleanly.
+        const dataUrl = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result||'')); r.onerror=()=>rej(new Error('Could not read '+f.name)); r.readAsDataURL(f); });
+        const idx = dataUrl.indexOf(',');
+        const b64Only = idx>=0 ? dataUrl.slice(idx+1) : dataUrl;
         let ocr;
-        try { ocr = await window.invoiceOcr(b64, f.type); } catch(e){ ocr = { error: e.message||String(e) }; }
+        try { ocr = await window.invoiceOcr(dataUrl, f.type); } catch(e){ ocr = { error: e.message||String(e) }; }
+        // Debug: keep a snapshot of what the Lambda actually returned so the
+        // reviewer can inspect it when fields look wrong.
+        console.log('[bill-ocr] '+f.name+' →', ocr);
         const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (String(Date.now())+Math.random());
         // The OCR Lambda returns fields at the TOP LEVEL (not nested
         // under `fields`). For a bill, semantics:
@@ -3855,7 +3864,7 @@ function App(){
           docType: 'bill',
           fileName: f.name,
           fileType: f.type,
-          fileBase64: b64,  // kept so we can render a preview alongside the review
+          fileBase64: b64Only,  // kept so we can render a preview alongside the review
           uploadedAt: Date.now(),
           vendorName: (ocr && (ocr.vendor_name || '')) || '',
           vendorTrn:  (ocr && (ocr.vendor_trn  || '')) || '',
@@ -6836,6 +6845,12 @@ td,th{padding:8px 12px;vertical-align:middle}
 
                       {d.status==='Pushed To Zoho' && <div style={{marginTop:12,padding:"8px 12px",background:"rgba(22,163,74,0.05)",border:"1px solid rgba(22,163,74,0.25)",borderRadius:6,fontSize:11,color:"#15803d"}}>✓ Pushed to Zoho as bill <strong style={{fontFamily:"'IBM Plex Mono',monospace"}}>{d.pushedBillNumber||d.pushedBillId}</strong> on {d.pushedAt?new Date(d.pushedAt).toLocaleString():'—'}.</div>}
                       {d.ocrError && <div style={{marginTop:12,padding:"8px 12px",background:"rgba(220,38,38,0.05)",border:"1px solid rgba(220,38,38,0.25)",borderRadius:6,fontSize:11,color:"#dc2626"}}>OCR error: {d.ocrError}. You can still key the fields manually above.</div>}
+                      {/* Debug: raw Textract response. Helps diagnose when
+                          extraction comes back empty — collapsed by default. */}
+                      <details style={{marginTop:12}}>
+                        <summary style={{fontSize:10,fontWeight:700,letterSpacing:"0.04em",color:"#888",textTransform:"uppercase",cursor:"pointer"}}>Raw OCR response (debug)</summary>
+                        <pre style={{marginTop:6,padding:10,background:"#0d1117",color:"#c9d1d9",borderRadius:6,fontSize:10,fontFamily:"'IBM Plex Mono',monospace",overflow:"auto",maxHeight:360}}>{d.ocrRaw ? JSON.stringify(d.ocrRaw, null, 2) : '(no payload stored — re-upload this bill to capture it)'}</pre>
+                      </details>
                     </div>;
                   })()}
                 </div>}
