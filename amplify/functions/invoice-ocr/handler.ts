@@ -370,20 +370,21 @@ export const handler = async (event: Event) => {
     const trnPool = labeledTrns.length ? labeledTrns : (fullText.match(/\b\d{15}\b/g) || []);
     if (!vendorTrn && trnPool[0]) vendorTrn = trnPool[0];
     if (!receiverTrn && trnPool[1] && trnPool[1] !== vendorTrn) receiverTrn = trnPool[1];
-    // (b) Bill number — a labelled invoice/bill no first, else a bare "# REF"
-    // near the top. Skip PO / order / account references.
+    // (b) Bill number — match against the JOINED text, not per line. Textract
+    // chunks table cells into separate LINE blocks (and does so inconsistently
+    // run to run), so a per-line scan misses "# BCL/2031" whenever the "#" and
+    // the ref land in different blocks. \s spans the newline, so this is stable.
     let rawInvoiceNo: string | null = null;
-    const invLabelRe = /(?:tax\s+invoice|invoice|bill)\s*(?:no\.?|number|num|#|:)\s*[:#\-]?\s*([A-Za-z0-9][A-Za-z0-9/\-]{1,24})/i;
-    for (const ln of fullLines) {
-      if (/\b(p\.?\s*o\.?|purchase\s+order|order|lpo|account|trn)\b/i.test(ln)) continue;
-      const m = ln.match(invLabelRe);
-      if (m && m[1] && !/^(date|no|number|num)$/i.test(m[1])) { rawInvoiceNo = m[1]; break; }
-    }
+    // Explicit "Invoice/Bill No: X".
+    const invLabel = fullText.match(/(?:tax\s+invoice|invoice|bill)\s*(?:no\.?|number|num)\s*[:.#\-]*\s*([A-Za-z0-9][A-Za-z0-9/\-]{1,24})/i);
+    if (invLabel && invLabel[1] && !/^(date|no|number|num)$/i.test(invLabel[1])) rawInvoiceNo = invLabel[1].trim();
+    // Else the bare "# REF" header form (e.g. "# BCL/2031"). Skip refs whose
+    // preceding text marks them as a PO / order / purchase reference.
     if (!rawInvoiceNo) {
-      for (const ln of fullLines.slice(0, 18)) {
-        if (/\b(order|p\.?\s*o\.?|lpo|account|trn)\b/i.test(ln)) continue;
-        const m = ln.match(/#\s*([A-Za-z]{1,6}[\/\-]?\d{2,}[A-Za-z0-9/\-]*)/);
-        if (m && m[1]) { rawInvoiceNo = m[1]; break; }
+      for (const mm of fullText.matchAll(/([A-Za-z.\s]{0,16})#\s*([A-Za-z]{1,6}[\/\-]?\d{2,}[A-Za-z0-9/\-]*)/g)) {
+        if (/\b(order|p\.?\s*o|lpo|purchase)\b/i.test(mm[1])) continue;
+        rawInvoiceNo = mm[2].trim();
+        break;
       }
     }
     // (c) Grand total — the "Total" line, never a sub-total / balance / paid row.

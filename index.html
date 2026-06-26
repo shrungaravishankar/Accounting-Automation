@@ -3883,7 +3883,7 @@ function App(){
         const lineItems = lineItemsRaw.map((li,i)=>({
           id: 'li-'+id.slice(0,8)+'-'+i,
           description: li.description || '',
-          quantity: Number(li.quantity || 1),
+          quantity: (Number.isFinite(Number(li.quantity)) && Number(li.quantity) > 0 ? Number(li.quantity) : 1),
           rate: Number(li.rate || li.amount || 0),
           amount: Number(li.amount || (li.rate||0) * (li.quantity||1) || 0),
           accountId: '',  // chosen by the user, like Zoho's manual bill entry
@@ -6819,7 +6819,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                                       <AutoGrowText value={li.description} onChange={e=>setLine(li.id,{description:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,whiteSpace:"pre-wrap",wordBreak:"break-word"}} />
                                     </td>
                                     <td style={{padding:"6px 10px",width:60}}>
-                                      <input type="number" step="0.01" value={li.quantity||1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} />
+                                      <input type="number" step="0.01" value={(Number.isFinite(Number(li.quantity)) && Number(li.quantity)>0) ? li.quantity : 1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)||1})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} />
                                     </td>
                                     <td style={{padding:"6px 10px",width:100}}>
                                       <input type="number" step="0.01" value={li.amount||0} onChange={e=>setLine(li.id,{amount:Number(e.target.value)})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}} />
