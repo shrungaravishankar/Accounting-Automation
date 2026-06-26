@@ -327,12 +327,14 @@ export const handler = async (event: Event) => {
     const trnCandidates = getAllSummary(doc, ['VENDOR_VAT_NUMBER', 'RECEIVER_VAT_NUMBER', 'TAX_PAYER_ID']);
     let vendorTrn: string | null = null;
     let receiverTrn: string | null = null;
+    // A real UAE TRN is 15 digits and never all-the-same-digit (e.g.
+    // 000000000000000 is a "not VAT-registered" placeholder some systems print).
+    const validTrn = (s: string) => /^\d{15}$/.test(s) && !/^(\d)\1{14}$/.test(s);
     for (const c of trnCandidates) {
       const digits = c.value.replace(/\D/g, '');
-      if (digits.length === 15) {
-        if (c.label === 'VENDOR_VAT_NUMBER') vendorTrn = digits;
-        else if (c.label === 'RECEIVER_VAT_NUMBER') receiverTrn = digits;
-      }
+      if (!validTrn(digits)) continue;
+      if (c.label === 'VENDOR_VAT_NUMBER') vendorTrn = digits;
+      else if (c.label === 'RECEIVER_VAT_NUMBER') receiverTrn = digits;
     }
 
     // ---- Raw-text recovery from DetectDocumentText ----
@@ -361,15 +363,31 @@ export const handler = async (event: Event) => {
       }
       return null;
     };
-    // (a) TRNs — prefer 15-digit runs explicitly labelled "TRN".
-    const labeledTrns: string[] = [];
-    for (const ln of fullLines) {
-      const m = ln.match(/\bTRN\b[^0-9]{0,15}(\d{15})\b/i);
-      if (m) labeledTrns.push(m[1]);
+    // (a) TRNs — associate each 15-digit run with the vendor or the customer by
+    // PROXIMITY to their names in the text. The vendor's TRN sits in the vendor
+    // ("From") block; the customer's by the "To" / Bill-To block. This avoids
+    // grabbing the customer's TRN (which often appears first in document order)
+    // as the vendor's. Placeholder all-same-digit TRNs are ignored.
+    const trnHits = [...fullText.matchAll(/\b(\d{15})\b/g)]
+      .map((m) => ({ trn: m[1], idx: m.index || 0 }))
+      .filter((h) => validTrn(h.trn));
+    const lc = fullText.toLowerCase();
+    const anchorOf = (name: string | undefined) => {
+      const k = (name || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim()
+        .split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+      return k ? lc.indexOf(k) : -1;
+    };
+    const vPos = anchorOf(vendor?.value);
+    const rPos = anchorOf(receiver?.value);
+    for (const h of trnHits) {
+      const dV = vPos >= 0 ? Math.abs(h.idx - vPos) : Number.POSITIVE_INFINITY;
+      const dR = rPos >= 0 ? Math.abs(h.idx - rPos) : Number.POSITIVE_INFINITY;
+      if (dV <= dR) { if (!vendorTrn) vendorTrn = h.trn; }
+      else if (!receiverTrn) receiverTrn = h.trn;
     }
-    const trnPool = labeledTrns.length ? labeledTrns : (fullText.match(/\b\d{15}\b/g) || []);
-    if (!vendorTrn && trnPool[0]) vendorTrn = trnPool[0];
-    if (!receiverTrn && trnPool[1] && trnPool[1] !== vendorTrn) receiverTrn = trnPool[1];
+    // Fallbacks (issuer first, customer second) if proximity left gaps.
+    if (!vendorTrn && trnHits[0]) vendorTrn = trnHits[0].trn;
+    if (!receiverTrn) { const other = trnHits.find((h) => h.trn !== vendorTrn); if (other) receiverTrn = other.trn; }
     // (b) Bill number — match against the JOINED text, not per line. Textract
     // chunks table cells into separate LINE blocks (and does so inconsistently
     // run to run), so a per-line scan misses "# BCL/2031" whenever the "#" and
@@ -387,45 +405,56 @@ export const handler = async (event: Event) => {
         break;
       }
     }
-    // (c) Grand total — the "Total" line, never a sub-total / balance / paid row.
-    const rawGrandTotal = labeledAmount(/\btotal\b/i, /(sub[\s-]*total|balance|payment|paid|amount\s+(?:due|paid))/i);
-
-    // Totals reconciliation. Goal: subtotal = sum of taxable values, VAT is
-    // the tax amount, total = subtotal + VAT. Textract is unreliable here —
-    // it grabs the VAT-inclusive column as SUBTOTAL and "Balance Due 0.00" as
-    // TOTAL — so we derive from the most trustworthy anchors in order.
+    // Totals reconciliation. The reliable invariant on a UAE tax invoice is
+    // total = subtotal + VAT, with VAT = subtotal × rate (5%). Textract grabs
+    // the wrong column unpredictably (the VAT-inclusive col as subtotal on one
+    // bill, the taxable col as total on another, and misses VAT entirely on a
+    // third). So instead of trusting any single field, gather EVERY amount on
+    // the document and find the (subtotal, total) pair whose ratio is 1 + rate,
+    // maximizing the total — that pair is the taxable base and the grand total,
+    // and VAT is their difference. Self-correcting across invoice layouts.
     const round2 = (n: number) => Math.round(n * 100) / 100;
-    let vatPercent: number | null = null;
-    let subtotalN = parseAmount(subtotal?.value);
-    const taxN = parseAmount(tax?.value);
-    let totalN = parseAmount(total?.value);
+    const aeSubtotal = parseAmount(subtotal?.value);
+    const aeTax = parseAmount(tax?.value);
+    const aeTotal = parseAmount(total?.value);
 
     // Detected VAT rate (UAE standard supply is 5%; any printed % wins).
     let detectedRate = 0;
     const pctMatches = (fullText.match(/(\d{1,2}(?:\.\d+)?)\s*%/g) || [])
       .map((s) => parseFloat(s)).filter((p) => p > 0 && p <= 20);
     if (pctMatches.length) detectedRate = pctMatches.find((p) => Math.round(p) === 5) || pctMatches[0];
-    if (!detectedRate && taxN > 0) detectedRate = 5;  // UAE default when VAT is charged
+    const rate = (detectedRate > 0 ? detectedRate : 5) / 100;
 
-    if (rawGrandTotal && rawGrandTotal > 0) {
-      // (1) A labelled grand total is ground truth → taxable = total − VAT.
-      totalN = rawGrandTotal;
-      if (taxN >= 0) { const t = round2(totalN - taxN); if (t > 0) subtotalN = t; }
-    } else if (taxN > 0 && detectedRate > 0) {
-      // (2) No clean total, but VAT amount + rate gives us the taxable base.
-      subtotalN = round2(taxN / (detectedRate / 100));
-      totalN = round2(subtotalN + taxN);
-    } else if (totalN > 0 && taxN >= 0) {
-      // (3) Trust Textract's total; back out the taxable base.
-      const t = round2(totalN - taxN); if (t > 0) subtotalN = t;
-    } else if (subtotalN > 0) {
-      // (4) Last resort: build the total up from the subtotal.
-      totalN = round2(subtotalN + taxN);
+    // Every monetary amount on the document (raw text + AnalyzeExpense fields).
+    const amtSet = new Set<number>();
+    for (const ln of fullLines) for (const a of amountsOn(ln)) amtSet.add(round2(a));
+    [aeSubtotal, aeTax, aeTotal].forEach((n) => { if (n > 0) amtSet.add(round2(n)); });
+    const amounts = [...amtSet].sort((a, b) => b - a);
+
+    let vatPercent: number | null = null;
+    let subtotalN = 0, totalN = 0, taxN = 0;
+    // Largest total with a matching taxable base wins (line-level pairs lose to
+    // the grand-total pair because we iterate totals high-to-low).
+    for (const T of amounts) {
+      let s = 0;
+      for (const S of amounts) {
+        if (S >= T) continue;
+        if (Math.abs(T - S * (1 + rate)) <= Math.max(0.5, S * 0.005)) { s = S; break; }
+      }
+      if (s) { totalN = T; subtotalN = s; taxN = round2(T - s); break; }
     }
 
-    if (subtotalN > 0 && taxN > 0) {
-      vatPercent = round2((taxN / subtotalN) * 100);
+    if (!totalN) {
+      // FALLBACK — zero-rated / exempt, or a single figure with no VAT pair.
+      taxN = aeTax;
+      const rawGrandTotal = labeledAmount(/\btotal\b/i, /(sub[\s-]*total|balance|payment|paid|amount\s+(?:due|paid))/i);
+      totalN = rawGrandTotal || aeTotal || aeSubtotal || amounts[0] || 0;
+      if (taxN > 0 && totalN - taxN > 0) subtotalN = round2(totalN - taxN);
+      else if (taxN > 0) { subtotalN = round2(taxN / rate); totalN = round2(subtotalN + taxN); }
+      else subtotalN = totalN;  // no VAT charged → subtotal equals total
     }
+
+    if (subtotalN > 0 && taxN > 0) vatPercent = round2((taxN / subtotalN) * 100);
 
     // Aggregate line items across every page, de-duplicating identical
     // (description, amount) pairs that repeat in carried-forward tables.
