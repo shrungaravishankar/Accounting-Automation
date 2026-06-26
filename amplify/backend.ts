@@ -188,7 +188,12 @@ backend.invoiceOcr.resources.lambda.addToRolePolicy(
     actions: [
       'textract:AnalyzeExpense',
       'textract:StartExpenseAnalysis',
-      'textract:GetExpenseAnalysis'
+      'textract:GetExpenseAnalysis',
+      // Raw-text pass to recover TRN / bill number / grand total that
+      // AnalyzeExpense misses on UAE invoice layouts.
+      'textract:DetectDocumentText',
+      'textract:StartDocumentTextDetection',
+      'textract:GetDocumentTextDetection'
     ],
     resources: ['*']
   })

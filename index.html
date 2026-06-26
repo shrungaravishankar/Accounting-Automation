@@ -2326,9 +2326,21 @@ function alDestinationOf(ledgerName, chartOfAccounts){
   if(/^(review required|suspense)/i.test(name) || /suspense/i.test(name)) return "Unknown";
   const acct = (chartOfAccounts||[]).find(a => (a.name||"").toLowerCase() === name.toLowerCase());
   if(!acct) return "Unknown";
-  const t = (acct.type||"").toLowerCase();
+  // Zoho account_type values use underscores ("accounts_payable",
+  // "other_current_asset"); the lookup set is space-separated, so normalize.
+  const t = (acct.type||"").toLowerCase().replace(/_/g," ").trim();
   if(!t) return "Unknown";
   return AL_BS_ACCOUNT_TYPES.has(t) ? "Balance Sheet" : "P&L";
+}
+// Auto-growing textarea — used for OCR line-item descriptions so the full
+// text (which can run several lines) is always visible without scrolling.
+function AutoGrowText({ value, onChange, style }){
+  const ref = useRef(null);
+  const fit = (el)=>{ if(el){ el.style.height="auto"; el.style.height=(el.scrollHeight)+"px"; } };
+  useEffect(()=>{ fit(ref.current); },[value]);
+  return <textarea ref={ref} value={value||""} rows={1}
+    onChange={e=>{ onChange(e); fit(e.target); }}
+    style={{resize:"none",overflow:"hidden",lineHeight:1.35,fontFamily:"inherit",...style}} />;
 }
 function AlDestinationBadge({ ledger, chartOfAccounts, compact }){
   const d = alDestinationOf(ledger, chartOfAccounts);
@@ -3767,7 +3779,7 @@ function App(){
   const runBillValidators = useCallback((d)=>{
     const out=[];
     const push=(key,label,status,msg)=>out.push({key,label,status,msg});
-    const legalName = (getClientData(activeClientId,"legal_name","")||"").toLowerCase().trim();
+    const legalName = (getClientData(activeClientId,"legal_name","") || activeClientName || "").toLowerCase().trim();
     const billTo = (d.billToName||"").toLowerCase().trim();
 
     // 1 — Vendor TRN must exist in Zoho Vendors register
@@ -3820,7 +3832,7 @@ function App(){
     else if(linesWithoutAccount > 0) push('push','Ready for Zoho','warn',linesWithoutAccount+' of '+lines.length+' line(s) have no expense account chosen — Zoho will use the default for those.');
     else push('push','Ready for Zoho','pass','All '+lines.length+' line(s) have an account chosen.');
     return out;
-  },[activeClientId,vendors]);
+  },[activeClientId,activeClientName,vendors]);
 
   // Upload a PDF / image, run AnalyzeExpense via the invoice-ocr Lambda
   // (Textract is doc-type-agnostic), and create a bill draft from the
@@ -3830,6 +3842,23 @@ function App(){
     setBillOcrUploading(true);
     try {
       const drafts=[];
+      // The canonical client name as held in Zoho. A bill is addressed to the
+      // client, so whenever the OCR'd "Bill To" plausibly matches this client
+      // (full or partial / token overlap), normalize it to the exact Zoho name
+      // — that is what gets pushed and what the validator checks against.
+      const canonicalClient = (getClientData(activeClientId,'legal_name','') || activeClientName || '').trim();
+      const STOP = new Set(['llc','l.l.c','fze','fzc','fzco','sole','proprietorship','establishment','est','company','co','trading','general','the','and','for','of']);
+      const tok = (s)=> (s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w=>w.length>2 && !STOP.has(w));
+      const clientTokens = new Set(tok(canonicalClient));
+      const reconcileBillTo = (ocrName)=>{
+        const n = (ocrName||'').trim();
+        if(!canonicalClient) return n;
+        if(!n) return canonicalClient;
+        const a = canonicalClient.toLowerCase(), b = n.toLowerCase();
+        if(a.includes(b) || b.includes(a)) return canonicalClient;
+        const overlap = tok(n).filter(w=>clientTokens.has(w)).length;
+        return overlap>=1 ? canonicalClient : n;  // partial match → use Zoho name
+      };
       for(const f of files){
         if(f.size > 10*1024*1024){ alert(f.name+' exceeds 10 MB — Textract sync limit.'); continue; }
         // Match Revenue OCR's reader pattern: read as a data URL ("data:...;base64,xxx")
@@ -3868,7 +3897,7 @@ function App(){
           uploadedAt: Date.now(),
           vendorName: (ocr && (ocr.vendor_name || '')) || '',
           vendorTrn:  (ocr && (ocr.vendor_trn  || '')) || '',
-          billToName: (ocr && (ocr.receiver_name || '')) || '',
+          billToName: reconcileBillTo((ocr && (ocr.receiver_name || '')) || ''),
           billNumber: (ocr && (ocr.invoice_number || '')) || '',
           billDate:   (ocr && (ocr.invoice_date  || '')) || '',
           dueDate:    (ocr && (ocr.due_date || '')) || '',
@@ -3890,7 +3919,7 @@ function App(){
       }
       setBillOcrQueue(prev=>{ const next=[...drafts, ...prev]; persistBillOcr(next); return next; });
     } finally { setBillOcrUploading(false); }
-  },[runBillValidators,persistBillOcr]);
+  },[runBillValidators,persistBillOcr,activeClientId,activeClientName]);
 
   // Push one bill draft to Zoho. Resolves vendor (searchVendor →
   // createVendor if needed), then POSTs createBill. On success the draft
@@ -6766,10 +6795,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                               <label style={{fontSize:10,color:"#888"}}>Currency</label>
                               <select value={d.currency||'AED'} onChange={e=>setField({currency:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select>
                             </div>
-                            <div>
-                              <label style={{fontSize:10,color:"#888"}}>Document type detected</label>
-                              <div style={{padding:"7px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:3,background:"#f8f9fc",color:d.docTypeDetected?"#1a1a2e":"#999",textTransform:"capitalize"}}>{(d.docTypeDetected||'unknown').replace(/_/g,' ')}</div>
-                            </div>
                           </div>
 
                           {/* Line items — description from OCR (read-only), user picks account per line */}
@@ -6790,8 +6815,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                                 </tr></thead>
                                 <tbody>{d.lineItems.map(li=>(
                                   <tr key={li.id} style={{borderBottom:"1px solid #f8f9fc"}}>
-                                    <td style={{padding:"6px 10px"}}>
-                                      <input type="text" value={li.description||""} onChange={e=>setLine(li.id,{description:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11}} />
+                                    <td style={{padding:"6px 10px",minWidth:260,verticalAlign:"top"}}>
+                                      <AutoGrowText value={li.description} onChange={e=>setLine(li.id,{description:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,whiteSpace:"pre-wrap",wordBreak:"break-word"}} />
                                     </td>
                                     <td style={{padding:"6px 10px",width:60}}>
                                       <input type="number" step="0.01" value={li.quantity||1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} />

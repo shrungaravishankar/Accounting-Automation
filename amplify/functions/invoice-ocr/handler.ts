@@ -9,8 +9,12 @@ import {
   AnalyzeExpenseCommand,
   StartExpenseAnalysisCommand,
   GetExpenseAnalysisCommand,
+  DetectDocumentTextCommand,
+  StartDocumentTextDetectionCommand,
+  GetDocumentTextDetectionCommand,
   ExpenseField,
   ExpenseDocument,
+  Block,
   LineItemFields
 } from '@aws-sdk/client-textract';
 import {
@@ -30,10 +34,30 @@ function isPdf(bytes: Uint8Array, mimeType?: string): boolean {
   return bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46;
 }
 
-/** Synchronous AnalyzeExpense for single-page images / single-page PDFs. */
-async function analyzeSync(bytes: Uint8Array): Promise<ExpenseDocument[]> {
-  const res = await textract.send(new AnalyzeExpenseCommand({ Document: { Bytes: bytes } }));
-  return res.ExpenseDocuments || [];
+/** Bundled OCR result: structured expense docs + the flat text lines. */
+type OcrResult = { docs: ExpenseDocument[]; rawLines: string[] };
+
+/** Pull the plain-text LINE blocks out of a Detect/GetDocumentText response. */
+function linesFromBlocks(blocks: Block[] | undefined): string[] {
+  const out: string[] = [];
+  for (const b of (blocks || [])) {
+    if (b.BlockType === 'LINE' && b.Text) out.push(b.Text);
+  }
+  return out;
+}
+
+/**
+ * Synchronous path for single-page images / single-page PDFs. Runs
+ * AnalyzeExpense (structured fields) and DetectDocumentText (raw lines) in
+ * parallel — the raw text lets us recover the TRN / bill number / grand
+ * total that AnalyzeExpense frequently misses on UAE invoice layouts.
+ */
+async function analyzeSync(bytes: Uint8Array): Promise<OcrResult> {
+  const [exp, txt] = await Promise.all([
+    textract.send(new AnalyzeExpenseCommand({ Document: { Bytes: bytes } })),
+    textract.send(new DetectDocumentTextCommand({ Document: { Bytes: bytes } })).catch(() => null)
+  ]);
+  return { docs: exp.ExpenseDocuments || [], rawLines: linesFromBlocks(txt?.Blocks) };
 }
 
 /**
@@ -42,41 +66,70 @@ async function analyzeSync(bytes: Uint8Array): Promise<ExpenseDocument[]> {
  * The staged object is always cleaned up. Bounded to stay under the 60s
  * Lambda timeout.
  */
-async function analyzeAsync(bytes: Uint8Array): Promise<ExpenseDocument[]> {
+async function analyzeAsync(bytes: Uint8Array): Promise<OcrResult> {
   if (!OCR_BUCKET) throw new Error('OCR_BUCKET is not configured — cannot process multi-page PDFs.');
   const key = 'textract-temp/' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.pdf';
   await s3.send(new PutObjectCommand({ Bucket: OCR_BUCKET, Key: key, Body: bytes, ContentType: 'application/pdf' }));
-  try {
-    const start = await textract.send(new StartExpenseAnalysisCommand({
-      DocumentLocation: { S3Object: { Bucket: OCR_BUCKET, Name: key } }
-    }));
-    const jobId = start.JobId;
-    if (!jobId) throw new Error('Textract did not return a job id.');
+  const location = { S3Object: { Bucket: OCR_BUCKET, Name: key } };
+  // AppSync caps the whole request at ~30s (shorter than the Lambda's 60s),
+  // so bail at ~25s to return a clean "split the PDF" message rather than a
+  // generic gateway timeout. Typical 2-5 page bills finish well within this.
+  const deadline = Date.now() + 25 * 1000;
+  const sleep = () => new Promise<void>((r) => setTimeout(() => r(), 2000));
 
+  try {
+    // Kick off BOTH jobs first so Textract runs them concurrently — wall-clock
+    // is max(expense, text), not the sum.
+    const [expStart, txtStart] = await Promise.all([
+      textract.send(new StartExpenseAnalysisCommand({ DocumentLocation: location })),
+      textract.send(new StartDocumentTextDetectionCommand({ DocumentLocation: location })).catch(() => null)
+    ]);
+    const expJob = expStart.JobId;
+    if (!expJob) throw new Error('Textract did not return a job id.');
+    const txtJob = txtStart?.JobId;
+
+    // Poll the expense job (required) and paginate its results.
     const docs: ExpenseDocument[] = [];
     let nextToken: string | undefined;
-    // AppSync caps the whole request at ~30s (shorter than the Lambda's 60s),
-    // so bail at ~25s to return a clean "split the PDF" message rather than a
-    // generic gateway timeout. Typical 2-5 page bills finish well within this.
-    const deadline = Date.now() + 25 * 1000;
     for (;;) {
-      const g = await textract.send(new GetExpenseAnalysisCommand({ JobId: jobId, NextToken: nextToken }));
+      const g = await textract.send(new GetExpenseAnalysisCommand({ JobId: expJob, NextToken: nextToken }));
       const status = g.JobStatus;
       if (status === 'SUCCEEDED' || status === 'PARTIAL_SUCCESS') {
         docs.push(...(g.ExpenseDocuments || []));
         if (g.NextToken) { nextToken = g.NextToken; continue; }  // page through results
-        return docs;
+        break;
       }
       if (status === 'FAILED') {
         throw new Error('Textract job failed' + (g.StatusMessage ? ': ' + g.StatusMessage : '.'));
       }
-      // IN_PROGRESS — wait and re-poll from the start of the result set.
       if (Date.now() > deadline) {
         throw new Error('OCR timed out on a large PDF. Try splitting it into fewer pages.');
       }
-      await new Promise<void>((r) => setTimeout(() => r(), 2000));
+      await sleep();
       nextToken = undefined;
     }
+
+    // Collect raw text (best-effort — never let it block the structured result).
+    const rawLines: string[] = [];
+    if (txtJob) {
+      try {
+        let tToken: string | undefined;
+        for (;;) {
+          const t = await textract.send(new GetDocumentTextDetectionCommand({ JobId: txtJob, NextToken: tToken }));
+          const status = t.JobStatus;
+          if (status === 'SUCCEEDED' || status === 'PARTIAL_SUCCESS') {
+            rawLines.push(...linesFromBlocks(t.Blocks));
+            if (t.NextToken) { tToken = t.NextToken; continue; }
+            break;
+          }
+          if (status === 'FAILED' || Date.now() > deadline) break;
+          await sleep();
+          tToken = undefined;
+        }
+      } catch (_) { /* raw text is a bonus; ignore failures */ }
+    }
+
+    return { docs, rawLines };
   } finally {
     // Best-effort cleanup of the staged file.
     try { await s3.send(new DeleteObjectCommand({ Bucket: OCR_BUCKET, Key: key })); } catch (_) { /* ignore */ }
@@ -219,22 +272,24 @@ export const handler = async (event: Event) => {
     // For PDFs we try sync first (covers single-page bills) and fall back to
     // the async S3 job when Textract rejects a multi-page PDF with
     // UnsupportedDocumentException ("Request has unsupported document format").
-    let docs: ExpenseDocument[];
+    let ocr: OcrResult;
     if (isPdf(bytes, event.arguments?.mimeType)) {
       try {
-        docs = await analyzeSync(bytes);
+        ocr = await analyzeSync(bytes);
       } catch (e: any) {
         const name = e?.name || '';
         const msg = e?.message || '';
         if (name === 'UnsupportedDocumentException' || /unsupported document format/i.test(msg)) {
-          docs = await analyzeAsync(bytes);
+          ocr = await analyzeAsync(bytes);
         } else {
           throw e;
         }
       }
     } else {
-      docs = await analyzeSync(bytes);
+      ocr = await analyzeSync(bytes);
     }
+    const docs = ocr.docs;
+    const rawLines = ocr.rawLines;
 
     const doc = docs[0];
     if (!doc) {
@@ -280,12 +335,61 @@ export const handler = async (event: Event) => {
       }
     }
 
+    // ---- Raw-text recovery from DetectDocumentText ----
+    // AnalyzeExpense misses header TRNs / bill numbers and is fooled by
+    // "Payment Made" / "Balance Due 0.00" rows when picking the grand total,
+    // so recover those deterministically from the flat text lines.
+    const fullLines = rawLines.map((l) => l.trim()).filter(Boolean);
+    const fullText = fullLines.join('\n');
+    const amountsOn = (line: string): number[] =>
+      (line.match(/\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?/g) || [])
+        .map(parseAmount).filter((n) => n > 0);
+    const labeledAmount = (labelRe: RegExp, excludeRe: RegExp | null): number | null => {
+      for (const ln of fullLines) {
+        if (excludeRe && excludeRe.test(ln)) continue;
+        if (labelRe.test(ln)) { const a = amountsOn(ln); if (a.length) return a[a.length - 1]; }
+      }
+      return null;
+    };
+    // (a) TRNs — prefer 15-digit runs explicitly labelled "TRN".
+    const labeledTrns: string[] = [];
+    for (const ln of fullLines) {
+      const m = ln.match(/\bTRN\b[^0-9]{0,15}(\d{15})\b/i);
+      if (m) labeledTrns.push(m[1]);
+    }
+    const trnPool = labeledTrns.length ? labeledTrns : (fullText.match(/\b\d{15}\b/g) || []);
+    if (!vendorTrn && trnPool[0]) vendorTrn = trnPool[0];
+    if (!receiverTrn && trnPool[1] && trnPool[1] !== vendorTrn) receiverTrn = trnPool[1];
+    // (b) Bill number — a labelled invoice/bill no first, else a bare "# REF"
+    // near the top. Skip PO / order / account references.
+    let rawInvoiceNo: string | null = null;
+    const invLabelRe = /(?:tax\s+invoice|invoice|bill)\s*(?:no\.?|number|num|#|:)\s*[:#\-]?\s*([A-Za-z0-9][A-Za-z0-9/\-]{1,24})/i;
+    for (const ln of fullLines) {
+      if (/\b(p\.?\s*o\.?|purchase\s+order|order|lpo|account|trn)\b/i.test(ln)) continue;
+      const m = ln.match(invLabelRe);
+      if (m && m[1] && !/^(date|no|number|num)$/i.test(m[1])) { rawInvoiceNo = m[1]; break; }
+    }
+    if (!rawInvoiceNo) {
+      for (const ln of fullLines.slice(0, 18)) {
+        if (/\b(order|p\.?\s*o\.?|lpo|account|trn)\b/i.test(ln)) continue;
+        const m = ln.match(/#\s*([A-Za-z]{1,6}[\/\-]?\d{2,}[A-Za-z0-9/\-]*)/);
+        if (m && m[1]) { rawInvoiceNo = m[1]; break; }
+      }
+    }
+    // (c) Grand total — the "Total" line, never a sub-total / balance / paid row.
+    const rawGrandTotal = labeledAmount(/\btotal\b/i, /(sub[\s-]*total|balance|payment|paid|amount\s+(?:due|paid))/i);
+
     // VAT percent — Textract gives us the TAX amount, not the rate. Derive
     // from total/subtotal when possible. For UAE this usually rounds to 5.
     let vatPercent: number | null = null;
     let subtotalN = parseAmount(subtotal?.value);
     const taxN = parseAmount(tax?.value);
-    const totalN = parseAmount(total?.value);
+    let totalN = parseAmount(total?.value);
+    // AnalyzeExpense often picks "Balance Due 0.00" or a payment row as TOTAL.
+    // Trust the labelled grand total from the raw text when they disagree.
+    if (rawGrandTotal && (totalN <= 0 || Math.abs(rawGrandTotal - totalN) > Math.max(1, rawGrandTotal * 0.02))) {
+      totalN = rawGrandTotal;
+    }
     // Reconciliation: when Textract returns a subtotal that clearly does not
     // match total/VAT (busy invoice layouts often grab a stray figure from
     // another column), prefer total − VAT. Threshold: ≥ AED 1 OR 5 % of total.
@@ -340,7 +444,9 @@ export const handler = async (event: Event) => {
         }
       }
     }
-    const corpus = rawText.join(' \n ').toLowerCase();
+    // Include the flat DetectDocumentText lines so classification, currency,
+    // TRN fallback, and VAT-flag scanning see header text AnalyzeExpense drops.
+    const corpus = (rawText.join(' \n ') + ' \n ' + fullText).toLowerCase();
 
     // ---- Document classification ----
     // Acceptance rule: if the document carries 'invoice' wording OR has
@@ -352,7 +458,7 @@ export const handler = async (event: Event) => {
     const isCreditNote = /credit\s*note|tax\s*credit\s*note|\bcn[-\s]?\d/i.test(corpus);
     const rejectedMatch = corpus.match(/quotation|proforma|pro[-\s]forma\s*invoice/i);
     const acceptedMatch = corpus.match(/simplified\s*tax\s*invoice|tax\s*invoice|commercial\s*invoice|\binvoice\b/i);
-    const looksLikeInvoice = !!(invoiceNumber?.value) && parseAmount(total?.value) > 0;
+    const looksLikeInvoice = !!(invoiceNumber?.value || rawInvoiceNo) && totalN > 0;
     let docType = 'unknown';
     if (isCreditNote) docType = 'credit_note';
     else if (acceptedMatch) {
@@ -452,7 +558,10 @@ export const handler = async (event: Event) => {
     // present is CT only (no VAT TRN label), we also null the picked-up
     // 15-digit TRNs so the invoice is processed as if neither party
     // were VAT-registered (booked as Sales without VAT TRN).
-    const hasCtTrnLabel = /\b(?:ct[\s\-_]*trn|corporate[\s\-_]*tax(?:[\s\-_]*trn|[\s\-_]*registration)?|trn\s*\(\s*ct\s*\)|tax\s*registration\s*number\s*\(\s*(?:ct|corporate))/i.test(corpus);
+    // NB: the corporate-tax branch REQUIRES a trn/registration token after
+    // "corporate tax" — otherwise an ordinary service line like "Corporate Tax
+    // Filing" would false-positive and wrongly null a legitimate VAT TRN.
+    const hasCtTrnLabel = /\b(?:ct[\s\-_]*trn|corporate[\s\-_]*tax[\s\-_]*(?:trn|registration|reg\.?\s*(?:no\.?|number)?)|trn\s*\(\s*ct\s*\)|tax\s*registration\s*number\s*\(\s*(?:ct|corporate))/i.test(corpus);
     const hasVatTrnLabel = /\b(?:vat[\s\-_]*trn|trn\s*\(\s*vat\s*\)|vat\s*registration\s*(?:no\.?|number))/i.test(corpus);
     if (hasCtTrnLabel) {
       vatFlags.push('ct_trn_on_document');
@@ -476,11 +585,11 @@ export const handler = async (event: Event) => {
       receiver_trn: receiverTrn,
       vendor_address: vendorAddress?.value || '',
       receiver_address: receiverAddress?.value || '',
-      invoice_number: invoiceNumber?.value || '',
+      invoice_number: (invoiceNumber?.value && invoiceNumber.value.trim()) || rawInvoiceNo || '',
       invoice_date: toIsoDate(dateRaw?.value || ''),
       invoice_date_raw: dateRaw?.value || '',
       due_date: toIsoDate(dueRaw?.value || ''),
-      total: parseAmount(total?.value),
+      total: totalN,
       subtotal: subtotalN,
       tax: taxN,
       vat_percent: vatPercent,
