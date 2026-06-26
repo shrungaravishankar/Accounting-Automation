@@ -268,6 +268,41 @@ export const handler = async (event: Event) => {
       return JSON.stringify({ error: null, items: invoices, apiUsage: lastApiUsage });
     }
 
+    // Bank accounts for a given org — used by the Bank Statement Upload
+    // tab. Returns every bank-like account configured in Zoho Books
+    // (bank / credit_card / paypal). Each entry exposes the exact
+    // account name Zoho uses on journal entries so the user does not
+    // have to type it manually.
+    if (kind === 'bankAccounts') {
+      const all: any[] = [];
+      let page = 1;
+      while (true) {
+        const j = await zohoGet('bankaccounts', accessToken, region, {
+          organization_id: orgId,
+          per_page: '200',
+          page: String(page)
+        });
+        all.push(...(j.bankaccounts || []));
+        if (!j.page_context || !j.page_context.has_more_page) break;
+        page++;
+        if (page > 20) break;
+      }
+      const accounts = all
+        .filter((a: any) => a.is_active !== false)
+        .map((a: any) => ({
+          account_id: a.account_id,
+          account_name: a.account_name,
+          account_code: a.account_code || '',
+          account_type: a.account_type,
+          account_number: a.account_number || '',
+          currency_code: a.currency_code || '',
+          uncategorized_transactions: Number(a.uncategorized_transactions || 0),
+          is_primary_account: !!a.is_primary_account,
+          status: a.status || 'active'
+        }));
+      return JSON.stringify({ error: null, items: accounts, apiUsage: lastApiUsage });
+    }
+
     // Open bills for a given org — used by the Bills flow on the bank
     // statement review to apply a debit payment against an existing vendor
     // bill instead of creating a standalone expense. Mirrors openInvoices.

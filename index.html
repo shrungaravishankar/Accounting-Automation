@@ -2694,6 +2694,11 @@ function App(){
   // Per-client state (persisted per client)
   const[chartOfAccounts,setChartOfAccounts]=useState(SAMPLE_COA);
   const[coaFileName,setCoaFileName]=useState("");
+  // Bank accounts synced from Zoho (/bankaccounts). Used by the Bank
+  // Statement Upload tab to drive the upload flow and by Master Data.
+  const[bankAccounts,setBankAccounts]=useState([]);
+  const[bankAccountsLoading,setBankAccountsLoading]=useState(false);
+  const[bankAccountsError,setBankAccountsError]=useState("");
   const[bankAccount,setBankAccount]=useState("Bank Account");
   const[learnedRules,setLearnedRules]=useState({});
   const[refDB,setRefDB]=useState({});
@@ -2939,6 +2944,7 @@ function App(){
       setCoaFileName(getClientData(activeClientId, "coa_name", ""));
       setVendors(getClientData(activeClientId, "vendors", []));
       setCustomers(getClientData(activeClientId, "customers", []));
+      setBankAccounts(getClientData(activeClientId, "bank_accounts", []));
       setVendorFileName(getClientData(activeClientId, "vendor_file", ""));
       setCustomerFileName(getClientData(activeClientId, "customer_file", ""));
       const c = clients.find(c=>c.id===activeClientId);
@@ -2954,6 +2960,7 @@ function App(){
   useEffect(()=>{ if(activeClientId && chartOfAccounts!==SAMPLE_COA) setClientData(activeClientId,"coa",chartOfAccounts); },[chartOfAccounts,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"coa_name",coaFileName); },[coaFileName,activeClientId]);
   useEffect(()=>{ if(activeClientId && vendors.length>0) setClientData(activeClientId,"vendors",vendors); },[vendors,activeClientId]);
+  useEffect(()=>{ if(activeClientId && bankAccounts.length>0) setClientData(activeClientId,"bank_accounts",bankAccounts); },[bankAccounts,activeClientId]);
   useEffect(()=>{ if(activeClientId && customers.length>0) setClientData(activeClientId,"customers",customers); },[customers,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"vendor_file",vendorFileName); },[vendorFileName,activeClientId]);
   useEffect(()=>{ if(activeClientId) setClientData(activeClientId,"customer_file",customerFileName); },[customerFileName,activeClientId]);
@@ -3196,12 +3203,15 @@ function App(){
       const coa = await window.zohoFetch('chartofaccounts', orgId);
       const vendors = await window.zohoFetch('vendors', orgId);
       const customers = await window.zohoFetch('customers', orgId);
+      let banks = [];
+      try { banks = await window.zohoFetch('bankAccounts', orgId); } catch(_){ banks = []; }
       setChartOfAccounts(coa||[]); setCoaFileName('Zoho: '+(c.name||'org')); setClientData(activeClientId,'coa',coa||[]); setClientData(activeClientId,'coa_name','Zoho: '+(c.name||'org'));
       { const accountIds={}; (coa||[]).forEach(a=>{ if(a && a.name && a.id) accountIds[a.name]=a.id; }); setClientData(activeClientId,'accountIds',accountIds); }
       setVendors(vendors||[]); setVendorFileName('Zoho: '+(vendors||[]).length+' vendors'); setClientData(activeClientId,'vendors',vendors||[]); setClientData(activeClientId,'vendor_file','Zoho: '+(vendors||[]).length+' vendors');
       if(vendors && vendors._idByName) setClientData(activeClientId,'vendorIds',vendors._idByName);
       setCustomers(customers||[]); setCustomerFileName('Zoho: '+(customers||[]).length+' customers'); setClientData(activeClientId,'customers',customers||[]); setClientData(activeClientId,'customer_file','Zoho: '+(customers||[]).length+' customers');
       if(customers && customers._idByName) setClientData(activeClientId,'customerIds',customers._idByName);
+      setBankAccounts(banks||[]); setClientData(activeClientId,'bank_accounts',banks||[]);
       // Entity profile (legal name + VAT TRN) — synced so OCR validation
       // never depends on manual entry. Best-effort.
       try {
@@ -3211,7 +3221,7 @@ function App(){
         if(prof && prof.address) setClientData(activeClientId,'address',prof.address);
         setClientData(activeClientId,'currency','AED');
       } catch(_){}
-      alert('Synced from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length);
+      alert('Synced from Zoho ✓\n\nChart of Accounts: '+(coa||[]).length+'\nVendors: '+(vendors||[]).length+'\nCustomers: '+(customers||[]).length+'\nBank Accounts: '+(banks||[]).length);
     } catch(e){
       if(String(e.message||e).includes('Not connected')){
         if(confirm('You need to (re)connect Zoho. Go to the Connect Zoho menu now?')) window.zohoStartOAuth();
@@ -4870,6 +4880,12 @@ function App(){
     setPushProgress({done:totalUnits,total:totalUnits,label: skipped>0 ? ("Done — "+skipped+" skipped as duplicate") : "Done"});
   },[pushing,clients,activeClientId,bankAccount,journalEntries,currency,chartOfAccounts]);
 
+  // When set, the next time the user lands on Step 5 with journalEntries
+  // populated we'll immediately fire the duplicate-check + push pipeline.
+  // Lets the accountant skip the Step-5 preview from the Step-4 review
+  // screen ("Generate & Push to Zoho" button).
+  const[pushAfterPrepare,setPushAfterPrepare]=useState(false);
+
   // Pre-flight duplicate check. Pulls Zoho's expenses + journals + customer
   // payments for the date range of the batch we're about to push, then
   // matches by (date + description). If matches exist, opens the dup-check
@@ -4936,6 +4952,19 @@ function App(){
     setDupCheckPushArgs({ orgId });
     setDupCheckOpen(true);
   },[pushing,clients,activeClientId,journalEntries,pushToZoho]);
+
+  // Auto-push after Step-4 "Generate & Push" — when journalEntries lands
+  // with rows present and we're on Step 5, fire the duplicate-check + push
+  // pipeline and clear the flag.
+  useEffect(()=>{
+    if(!pushAfterPrepare) return;
+    if(step!==5) return;
+    const je=journalEntries||{};
+    const hasRows = (je.expenses||[]).length || (je.journals||[]).length || (je.bsItems||[]).length || (je.revenue||[]).length;
+    if(!hasRows) return;
+    setPushAfterPrepare(false);
+    prePushCheck();
+  },[pushAfterPrepare,step,journalEntries,prePushCheck]);
 
   // Revert a single pushed entry — DELETEs it from Zoho, then strips the
   // zohoId from the matching row in journalEntries and from the pushed
@@ -5823,11 +5852,56 @@ td,th{padding:8px 12px;vertical-align:middle}
               </div>}
             </div>
             {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
-            {clientDetailTab==="projects" && (
-              projects.length===0 ? <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888888"}}>
+            {clientDetailTab==="projects" && (<>
+              {/* Bank accounts strip — pick a bank to start uploading a statement.
+                  Synced from Zoho /bankaccounts; each row pre-fills the
+                  bank-ledger name in the upload wizard so we never depend on
+                  the accountant typing it. */}
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:16,marginBottom:16}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,gap:8,flexWrap:"wrap"}}>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>Bank Accounts</div>
+                    <div style={{fontSize:11,color:"#777"}}>Pick the account that this statement belongs to — we'll use its exact Zoho name on every journal we push.</div>
+                  </div>
+                  {c.zohoOrgId && <button onClick={async()=>{
+                    setBankAccountsLoading(true); setBankAccountsError("");
+                    try { const banks = await window.zohoFetch('bankAccounts', c.zohoOrgId); setBankAccounts(banks||[]); setClientData(activeClientId,'bank_accounts',banks||[]); }
+                    catch(e){ setBankAccountsError(e.message||String(e)); }
+                    finally { setBankAccountsLoading(false); }
+                  }} disabled={bankAccountsLoading} style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"8px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:bankAccountsLoading?"default":"pointer",opacity:bankAccountsLoading?0.6:1}}>{bankAccountsLoading?"Syncing…":"🔄 Sync from Zoho"}</button>}
+                </div>
+                {bankAccountsError && <div style={{padding:"8px 12px",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:6,color:"#dc2626",fontSize:11,marginBottom:10}}>{bankAccountsError}</div>}
+                {bankAccounts.length===0 ? (
+                  <div style={{padding:"20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:8,color:"#888",fontSize:12}}>
+                    {c.zohoOrgId ? "No bank accounts loaded yet. Click \"Sync from Zoho\" above." : "Link this client to a Zoho organization first (Settings) to load bank accounts."}
+                  </div>
+                ) : (
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:10}}>
+                    {bankAccounts.map(ba=>{
+                      const tone = ba.account_type==="credit_card" ? {bg:"rgba(217,119,6,0.06)",fg:"#a16207",br:"rgba(217,119,6,0.25)",icon:"💳"}
+                                  : ba.account_type==="paypal"      ? {bg:"rgba(8,145,178,0.06)",fg:"#0891b2",br:"rgba(8,145,178,0.25)",icon:"🅿"}
+                                  : {bg:"rgba(22,163,74,0.06)",fg:"#16a34a",br:"rgba(22,163,74,0.25)",icon:"🏦"};
+                      return <div key={ba.account_id} onClick={()=>{ setBankAccount(ba.account_name); startNewStatement(); }} title={"Upload a statement for "+ba.account_name} style={{background:tone.bg,border:"1px solid "+tone.br,borderRadius:8,padding:"12px 14px",cursor:"pointer",transition:"transform 0.1s"}} onMouseEnter={e=>e.currentTarget.style.transform="translateY(-1px)"} onMouseLeave={e=>e.currentTarget.style.transform="none"}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
+                          <span style={{fontSize:18}}>{tone.icon}</span>
+                          {ba.is_primary_account && <span style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:"#fff",color:tone.fg,border:"1px solid "+tone.br,fontWeight:700}}>PRIMARY</span>}
+                        </div>
+                        <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e",marginBottom:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={ba.account_name}>{ba.account_name}</div>
+                        <div style={{fontSize:10,color:"#777",display:"flex",gap:8,flexWrap:"wrap"}}>
+                          <span style={{color:tone.fg,fontWeight:600,textTransform:"uppercase"}}>{ba.account_type}</span>
+                          {ba.currency_code && <span>· {ba.currency_code}</span>}
+                          {ba.account_number && <span style={{fontFamily:"'IBM Plex Mono',monospace"}}>· {ba.account_number}</span>}
+                        </div>
+                        <div style={{marginTop:8,fontSize:10,color:tone.fg,fontWeight:600}}>+ Upload statement →</div>
+                      </div>;
+                    })}
+                  </div>
+                )}
+              </div>
+              {projects.length===0 ? <div style={{padding:"40px 20px",textAlign:"center",border:"1px dashed #e2e2ea",borderRadius:10,color:"#888888"}}>
                 <div style={{fontSize:32,marginBottom:8}}>📁</div>
-                <div style={{fontSize:13,marginBottom:4}}>No projects yet for {c.name}.</div>
-                <div style={{fontSize:11}}>Click <strong style={{color:"#16a34a"}}>+ New Bank Statement</strong> to process the first one.</div>
+                <div style={{fontSize:13,marginBottom:4}}>No statements uploaded yet for {c.name}.</div>
+                <div style={{fontSize:11}}>Pick a bank account above to upload the first one.</div>
               </div> : <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
                 <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                   <thead><tr style={{background:"#f8f9fc"}}>
@@ -5844,8 +5918,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                     </tr>
                   ))}</tbody>
                 </table>
-              </div>
-            )}
+              </div>}
+            </>)}
             {/* ═══════════ REVENUE TAB — Invoices / Invoice OCR / Payments ═══════════ */}
             {clientDetailTab==="revenue" && (()=>{
               const statusBadge=(s)=>{
@@ -6286,11 +6360,42 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <div style={{fontSize:10,color:"#888888",marginTop:4}}>{customerFileName||"—"}</div>
               </div>
               <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
+                <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Bank Accounts</div>
+                <div style={{fontSize:24,fontWeight:700,color:"#16a34a",fontFamily:"'IBM Plex Mono',monospace"}}>{bankAccounts.length}</div>
+                <div style={{fontSize:10,color:"#888888",marginTop:4}}>{bankAccounts.length===0?"— sync from Zoho —":"from Zoho /bankaccounts"}</div>
+              </div>
+              <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
                 <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.02em",color:"#888888",textTransform:"uppercase",marginBottom:8}}>Learned References</div>
                 <div style={{fontSize:24,fontWeight:700,color:"#d97706",fontFamily:"'IBM Plex Mono',monospace"}}>{Object.keys(refDB).length}</div>
                 <div style={{fontSize:10,color:"#888888",marginTop:4}}>per-client mappings</div>
               </div>
             </div>
+            {/* Bank accounts table — shows every Zoho bankaccount synced for this client. */}
+            {bankAccounts.length>0 && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:0,marginTop:14,overflow:"hidden"}}>
+              <div style={{padding:"12px 16px",borderBottom:"1px solid #f0f0f4",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#1a1a2e"}}>Synced Bank Accounts <span style={{color:"#888",fontWeight:500,fontSize:11}}>({bankAccounts.length})</span></div>
+                {c.zohoOrgId && <button onClick={async()=>{
+                  setBankAccountsLoading(true); setBankAccountsError("");
+                  try { const banks = await window.zohoFetch('bankAccounts', c.zohoOrgId); setBankAccounts(banks||[]); setClientData(activeClientId,'bank_accounts',banks||[]); }
+                  catch(e){ setBankAccountsError(e.message||String(e)); }
+                  finally { setBankAccountsLoading(false); }
+                }} disabled={bankAccountsLoading} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:6,padding:"5px 12px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:bankAccountsLoading?"default":"pointer",opacity:bankAccountsLoading?0.6:1}}>{bankAccountsLoading?"Syncing…":"🔄 Refresh"}</button>}
+              </div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr style={{background:"#f8f9fc"}}>
+                  {["Account Name","Type","Currency","Account #","Primary"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
+                </tr></thead>
+                <tbody>{bankAccounts.map(ba=>(
+                  <tr key={ba.account_id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                    <td style={{padding:"10px 14px",color:"#1a1a2e",fontWeight:500}}>{ba.account_name}</td>
+                    <td style={{padding:"10px 14px",color:"#777",textTransform:"capitalize"}}>{(ba.account_type||"").replace(/_/g," ")}</td>
+                    <td style={{padding:"10px 14px",color:"#777",fontFamily:"'IBM Plex Mono',monospace"}}>{ba.currency_code||"—"}</td>
+                    <td style={{padding:"10px 14px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{ba.account_number||"—"}</td>
+                    <td style={{padding:"10px 14px"}}>{ba.is_primary_account?<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.1)",color:"#16a34a"}}>✓ Primary</span>:<span style={{color:"#ccc"}}>—</span>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>}
             </>}
             {clientDetailTab==="settings" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:20,display:"flex",flexDirection:"column",gap:14}}>
               {/* Entity profile — synced from Zoho, feeds the OCR validation engine.
@@ -7639,6 +7744,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               <button onClick={unconfirmAll} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"6px 10px",color:"#888888",fontSize:10,cursor:"pointer"}}>✗ All</button>
               <button onClick={()=>setShowAddLedger(!showAddLedger)} style={{background:showAddLedger?"rgba(8,145,178,0.15)":"#f8f9fc",border:"1px solid "+(showAddLedger?"rgba(8,145,178,0.4)":"#e2e2ea"),borderRadius:6,padding:"6px 12px",color:"#0891b2",fontSize:10,fontWeight:600,cursor:"pointer"}}>+ New Ledger</button>
               <button onClick={generateExport} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:6,padding:"6px 18px",fontSize:12,fontWeight:600,cursor:"pointer"}}>Prepare Accounting Entries →</button>
+              <button onClick={()=>{ setPushAfterPrepare(true); generateExport(); }} disabled={pushing} title="Build the journal entries and push them straight to Zoho — skips the Step 5 preview." style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:6,padding:"6px 18px",fontSize:12,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 2px 10px rgba(22,163,74,0.25)"}}>⚡ {pushing?"Posting…":"Generate & Push to Zoho"}</button>
             </div>
           </div>
 
