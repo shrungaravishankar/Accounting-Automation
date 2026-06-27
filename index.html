@@ -2758,6 +2758,9 @@ function App(){
   const[billOcrQueue,setBillOcrQueue]=useState([]);
   const[billOcrUploading,setBillOcrUploading]=useState(false);
   const[billOcrReviewId,setBillOcrReviewId]=useState("");
+  const[billOcrSelected,setBillOcrSelected]=useState(new Set()); // bulk-select draft ids
+  const[billOcrBulkIds,setBillOcrBulkIds]=useState([]);          // ordered ids for bulk review
+  const[billOcrBulkIndex,setBillOcrBulkIndex]=useState(0);
   const[billOcrSub,setBillOcrSub]=useState("ocr"); // 'ocr' | 'bills' | 'payments'
   const[billOcrPushing,setBillOcrPushing]=useState(false);
   const[billVendorCreating,setBillVendorCreating]=useState(false);
@@ -3358,7 +3361,7 @@ function App(){
     setClientVersion(c.version || getClientData(id, "version", "free"));
     setAppMode("bank");
     localStorage.setItem("autoledger_active_client", id);
-    if (!(opts && opts.keepView)) { setView("clientDetail"); setClientDetailTab("projects"); }
+    if (!(opts && opts.keepView)) { setView("clientDetail"); setClientDetailTab("projects"); setSidebarOpen(true); }
   }, [clients]);
   // Pull a wide window of past Zoho expenses for the active client and seed
   // this client's per-description → ledger refDB from them. Skips entries
@@ -3924,15 +3927,16 @@ function App(){
   // Push one bill draft to Zoho. Resolves vendor (searchVendor →
   // createVendor if needed), then POSTs createBill. On success the draft
   // is marked Pushed To Zoho and stamped with the Zoho id.
-  const pushBillToZoho = useCallback(async (id)=>{
+  const pushBillToZoho = useCallback(async (id, opts={})=>{
+    const silent = !!opts.silent;  // bulk mode suppresses per-bill dialogs
     const d = billOcrQueue.find(b=>b.id===id);
-    if(!d) return;
+    if(!d) return {ok:false, reason:'not found'};
     const c = clients.find(x=>x.id===activeClientId);
     const orgId = c && c.zohoOrgId;
-    if(!orgId){ alert('Client is not linked to a Zoho organization.'); return; }
+    if(!orgId){ if(!silent) alert('Client is not linked to a Zoho organization.'); return {ok:false, reason:'no org', label:d.fileName}; }
     // Hard validators must not be failing
     const fails = (d.validations||[]).filter(v=>v.status==='fail');
-    if(fails.length){ alert('Fix these before pushing:\n\n'+fails.map(v=>'• '+v.label+': '+v.msg).join('\n')); return; }
+    if(fails.length){ if(!silent) alert('Fix these before pushing:\n\n'+fails.map(v=>'• '+v.label+': '+v.msg).join('\n')); return {ok:false, reason:'has failing validations', label:d.fileName}; }
     setBillOcrPushing(true);
     try {
       let vendorId = d.vendorId;
@@ -3950,8 +3954,8 @@ function App(){
       try {
         const dup = await window.zohoFetch('findBill', orgId, { billNumber: d.billNumber });
         const sameVendor = (dup||[]).find(b => String(b.vendor_id) === String(vendorId));
-        if(sameVendor){
-          if(!confirm('A bill with number "'+d.billNumber+'" already exists in Zoho for this vendor (status: '+sameVendor.status+'). Push anyway?')){ setBillOcrPushing(false); return; }
+        if(sameVendor && !silent){
+          if(!confirm('A bill with number "'+d.billNumber+'" already exists in Zoho for this vendor (status: '+sameVendor.status+'). Push anyway?')){ setBillOcrPushing(false); return {ok:false, reason:'duplicate cancelled', label:d.fileName}; }
         }
       } catch(_){}
       // Build line_items from the OCR lines if we have any, else a single
@@ -3959,10 +3963,12 @@ function App(){
       // the user picked in the review panel.
       const lines = (d.lineItems && d.lineItems.length>0)
         ? d.lineItems.map(li=>{
+            const qty = Number(li.quantity)||1;
+            const rate = Number(li.rate || li.amount || 0);  // taxable unit price (before VAT)
             const out = {
               name: li.description || 'Bill line',
-              rate: Number(li.amount||li.rate||0),
-              quantity: 1, // amount-as-rate to preserve the OCR'd line total
+              rate: rate,
+              quantity: qty,  // Zoho recomputes amount = qty × rate (the taxable line value)
             };
             if(li.accountId) out.account_id = li.accountId;
             return out;
@@ -3979,10 +3985,29 @@ function App(){
       };
       const r = await window.zohoCreateBill(orgId, payload);
       updateBillDraft(id, { status:'Pushed To Zoho', pushedAt: Date.now(), pushedBillId: r.id, pushedBillNumber: r.bill_number, vendorId });
+      if(!silent) alert('✓ Bill pushed to Zoho successfully'+(r.bill_number?(' as '+r.bill_number):'')+'.');
+      return {ok:true, billNumber:r.bill_number||r.id, label:d.fileName};
     } catch(e){
-      alert('Push failed: '+(e.message||String(e)));
+      if(!silent) alert('Push failed: '+(e.message||String(e)));
+      return {ok:false, error:(e.message||String(e)), label:d.fileName};
     } finally { setBillOcrPushing(false); }
   },[billOcrQueue,clients,activeClientId,updateBillDraft]);
+
+  // Bulk push the given draft ids (silent per-bill), then one summary dialog.
+  const pushBillsBulk = useCallback(async (ids)=>{
+    const list = (ids||[]).filter(Boolean);
+    if(!list.length){ alert('Select at least one bill to push.'); return; }
+    setBillOcrPushing(true);
+    const results = [];
+    for(const id of list){ results.push(await pushBillToZoho(id, {silent:true})); }
+    setBillOcrPushing(false);
+    const ok = results.filter(r=>r&&r.ok);
+    const bad = results.filter(r=>!r||!r.ok);
+    let msg = '✓ Pushed '+ok.length+' of '+list.length+' bill(s) to Zoho.';
+    if(bad.length){ msg += '\n\nSkipped/failed:\n'+bad.map(r=>'• '+((r&&r.label)||'bill')+' — '+((r&&(r.error||r.reason))||'unknown')).join('\n'); }
+    alert(msg);
+    setBillOcrSelected(new Set());
+  },[pushBillToZoho]);
 
   const vendorAdvanceAccounts=useMemo(()=>{
     const coa=chartOfAccounts||[];
@@ -5917,7 +5942,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {sidebarOpen && <div style={{padding:"4px 10px 10px",fontSize:11,fontWeight:700,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={cName}>{cName}</div>}
                 {clientItems.map(n=>{
                   const active = clientDetailTab===n.key;
-                  return <div key={n.key} onClick={()=>setClientDetailTab(n.key)} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                  return <div key={n.key} onClick={()=>{ setClientDetailTab(n.key); setSidebarOpen(false); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
                     <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
                     {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
                     {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
@@ -5940,7 +5965,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:i===0?"4px 10px 6px":"12px 10px 6px"}}>{sec.title}</div>}
                 {sec.items.map(n=>{
                   const active = view===n.key;
-                  return <div key={n.key} onClick={()=>{ setView(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                  return <div key={n.key} onClick={()=>{ setView(n.key); setSidebarOpen(false); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
                     <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
                     {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
                     {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
@@ -6395,13 +6420,13 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div></div>}
                 </div>}
 
-                {/* ── OCR Review modal ── */}
+                {/* ── OCR Review panel (inline, full-width like Bills) ── */}
                 {reviewItem && (()=>{
                   const q=reviewItem;
                   const setQ=(patch)=>updateOcrItem(q.id,patch);
                   const fails=(q.validations||[]).filter(v=>v.status==='fail' && v.key!=='push').length;
-                  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:5300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-                    <div style={{background:"#ffffff",borderRadius:12,maxWidth:900,width:"100%",maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column"}}>
+                  return <div style={{marginTop:16}}>
+                    <div style={{background:"#ffffff",borderRadius:12,width:"100%",border:"1px solid #e2e2ea",display:"flex",flexDirection:"column"}}>
                       <div style={{padding:"16px 22px",borderBottom:"1px solid #e2e2ea",display:"flex",justifyContent:"space-between",alignItems:"center",background:"rgba(22,163,74,0.04)"}}>
                         <div>
                           <h3 style={{fontSize:15,fontWeight:700,color:"#1a1a2e"}}>Review draft — {q.fileName}</h3>
@@ -6409,7 +6434,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                         </div>
                         <button onClick={()=>{ setOcrReviewId(""); setOcrBulkReviewIds([]); setOcrBulkIndex(0); }} style={{background:"transparent",border:"none",fontSize:20,color:"#777777",cursor:"pointer"}}>✕</button>
                       </div>
-                      <div style={{padding:"16px 22px",overflowY:"auto",flex:1,display:"grid",gridTemplateColumns:"1.2fr 1fr",gap:18}}>
+                      <div style={{padding:"16px 22px",display:"grid",gridTemplateColumns:"1.2fr 1fr",gap:18}}>
                         {/* Left: extracted fields (editable) */}
                         <div style={{display:"flex",flexDirection:"column",gap:10}}>
                           {/* Original document preview (session-only object URL) */}
@@ -6673,10 +6698,23 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <div style={{fontSize:32,marginBottom:8}}>🧾</div>
                       No bill drafts yet. Upload supplier bills above to get started.
                     </div>
-                  ) : (
-                    <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                  ) : (()=>{
+                    const selIds = Array.from(billOcrSelected).filter(id=>drafts.some(d=>d.id===id));
+                    const selectable = drafts.filter(d=>d.status!=='Pushed To Zoho');
+                    const allSel = selectable.length>0 && selectable.every(d=>billOcrSelected.has(d.id));
+                    const toggleAll = ()=> setBillOcrSelected(allSel ? new Set() : new Set(selectable.map(d=>d.id)));
+                    const toggleOne = (id)=> setBillOcrSelected(prev=>{ const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+                    const startBulkReview = ()=>{ if(!selIds.length) return; setBillOcrBulkIds(selIds); setBillOcrBulkIndex(0); setBillOcrReviewId(selIds[0]); };
+                    return <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                      {selIds.length>0 && <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:"rgba(8,145,178,0.06)",borderBottom:"1px solid #e2e2ea"}}>
+                        <span style={{fontSize:12,fontWeight:600,color:"#0e7490"}}>{selIds.length} selected</span>
+                        <button onClick={startBulkReview} style={{background:"#fff",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>Bulk Review</button>
+                        <button onClick={()=>pushBillsBulk(selIds)} disabled={billOcrPushing} style={{background:billOcrPushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:6,padding:"6px 16px",color:"#fff",fontSize:12,fontWeight:700,cursor:billOcrPushing?"default":"pointer"}}>⚡ {billOcrPushing?"Pushing…":"Bulk Push ("+selIds.length+")"}</button>
+                        <button onClick={()=>setBillOcrSelected(new Set())} style={{background:"transparent",border:"none",color:"#777",fontSize:11,cursor:"pointer",marginLeft:"auto"}}>Clear</button>
+                      </div>}
                       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                         <thead><tr style={{background:"#f8f9fc"}}>
+                          <th style={{padding:"10px 12px",borderBottom:"1px solid #e2e2ea",width:30,textAlign:"center"}}><input type="checkbox" checked={allSel} onChange={toggleAll} title="Select all" /></th>
                           {["File","Vendor","TRN","Bill #","Date","Total","Validation","Status",""].map(h=><th key={h} style={{padding:"10px 12px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
                         </tr></thead>
                         <tbody>{drafts.map(d=>{
@@ -6688,6 +6726,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                                      : warns>0 ? {bg:"rgba(217,119,6,0.10)",fg:"#d97706"}
                                      : {bg:"rgba(8,145,178,0.10)",fg:"#0891b2"};
                           return <tr key={d.id} style={{borderBottom:"1px solid #f8f9fc"}}>
+                            <td style={{padding:"9px 12px",textAlign:"center"}}>{d.status!=='Pushed To Zoho' ? <input type="checkbox" checked={billOcrSelected.has(d.id)} onChange={()=>toggleOne(d.id)} /> : <span style={{color:"#16a34a"}}>✓</span>}</td>
                             <td style={{padding:"9px 12px",color:"#1a1a2e",fontWeight:500,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={d.fileName}>{d.fileName}</td>
                             <td style={{padding:"9px 12px",color:"#1a1a2e"}}>{d.vendorName||<span style={{color:"#bbb"}}>—</span>}</td>
                             <td style={{padding:"9px 12px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{d.vendorTrn||<span style={{color:"#bbb"}}>—</span>}</td>
@@ -6702,8 +6741,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                           </tr>;
                         })}</tbody>
                       </table>
-                    </div>
-                  )}
+                    </div>;
+                  })()}
 
                   {/* Inline review panel — PDF preview on the left, form on the right */}
                   {reviewDraft && (()=>{
@@ -6716,19 +6755,36 @@ td,th{padding:8px 12px;vertical-align:middle}
                       if(updated){ updateBillDraft(d.id, { validations: runBillValidators(updated) }); }
                     };
                     const setLine = (lineId, patch) => {
-                      const nextLines = (d.lineItems||[]).map(li => li.id===lineId ? {...li, ...patch} : li);
-                      setField({ lineItems: nextLines });
+                      const nextLines = (d.lineItems||[]).map(li => {
+                        if(li.id!==lineId) return li;
+                        const merged = {...li, ...patch};
+                        const qty = Number(merged.quantity)||1;     // qty defaults to 1
+                        const rate = Number(merged.rate||0);        // rate = amount before VAT
+                        merged.quantity = qty;
+                        merged.amount = Math.round(qty*rate*100)/100; // amount = qty × rate
+                        return merged;
+                      });
+                      // Subtotal = Σ line amounts (taxable); Total = Subtotal + VAT.
+                      const sub = Math.round(nextLines.reduce((s,li)=>s+(Number(li.amount)||0),0)*100)/100;
+                      const vat = Number(d.vat)||0;
+                      setField({ lineItems: nextLines, subtotal: sub, total: Math.round((sub+vat)*100)/100 });
                     };
                     const dataUri = d.fileBase64 ? ("data:"+(d.fileType||'application/pdf')+";base64,"+d.fileBase64) : null;
                     const isPdf = (d.fileType||'').includes('pdf') || /\.pdf$/i.test(d.fileName||'');
+                    const bulkPos = billOcrBulkIds.indexOf(d.id);
+                    const inBulk = billOcrBulkIds.length>1 && bulkPos>=0;
+                    const gotoBulk = (i)=>{ if(i>=0 && i<billOcrBulkIds.length){ setBillOcrBulkIndex(i); setBillOcrReviewId(billOcrBulkIds[i]); } };
                     return <div style={{marginTop:14,background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,gap:10,flexWrap:"wrap"}}>
                         <div>
                           <div style={{fontSize:14,fontWeight:700,color:"#1a1a2e"}}>Review · {d.fileName}</div>
                           <div style={{fontSize:11,color:"#777",marginTop:2}}>Cross-check against the bill on the left, pick an expense account per line, then push to Zoho.</div>
                         </div>
-                        <div style={{display:"flex",gap:8}}>
-                          <button onClick={()=>setBillOcrReviewId("")} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 14px",color:"#555",fontSize:12,fontWeight:600,cursor:"pointer"}}>Close</button>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          {inBulk && <span style={{fontSize:11,fontWeight:600,color:"#4D3FA0",fontFamily:"'IBM Plex Mono',monospace"}}>Bulk {bulkPos+1}/{billOcrBulkIds.length}</span>}
+                          {inBulk && <button onClick={()=>gotoBulk(bulkPos-1)} disabled={bulkPos<=0} style={{background:"#fff",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 10px",color:bulkPos<=0?"#bbb":"#4D3FA0",fontSize:12,fontWeight:600,cursor:bulkPos<=0?"default":"pointer"}}>‹ Prev</button>}
+                          {inBulk && <button onClick={()=>gotoBulk(bulkPos+1)} disabled={bulkPos>=billOcrBulkIds.length-1} style={{background:"#fff",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 10px",color:bulkPos>=billOcrBulkIds.length-1?"#bbb":"#4D3FA0",fontSize:12,fontWeight:600,cursor:bulkPos>=billOcrBulkIds.length-1?"default":"pointer"}}>Next ›</button>}
+                          <button onClick={()=>{ setBillOcrReviewId(""); setBillOcrBulkIds([]); }} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:6,padding:"7px 14px",color:"#555",fontSize:12,fontWeight:600,cursor:"pointer"}}>Close</button>
                           <button onClick={()=>{ if(confirm('Delete this draft?')){ setBillOcrQueue(prev=>{ const n=prev.filter(x=>x.id!==d.id); persistBillOcr(n); return n; }); setBillOcrReviewId(""); } }} style={{background:"#fff",border:"1px solid rgba(220,38,38,0.4)",borderRadius:6,padding:"7px 14px",color:"#dc2626",fontSize:12,fontWeight:600,cursor:"pointer"}}>🗑 Delete</button>
                           <button onClick={()=>pushBillToZoho(d.id)} disabled={billOcrPushing||d.status==='Pushed To Zoho'||((d.validations||[]).some(v=>v.status==='fail'))} style={{background:(billOcrPushing||d.status==='Pushed To Zoho'||((d.validations||[]).some(v=>v.status==='fail')))?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",border:"none",borderRadius:6,padding:"8px 18px",color:"#fff",fontSize:13,fontWeight:700,cursor:(billOcrPushing||d.status==='Pushed To Zoho')?"default":"pointer"}}>⚡ {d.status==='Pushed To Zoho'?'Already pushed':billOcrPushing?'Posting…':'Push to Zoho'}</button>
                         </div>
@@ -6811,18 +6867,21 @@ td,th{padding:8px 12px;vertical-align:middle}
                             ) : (
                               <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
                                 <thead><tr style={{background:"#fafbfc"}}>
-                                  {["Description","Qty","Amount","Expense account","" ].map(h=><th key={h} style={{padding:"7px 10px",textAlign:"left",fontSize:10,color:"#888",fontWeight:600,borderBottom:"1px solid #f0f0f4"}}>{h}</th>)}
+                                  {["Description","Qty","Rate","Amount","Expense account","" ].map(h=><th key={h} style={{padding:"7px 10px",textAlign:"left",fontSize:10,color:"#888",fontWeight:600,borderBottom:"1px solid #f0f0f4"}}>{h}</th>)}
                                 </tr></thead>
                                 <tbody>{d.lineItems.map(li=>(
                                   <tr key={li.id} style={{borderBottom:"1px solid #f8f9fc"}}>
                                     <td style={{padding:"6px 10px",minWidth:260,verticalAlign:"top"}}>
                                       <AutoGrowText value={li.description} onChange={e=>setLine(li.id,{description:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,whiteSpace:"pre-wrap",wordBreak:"break-word"}} />
                                     </td>
-                                    <td style={{padding:"6px 10px",width:60}}>
+                                    <td style={{padding:"6px 10px",width:54}}>
                                       <input type="number" step="0.01" value={(Number.isFinite(Number(li.quantity)) && Number(li.quantity)>0) ? li.quantity : 1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)||1})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} />
                                     </td>
+                                    <td style={{padding:"6px 10px",width:96}}>
+                                      <input type="number" step="0.01" value={Number(li.rate||li.amount||0)} onChange={e=>setLine(li.id,{rate:Number(e.target.value)||0})} title="Rate = amount before VAT" style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}} />
+                                    </td>
                                     <td style={{padding:"6px 10px",width:100}}>
-                                      <input type="number" step="0.01" value={li.amount||0} onChange={e=>setLine(li.id,{amount:Number(e.target.value)})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}} />
+                                      <input type="number" readOnly value={(Math.round(((Number(li.quantity)||1)*(Number(li.rate||li.amount||0)))*100)/100)} title="Amount = Qty × Rate (auto)" style={{width:"100%",padding:"5px 8px",border:"1px solid #f0f0f4",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right",background:"#f8f9fc",color:"#555"}} />
                                     </td>
                                     <td style={{padding:"6px 10px",minWidth:180}}>
                                       <select value={li.accountId||''} onChange={e=>setLine(li.id,{accountId:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid "+(li.accountId?"rgba(8,145,178,0.4)":"rgba(217,119,6,0.4)"),borderRadius:5,fontSize:11,color:li.accountId?"#0891b2":"#a16207"}}>
@@ -6839,12 +6898,18 @@ td,th{padding:8px 12px;vertical-align:middle}
                             )}
                           </div>
 
-                          {/* Totals row */}
-                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-                            <div><label style={{fontSize:10,color:"#888"}}>Subtotal</label><input type="number" step="0.01" value={d.subtotal||0} onChange={e=>setField({subtotal:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                            <div><label style={{fontSize:10,color:"#888"}}>VAT amount</label><input type="number" step="0.01" value={d.vat||0} onChange={e=>setField({vat:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                            <div><label style={{fontSize:10,color:"#888"}}>Total</label><input type="number" step="0.01" value={d.total||0} onChange={e=>setField({total:Number(e.target.value)})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
-                          </div>
+                          {/* Totals — Subtotal = Σ line amounts (taxable); Total = Subtotal + VAT */}
+                          {(()=>{
+                            const hasLines = (d.lineItems||[]).length>0;
+                            const sub = Number(d.subtotal)||0;
+                            const vat = Number(d.vat)||0;
+                            const tot = Math.round((sub+vat)*100)/100;
+                            return <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+                              <div><label style={{fontSize:10,color:"#888"}}>Subtotal{hasLines?" (Σ lines)":""}</label><input type="number" step="0.01" readOnly={hasLines} value={sub} onChange={e=>{ const s=Number(e.target.value)||0; setField({subtotal:s, total:Math.round((s+vat)*100)/100}); }} style={{width:"100%",padding:"7px 10px",border:"1px solid "+(hasLines?"#f0f0f4":"#e2e2ea"),borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace",background:hasLines?"#f8f9fc":"#fff",color:hasLines?"#555":"#1a1a2e"}} /></div>
+                              <div><label style={{fontSize:10,color:"#888"}}>VAT amount</label><input type="number" step="0.01" value={vat} onChange={e=>{ const v=Number(e.target.value)||0; setField({vat:v, total:Math.round((sub+v)*100)/100}); }} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace"}} /></div>
+                              <div><label style={{fontSize:10,color:"#888"}}>Total (Subtotal + VAT)</label><input type="number" readOnly value={tot} style={{width:"100%",padding:"7px 10px",border:"1px solid #f0f0f4",borderRadius:6,fontSize:12,marginTop:3,fontFamily:"'IBM Plex Mono',monospace",background:"#f8f9fc",color:"#555"}} /></div>
+                            </div>;
+                          })()}
                         </div>
                       </div>
 
