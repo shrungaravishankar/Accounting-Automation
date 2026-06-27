@@ -2797,6 +2797,8 @@ function App(){
   // UAE tax list from Zoho /settings/taxes — lazy-loaded once per session.
   const[zohoTaxes,setZohoTaxes]=useState([]);
   const[zohoTaxesLoading,setZohoTaxesLoading]=useState(false);
+  // ── Client onboarding tour (workflow walkthrough shown on first open) ──
+  const[clientTourOpen,setClientTourOpen]=useState(false);
   // ── Invoice OCR module (Revenue tab) ──
   // Queue of OCR'd invoice drafts for the active client. Persisted into
   // the per-client config under 'ocrDrafts'. Item shape:
@@ -3361,7 +3363,11 @@ function App(){
     setClientVersion(c.version || getClientData(id, "version", "free"));
     setAppMode("bank");
     localStorage.setItem("autoledger_active_client", id);
-    if (!(opts && opts.keepView)) { setView("clientDetail"); setClientDetailTab("projects"); setSidebarOpen(true); }
+    if (!(opts && opts.keepView)) {
+      setView("clientDetail"); setClientDetailTab("revenue"); setSidebarOpen(true);
+      // First time into a client → show the workflow walkthrough (skippable).
+      try { if (localStorage.getItem("al_client_tour_done") !== "1") setClientTourOpen(true); } catch(_){}
+    }
   }, [clients]);
   // Pull a wide window of past Zoho expenses for the active client and seed
   // this client's per-description → ledger refDB from them. Skips entries
@@ -3958,6 +3964,21 @@ function App(){
           if(!confirm('A bill with number "'+d.billNumber+'" already exists in Zoho for this vendor (status: '+sameVendor.status+'). Push anyway?')){ setBillOcrPushing(false); return {ok:false, reason:'duplicate cancelled', label:d.fileName}; }
         }
       } catch(_){}
+      // Resolve the input-VAT tax_id. A line with only a rate is booked by
+      // Zoho UAE as no-tax (VAT shows blank), exactly like invoices — the
+      // tax_id is what makes Zoho apply and report the VAT on the bill.
+      let billTaxes = [];
+      try { billTaxes = (await window.zohoFetch('taxes', orgId)) || []; } catch(_){ billTaxes = []; }
+      const vatRate = (Number(d.vat)>0 && Number(d.subtotal)>0)
+        ? Math.round((Number(d.vat)/Number(d.subtotal))*100)
+        : Number(d.vatPercent||0);
+      let billTaxId = null;
+      if(vatRate>0){
+        const matches = billTaxes.filter(t=>Number(t.percentage)===vatRate);
+        // Prefer a purchase/input/standard 5% tax when an org has several.
+        const pick = matches.find(t=>/purchase|input|standard/i.test(t.name||'')) || matches[0];
+        if(pick) billTaxId = pick.id;
+      }
       // Build line_items from the OCR lines if we have any, else a single
       // fallback line carrying the subtotal. Per-line account_id is what
       // the user picked in the review panel.
@@ -3971,9 +3992,10 @@ function App(){
               quantity: qty,  // Zoho recomputes amount = qty × rate (the taxable line value)
             };
             if(li.accountId) out.account_id = li.accountId;
+            if(billTaxId) out.tax_id = billTaxId;  // apply input VAT
             return out;
           })
-        : [{ name:'Bill line (OCR)', rate: Number(d.subtotal||0), quantity: 1 }];
+        : [{ name:'Bill line (OCR)', rate: Number(d.subtotal||0), quantity: 1, ...(billTaxId?{tax_id:billTaxId}:{}) }];
       const payload = {
         vendor_id: vendorId,
         bill_number: d.billNumber,
@@ -5925,10 +5947,12 @@ td,th{padding:8px 12px;vertical-align:middle}
               const c = clients.find(x=>x.id===activeClientId);
               const projects = projectLog[activeClientId] || [];
               const cName = (c && c.name) || activeClientName || "Client";
+              // Ordered to follow the accounting workflow: Revenue first, then
+              // Bills, then Bank Statement reconciliation — then the support tabs.
               const clientItems = [
-                {key:"projects",   label:"Bank Statement Upload", icon:"🏦", count: projects.length||undefined},
                 {key:"revenue",    label:"Revenue",               icon:"💰", count: ocrQueue.length||undefined},
                 {key:"bills",      label:"Bills",                 icon:"🧾", count: (billOcrQueue||[]).length||undefined},
+                {key:"projects",   label:"Bank Statement Upload", icon:"🏦", count: projects.length||undefined},
                 {key:"masterData", label:"Master Data",           icon:"📚"},
                 {key:"settings",   label:"Settings",              icon:"⚙"},
                 {key:"activity",   label:"Activity",              icon:"📊"},
@@ -5939,7 +5963,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                   <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>‹</span>
                   {sidebarOpen && <span style={{flex:1}}>All Clients</span>}
                 </div>
-                {sidebarOpen && <div style={{padding:"4px 10px 10px",fontSize:11,fontWeight:700,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={cName}>{cName}</div>}
+                {sidebarOpen && <div style={{padding:"4px 10px 2px",fontSize:11,fontWeight:700,color:"#1a1a2e",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={cName}>{cName}</div>}
+                {sidebarOpen && <div onClick={()=>setClientTourOpen(true)} title="Show the workflow walkthrough" style={{padding:"0 10px 10px",fontSize:10,color:"#4D3FA0",cursor:"pointer",fontWeight:600}}>↻ Take a tour</div>}
                 {clientItems.map(n=>{
                   const active = clientDetailTab===n.key;
                   return <div key={n.key} onClick={()=>{ setClientDetailTab(n.key); setSidebarOpen(false); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
@@ -5975,6 +6000,37 @@ td,th{padding:8px 12px;vertical-align:middle}
             ));
           })()}
         </div>
+
+        {/* ── Client workflow walkthrough (shown on first open, skippable) ── */}
+        {clientTourOpen && <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:6000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div style={{background:"#fff",borderRadius:14,maxWidth:560,width:"100%",padding:"26px 28px",boxShadow:"0 20px 60px rgba(0,0,0,0.3)"}}>
+            <div style={{fontSize:18,fontWeight:800,color:"#1a1a2e",marginBottom:4}}>Welcome — here's the accounting flow</div>
+            <div style={{fontSize:12,color:"#777",marginBottom:18}}>Work through these in order each period. Click a step to jump straight to it, or skip if you already know the ropes.</div>
+            {[
+              {icon:"💰",tab:"revenue", title:"Revenue",        desc:"Upload sales invoices (if any), review the extracted fields, then push to Zoho."},
+              {icon:"🧾",tab:"bills",   title:"Bills",          desc:"Upload supplier bills (if any), review vendor / TRN / amounts, then push to Zoho."},
+              {icon:"🏦",tab:"projects",title:"Bank Statement", desc:"Upload the bank statement, classify each transaction, then push to Zoho."},
+            ].map((s,i)=>(
+              <div key={s.tab} onClick={()=>{ setClientDetailTab(s.tab); setClientTourOpen(false); setSidebarOpen(false); }} style={{display:"flex",gap:14,alignItems:"flex-start",padding:"12px 14px",border:"1px solid #eee",borderRadius:10,marginBottom:10,cursor:"pointer",background:"#fafbff"}}>
+                <div style={{width:30,height:30,borderRadius:8,background:"#4D3FA0",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>{i+1}</div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>{s.icon} {s.title}</div>
+                  <div style={{fontSize:11,color:"#777",marginTop:2}}>{s.desc}</div>
+                </div>
+                <div style={{color:"#4D3FA0",fontSize:18}}>›</div>
+              </div>
+            ))}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:16,flexWrap:"wrap",gap:10}}>
+              <label style={{fontSize:11,color:"#888",display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
+                <input type="checkbox" onChange={e=>{ try{ localStorage.setItem("al_client_tour_done", e.target.checked?"1":"0"); }catch(_){} }} /> Don't show this again
+              </label>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setClientTourOpen(false)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,padding:"9px 18px",color:"#555",fontSize:12,fontWeight:600,cursor:"pointer"}}>Skip</button>
+                <button onClick={()=>{ setClientDetailTab("revenue"); setClientTourOpen(false); setSidebarOpen(false); }} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",border:"none",borderRadius:8,padding:"9px 20px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>Start with Revenue →</button>
+              </div>
+            </div>
+          </div>
+        </div>}
 
         {/* Quick switch + Recent projects moved to the dedicated Projects
             view (see view==="projects" block). Sidebar shows only the
@@ -6874,14 +6930,14 @@ td,th{padding:8px 12px;vertical-align:middle}
                                     <td style={{padding:"6px 10px",minWidth:260,verticalAlign:"top"}}>
                                       <AutoGrowText value={li.description} onChange={e=>setLine(li.id,{description:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,whiteSpace:"pre-wrap",wordBreak:"break-word"}} />
                                     </td>
-                                    <td style={{padding:"6px 10px",width:54}}>
-                                      <input type="number" step="0.01" value={(Number.isFinite(Number(li.quantity)) && Number(li.quantity)>0) ? li.quantity : 1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)||1})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} />
+                                    <td style={{padding:"6px 10px",width:72,minWidth:64}}>
+                                      <input type="number" step="0.01" value={(Number.isFinite(Number(li.quantity)) && Number(li.quantity)>0) ? li.quantity : 1} onChange={e=>setLine(li.id,{quantity:Number(e.target.value)||1})} style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right",boxSizing:"border-box"}} />
                                     </td>
-                                    <td style={{padding:"6px 10px",width:96}}>
-                                      <input type="number" step="0.01" value={Number(li.rate||li.amount||0)} onChange={e=>setLine(li.id,{rate:Number(e.target.value)||0})} title="Rate = amount before VAT" style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right"}} />
+                                    <td style={{padding:"6px 10px",width:130,minWidth:110}}>
+                                      <input type="number" step="0.01" value={Number(li.rate||li.amount||0)} onChange={e=>setLine(li.id,{rate:Number(e.target.value)||0})} title="Rate = amount before VAT" style={{width:"100%",padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right",boxSizing:"border-box"}} />
                                     </td>
-                                    <td style={{padding:"6px 10px",width:100}}>
-                                      <input type="number" readOnly value={(Math.round(((Number(li.quantity)||1)*(Number(li.rate||li.amount||0)))*100)/100)} title="Amount = Qty × Rate (auto)" style={{width:"100%",padding:"5px 8px",border:"1px solid #f0f0f4",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right",background:"#f8f9fc",color:"#555"}} />
+                                    <td style={{padding:"6px 10px",width:130,minWidth:110}}>
+                                      <input type="number" readOnly value={(Math.round(((Number(li.quantity)||1)*(Number(li.rate||li.amount||0)))*100)/100)} title="Amount = Qty × Rate (auto)" style={{width:"100%",padding:"5px 8px",border:"1px solid #f0f0f4",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",textAlign:"right",background:"#f8f9fc",color:"#555",boxSizing:"border-box"}} />
                                     </td>
                                     <td style={{padding:"6px 10px",minWidth:180}}>
                                       <select value={li.accountId||''} onChange={e=>setLine(li.id,{accountId:e.target.value})} style={{width:"100%",padding:"5px 8px",border:"1px solid "+(li.accountId?"rgba(8,145,178,0.4)":"rgba(217,119,6,0.4)"),borderRadius:5,fontSize:11,color:li.accountId?"#0891b2":"#a16207"}}>
@@ -7508,6 +7564,17 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <span style={{fontSize:10,padding:"4px 10px",borderRadius:14,background:"rgba(22,163,74,0.08)",color:"#16a34a",fontWeight:600,border:"1px solid rgba(22,163,74,0.2)"}}>Phase 3 · Push &amp; close</span>
               </div>
             </div>
+
+            <Phase num="▶" title="The order of work each period" subtitle="Do these three in sequence for every client, every period" color="#6958C2" bg="rgba(105,88,194,0.08)">
+              <Step icon="💰" title="1 · Revenue — sales invoices"
+                desc="Open the client → Revenue. Upload any sales invoices, review the extracted customer / amounts / VAT, then push them to Zoho. Skip if there are none this period." />
+              <Step icon="🧾" title="2 · Bills — supplier bills"
+                desc="Open Bills. Upload supplier bills, check the vendor, TRN, bill number and the Qty / Rate / Amount lines, pick an expense account per line, then push to Zoho. Bulk Review and Bulk Push clear several at once." />
+              <Step icon="🏦" title="3 · Bank Statement — reconcile"
+                desc="Open Bank Statement Upload. Upload the statement, classify each transaction to the right ledger (matching the invoices and bills you just pushed), then push to Zoho." />
+              <Step icon="💡" title="New to a client? Take the tour"
+                desc="The first time you open a client, a short walkthrough of these three steps appears. Reopen it any time via “↻ Take a tour” under the client name in the sidebar, or dismiss it permanently with “Don't show this again”." tone="tip" />
+            </Phase>
 
             <Phase num="1" title="One-time setup" subtitle="Connect Zoho, then bring in your client" color="#4D3FA0" bg="rgba(105,88,194,0.08)">
               <Step icon="🔗" title="Connect to Zoho Books"
