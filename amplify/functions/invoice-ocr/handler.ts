@@ -22,10 +22,17 @@ import {
   PutObjectCommand,
   DeleteObjectCommand
 } from '@aws-sdk/client-s3';
+import {
+  BedrockRuntimeClient,
+  InvokeModelCommand
+} from '@aws-sdk/client-bedrock-runtime';
 
 const textract = new TextractClient({});
 const s3 = new S3Client({});
 const OCR_BUCKET = process.env.OCR_BUCKET || '';
+const BEDROCK_REGION = process.env.BEDROCK_REGION || 'us-east-1';
+const BEDROCK_MODEL_ID = process.env.BEDROCK_MODEL_ID || '';
+const bedrock = new BedrockRuntimeClient({ region: BEDROCK_REGION });
 
 /** True if the bytes / mime indicate a PDF (sync Textract only takes 1-page PDFs). */
 function isPdf(bytes: Uint8Array, mimeType?: string): boolean {
@@ -140,6 +147,136 @@ type Event = {
   arguments: { fileBase64: string; mimeType?: string };
   identity?: { username?: string; claims?: Record<string, any> };
 };
+
+declare const TextDecoder: { new (): { decode(input: Uint8Array): string } };
+
+/** Detect the media type for Claude from the bytes / declared mime. */
+function mediaTypeOf(bytes: Uint8Array, mimeType?: string): string {
+  if (mimeType) {
+    const m = mimeType.toLowerCase();
+    if (m.includes('pdf')) return 'application/pdf';
+    if (m.includes('png')) return 'image/png';
+    if (m.includes('jpeg') || m.includes('jpg')) return 'image/jpeg';
+    if (m.includes('webp')) return 'image/webp';
+    if (m.includes('gif')) return 'image/gif';
+  }
+  if (bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) return 'application/pdf';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+  return 'image/jpeg';
+}
+
+const CLAUDE_PROMPT = [
+  'You are an expert UAE accounting data-extraction engine. Read this supplier bill / tax invoice and return ONLY a JSON object (no prose, no markdown fences) with exactly these keys:',
+  '{',
+  '  "vendor_name": string|null,        // the SUPPLIER / issuer (the "From" party)',
+  '  "vendor_trn": string|null,         // supplier 15-digit TRN; null if absent or all-zeros placeholder',
+  '  "receiver_name": string|null,      // the CUSTOMER billed (the "To"/"Bill To" party)',
+  '  "receiver_trn": string|null,',
+  '  "invoice_number": string|null,     // the bill/invoice/tax-invoice number; NOT a PO/order/account number',
+  '  "invoice_date": string|null,       // YYYY-MM-DD',
+  '  "due_date": string|null,           // YYYY-MM-DD',
+  '  "currency": string|null,           // 3-letter code, e.g. AED',
+  '  "line_items": [ { "description": string, "quantity": number, "rate": number, "amount": number } ],',
+  '  "subtotal": number|null,           // sum of line taxable amounts (BEFORE VAT)',
+  '  "tax": number|null,                // total VAT amount',
+  '  "total": number|null               // subtotal + VAT',
+  '}',
+  'Rules: All monetary values are plain numbers — strip currency symbols, codes and thousands separators. For each line item: quantity defaults to 1 when not shown; rate is the unit price BEFORE VAT; amount is the TAXABLE line value (quantity x rate, BEFORE VAT) — never the VAT-inclusive figure. subtotal = sum of line amounts. tax = total VAT. total = subtotal + tax. Never invent a TRN; ignore all-zero placeholders. Use null for anything not present. Return JSON only.'
+].join('\n');
+
+/**
+ * Primary extractor — Claude (Sonnet 4.6) vision via Amazon Bedrock. Reads
+ * photographed / dense multi-column invoices far more reliably than Textract.
+ * Returns the same field set the Textract path produces, or throws so the
+ * caller can fall back to Textract.
+ */
+async function extractInvoiceWithClaude(rawB64: string, mediaType: string): Promise<any> {
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const isPdfDoc = mediaType === 'application/pdf';
+  const mediaBlock = isPdfDoc
+    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: rawB64 } }
+    : { type: 'image', source: { type: 'base64', media_type: mediaType, data: rawB64 } };
+  const body = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 3000,
+    messages: [{ role: 'user', content: [mediaBlock, { type: 'text', text: CLAUDE_PROMPT }] }]
+  };
+  const res = await bedrock.send(new InvokeModelCommand({
+    modelId: BEDROCK_MODEL_ID,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: JSON.stringify(body)
+  }));
+  const payload = JSON.parse(new TextDecoder().decode(res.body as Uint8Array));
+  const text = ((payload.content || []) as any[]).filter((c) => c.type === 'text').map((c) => c.text).join('');
+  // Pull the JSON object out of the response (tolerate stray fences/prose).
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('Claude returned no JSON object.');
+  const f = JSON.parse(text.slice(start, end + 1));
+
+  const num = (v: any) => { const n = Number(v); return isFinite(n) && n > 0 ? n : 0; };
+  const validTrn = (s: any) => typeof s === 'string' && /^\d{15}$/.test(s.replace(/\D/g, '')) && !/^(\d)\1{14}$/.test(s.replace(/\D/g, ''));
+
+  // Normalize line items: quantity ≥ 1, amount = quantity × rate (taxable).
+  const lineItems = (Array.isArray(f.line_items) ? f.line_items : []).map((li: any) => {
+    const quantity = num(li.quantity) || 1;
+    let rate = num(li.rate);
+    let amount = num(li.amount);
+    if (!rate && amount) rate = round2(amount / quantity);
+    amount = round2(quantity * rate);
+    return { description: String(li.description || '').trim(), quantity, rate, amount, confidence: 99 };
+  }).filter((li: any) => li.description || li.amount > 0);
+
+  // Totals with the same arithmetic guard used elsewhere: subtotal is the
+  // taxable base, total = subtotal + VAT. Trust Claude, but reconcile.
+  const taxN = num(f.tax);
+  let subtotalN = num(f.subtotal);
+  let totalN = num(f.total);
+  const sumLines = round2(lineItems.reduce((s: number, li: any) => s + li.amount, 0));
+  if (!subtotalN && sumLines) subtotalN = sumLines;
+  // If line amounts came back VAT-inclusive (sum ≈ total, not subtotal), strip VAT.
+  if (sumLines && totalN && Math.abs(sumLines - totalN) <= Math.max(1, totalN * 0.03) &&
+      subtotalN && Math.abs(sumLines - subtotalN) > Math.max(1, subtotalN * 0.03)) {
+    for (const li of lineItems) { li.amount = round2(li.amount * (subtotalN / sumLines)); li.rate = li.quantity > 0 ? round2(li.amount / li.quantity) : li.amount; }
+  }
+  if (!totalN && subtotalN) totalN = round2(subtotalN + taxN);
+  if (subtotalN && taxN && Math.abs((subtotalN + taxN) - totalN) > 1) totalN = round2(subtotalN + taxN);
+  const vatPercent = subtotalN > 0 && taxN > 0 ? round2((taxN / subtotalN) * 100) : null;
+
+  const vendorTrn = validTrn(f.vendor_trn) ? String(f.vendor_trn).replace(/\D/g, '') : null;
+  const receiverTrn = validTrn(f.receiver_trn) ? String(f.receiver_trn).replace(/\D/g, '') : null;
+
+  return {
+    error: null,
+    extractor: 'claude',
+    vendor_name: f.vendor_name || '',
+    vendor_confidence: 99,
+    receiver_name: f.receiver_name || '',
+    receiver_confidence: 99,
+    vendor_trn: vendorTrn,
+    receiver_trn: receiverTrn,
+    vendor_address: f.vendor_address || '',
+    receiver_address: f.receiver_address || '',
+    invoice_number: f.invoice_number || '',
+    invoice_date: f.invoice_date || null,
+    invoice_date_raw: f.invoice_date || '',
+    due_date: f.due_date || null,
+    total: totalN,
+    subtotal: subtotalN,
+    tax: taxN,
+    vat_percent: vatPercent,
+    line_items: lineItems,
+    doc_type: f.doc_type || 'invoice',
+    is_invoice: true,
+    is_credit_note: false,
+    currency: String(f.currency || 'AED').toUpperCase(),
+    vat_flags: [],
+    page_count: 1,
+    confidences: { vendor: 99, receiver: 99, invoice_number: 99, date: 99, total: 99, subtotal: 99, tax: 99 }
+  };
+}
 
 /**
  * Pull a labelled field's value (and confidence) out of Textract's
@@ -267,6 +404,22 @@ export const handler = async (event: Event) => {
     if (!b64) return JSON.stringify({ error: 'fileBase64 is required.' });
 
     const bytes = decodeBase64(b64);
+
+    // ---- Primary path: Claude (Sonnet 4.6) vision via Bedrock ----
+    // Far better on photographed / dense multi-column invoices, and cheaper
+    // than the Textract AnalyzeExpense path. Falls through to Textract on any
+    // error (model access not enabled, parse failure, Bedrock unavailable).
+    if (BEDROCK_MODEL_ID) {
+      try {
+        const idx = b64.indexOf(',');
+        const rawB64 = idx >= 0 && b64.slice(0, idx).startsWith('data:') ? b64.slice(idx + 1) : b64;
+        const mediaType = mediaTypeOf(bytes, event.arguments?.mimeType);
+        const claudeResult = await extractInvoiceWithClaude(rawB64, mediaType);
+        return JSON.stringify(claudeResult);
+      } catch (e: any) {
+        console.warn('[claude-ocr] extraction failed, falling back to Textract:', e?.name, e?.message);
+      }
+    }
 
     // Sync AnalyzeExpense is fast but only accepts single-page PDFs / images.
     // For PDFs we try sync first (covers single-page bills) and fall back to

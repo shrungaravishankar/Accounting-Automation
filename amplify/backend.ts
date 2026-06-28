@@ -207,3 +207,20 @@ backend.invoiceOcr.resources.lambda.addToRolePolicy(
     resources: [ocrBucket.bucketArn + '/textract-temp/*']
   })
 );
+// Primary extractor: Claude (Sonnet 4.6) vision via Amazon Bedrock — reads
+// photographed / dense multi-column invoices far better than Textract, and
+// costs less than the AnalyzeExpense path. Textract remains the fallback.
+// Claude on Bedrock is NOT in me-central-1, so we call a region that has it.
+// NOTE: enable model access for the model below in the Bedrock console of that
+// region (Bedrock → Model access) before this works.
+backend.invoiceOcr.addEnvironment('BEDROCK_REGION', 'us-east-1');
+backend.invoiceOcr.addEnvironment('BEDROCK_MODEL_ID', 'us.anthropic.claude-sonnet-4-6-v1:0');
+backend.invoiceOcr.resources.lambda.addToRolePolicy(
+  new PolicyStatement({
+    effect: Effect.ALLOW,
+    actions: ['bedrock:InvokeModel'],
+    // Cross-region inference profiles fan out to multiple regional model ARNs,
+    // so "*" is the pragmatic scope for the Claude foundation models.
+    resources: ['*']
+  })
+);
