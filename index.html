@@ -3823,13 +3823,26 @@ function App(){
       }
     }
 
-    // 4 — Math
+    // 4 — Math. The tool computes the arithmetic itself and checks it, rather
+    // than blindly trusting the figures OCR'd off the document.
     const sub = Number(d.subtotal||0), vat = Number(d.vat||0), tot = Number(d.total||0);
+    const lineSum = (d.lineItems||[]).reduce((s,li)=>s + ((Number(li.quantity)||1)*(Number(li.rate||li.amount||0))), 0);
     if(tot > 0){
       const diff = Math.abs((sub+vat) - tot);
       if(diff > 1) push('math','Subtotal + VAT = Total','fail','Off by '+diff.toFixed(2)+' — re-check the figures.');
       else push('math','Subtotal + VAT = Total','pass','Balances to '+tot.toFixed(2)+'.');
     } else push('math','Subtotal + VAT = Total','warn','Total is zero or missing.');
+    // Subtotal should equal the sum of line amounts (Σ qty × rate).
+    if((d.lineItems||[]).length>0 && sub>0 && Math.abs(lineSum - sub) > Math.max(1, sub*0.01)){
+      push('linesum','Lines = Subtotal','warn','Line amounts add up to '+lineSum.toFixed(2)+' but subtotal is '+sub.toFixed(2)+' — check the line items.');
+    }
+    // VAT should be ~5% of the taxable subtotal (UAE standard). Flag big drift
+    // (helps catch an OCR mis-read where VAT grabbed the wrong figure).
+    if(sub>0 && vat>0){
+      const impliedRate = (vat/sub)*100;
+      if(Math.abs(impliedRate - 5) > 1.5 && Math.abs(impliedRate - 0) > 1.5)
+        push('vatrate','VAT rate check','warn','VAT is '+impliedRate.toFixed(1)+'% of subtotal — UAE standard is 5%. Verify the VAT amount.');
+    }
 
     // 5 — Required for Zoho push
     const lines = d.lineItems || [];
@@ -6921,7 +6934,8 @@ td,th{padding:8px 12px;vertical-align:middle}
                             {(!d.lineItems || d.lineItems.length===0) ? (
                               <div style={{padding:14,fontSize:11,color:"#888"}}>No line items extracted. Add one manually or rely on subtotal-only fallback.</div>
                             ) : (
-                              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                              <div style={{overflowX:"auto"}}>
+                              <table style={{width:"100%",minWidth:760,borderCollapse:"collapse",fontSize:11}}>
                                 <thead><tr style={{background:"#fafbfc"}}>
                                   {["Description","Qty","Rate","Amount","Expense account","" ].map(h=><th key={h} style={{padding:"7px 10px",textAlign:"left",fontSize:10,color:"#888",fontWeight:600,borderBottom:"1px solid #f0f0f4"}}>{h}</th>)}
                                 </tr></thead>
@@ -6951,6 +6965,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                                   </tr>
                                 ))}</tbody>
                               </table>
+                              </div>
                             )}
                           </div>
 

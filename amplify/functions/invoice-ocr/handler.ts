@@ -343,9 +343,14 @@ export const handler = async (event: Event) => {
     // so recover those deterministically from the flat text lines.
     const fullLines = rawLines.map((l) => l.trim()).filter(Boolean);
     const fullText = fullLines.join('\n');
+    // Only money-shaped tokens count: either thousand-separated (1,234 / 1,234.56)
+    // or carrying a decimal (1234.56). Bare long integer runs are NOT amounts —
+    // they are TRNs (15 digits), barcodes, invoice/customer numbers, IBANs — and
+    // matching them caused 15-digit TRNs to be picked as subtotal/total. Also cap
+    // magnitude well below any TRN (1e8 ≫ realistic AED bill, ≪ a 15-digit TRN).
     const amountsOn = (line: string): number[] =>
-      (line.match(/\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?/g) || [])
-        .map(parseAmount).filter((n) => n > 0);
+      (line.match(/\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}/g) || [])
+        .map(parseAmount).filter((n) => n > 0 && n < 1e8);
     const labeledAmount = (labelRe: RegExp, excludeRe: RegExp | null): number | null => {
       for (let i = 0; i < fullLines.length; i++) {
         const ln = fullLines[i];
@@ -428,7 +433,7 @@ export const handler = async (event: Event) => {
     // Every monetary amount on the document (raw text + AnalyzeExpense fields).
     const amtSet = new Set<number>();
     for (const ln of fullLines) for (const a of amountsOn(ln)) amtSet.add(round2(a));
-    [aeSubtotal, aeTax, aeTotal].forEach((n) => { if (n > 0) amtSet.add(round2(n)); });
+    [aeSubtotal, aeTax, aeTotal].forEach((n) => { if (n > 0 && n < 1e8) amtSet.add(round2(n)); });
     const amounts = [...amtSet].sort((a, b) => b - a);
 
     let vatPercent: number | null = null;
