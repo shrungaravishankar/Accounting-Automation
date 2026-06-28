@@ -1115,7 +1115,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts','vat_registered','validation_config','validation_results'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts','vat_registered','validation_config','validation_results','reviewer_results'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -2660,6 +2660,269 @@ function alValidationScore(rows){
   return { passed, total, pct, band };
 }
 
+// ===================================================================
+// REVIEWER (ADMIN) REVIEW ENGINE
+// Runs AFTER the executor submits the self-review. Reviews the
+// executor's exceptions + reasons and adds deeper analytics, ending in
+// a Risk Rating (R28) and an Approval Score (R29). Rules ending in
+// "Review …" are reviewer-judgement prompts: the system surfaces what
+// it can and the reviewer ACKNOWLEDGES (with an optional note), which
+// resolves the item for the approval score. Statuses: pass / fail /
+// warn (needs review/ack) / pending (data N/A) / na (not applicable).
+// ===================================================================
+const AL_REVIEWER_DEFAULTS = {
+  revenueVariancePct: 20,        // R3
+  expenseVariancePct: 50,        // R4
+  netProfitDropPct: 30,          // R6
+  customerConcentrationPct: 50,  // R10
+  bankMovementPct: 100,          // R11
+  apAgeingDays: 180,             // R18
+  assetAdditionThreshold: 10000, // R14
+  largeJournalThreshold: 25000,  // R26
+  prepaidMateriality: 25000,     // R17
+  fyEndMonth: 12,                // R8 (UAE FY commonly Dec; configurable)
+  blockedVatKeywords: ['entertainment','motor','vehicle','personal','staff welfare','fuel'],
+  nonDeductibleKeywords: ['fine','penalty','donation','entertainment','bribe','gift'],
+  riskLowMax: 5, riskMediumMax: 15,       // R28 bands
+  approvalReadyPct: 95, approvalSeniorPct: 85 // R29 bands
+};
+
+const AL_REVIEWER_RULES = [
+  // R1 — Unresolved exception review
+  { ruleNo:1, title:'Unresolved exceptions', run:(ctx)=>{
+      const ex=ctx.exec; if(!ex||!ex.rows) return {status:'pending', message:'No executor self-review found for this period.'};
+      const open=ex.rows.filter(r=>r.requiresReason && !(r.reason&&r.reason.trim()));
+      const total=ex.rows.filter(r=>r.requiresReason).length;
+      if(open.length) return {status:'fail', message:open.length+' of '+total+' executor exception(s) remain unresolved (no reason given).'};
+      return {status:'pass', message:'All '+total+' executor exception(s) resolved with reasons.'};
+    }},
+  // R2 — Manual override review
+  { ruleNo:2, title:'Manual overrides', run:(ctx)=>{
+      const ex=ctx.exec; if(!ex||!ex.rows) return {status:'pending', message:'No executor self-review found.'};
+      const ov=ex.rows.filter(r=>r.requiresReason && r.reason && r.reason.trim());
+      if(ov.length) return {status:'warn', message:ov.length+' validation(s) were overridden by the executor with justification — review: '+ov.slice(0,6).map(r=>'#'+r.ruleNo+' '+r.title).join(', ')+(ov.length>6?' …':'')+'.'};
+      return {status:'pass', message:'No manual overrides to review.'};
+    }},
+  // R3 — Revenue variance review
+  { ruleNo:3, title:'Revenue variance', run:(ctx)=>{
+      if(!ctx.dataAvailable.revenueByMonth) return {status:'pending', message:'Revenue history unavailable.'};
+      const months=(ctx.zoho.revenueByMonth&&ctx.zoho.revenueByMonth.months)||{};
+      const cur=Number(months[ctx.period]||0);
+      const prevM=Number(months[alPrevMonths(ctx.period,1)[0]]||0);
+      const prev6=alPrevMonths(ctx.period,6).map(m=>Number(months[m]||0)).filter(v=>v>0);
+      const avg=prev6.length?prev6.reduce((a,b)=>a+b,0)/prev6.length:0;
+      const thr=ctx.config.revenueVariancePct, flags=[];
+      if(avg>0){ const d=Math.round((cur-avg)/avg*100); if(Math.abs(d)>thr) flags.push((d<0?'down ':'up ')+Math.abs(d)+'% vs 6-mo avg '+alFmtAED(avg)); }
+      if(prevM>0){ const d=Math.round((cur-prevM)/prevM*100); if(Math.abs(d)>thr) flags.push((d<0?'down ':'up ')+Math.abs(d)+'% vs last month '+alFmtAED(prevM)); }
+      if(flags.length) return {status:'fail', message:'Revenue '+alFmtAED(cur)+' moved beyond '+thr+'%: '+flags.join('; ')+'.'};
+      return {status:'pass', message:'Revenue movement within '+thr+'%.'};
+    }},
+  // R4 — Expense variance review
+  { ruleNo:4, title:'Expense variance', run:(ctx)=>{
+      const exp=ctx.zoho.expenses||[]; const prev6=alPrevMonths(ctx.period,6); const byAcct={};
+      exp.forEach(e=>{ const k=String(e.account||e.description||'').trim()||'?'; if(!byAcct[k]) byAcct[k]={}; const mk=alMonthKey(e.date); byAcct[k][mk]=(byAcct[k][mk]||0)+Number(e.amount||0); });
+      const thr=ctx.config.expenseVariancePct, flags=[];
+      Object.keys(byAcct).forEach(k=>{ const cur=byAcct[k][ctx.period]||0; const hist=prev6.map(m=>byAcct[k][m]||0).filter(v=>v>0); if(!hist.length||cur<=0) return; const avg=hist.reduce((a,b)=>a+b,0)/hist.length; if(avg>0){ const d=Math.round((cur-avg)/avg*100); if(d>thr) flags.push(k+' +'+d+'%'); } });
+      if(flags.length) return {status:'fail', message:flags.length+' expense category(ies) exceed +'+thr+'% vs 6-mo average: '+flags.slice(0,6).join('; ')+(flags.length>6?' …':'')+'.'};
+      return {status:'pass', message:'No expense category exceeds the variance threshold.'};
+    }},
+  // R6 — Net profit trend review
+  { ruleNo:6, title:'Net profit trend', run:(ctx)=>{
+      if(!ctx.dataAvailable.revenueByMonth) return {status:'pending', message:'Revenue history unavailable.'};
+      const months=(ctx.zoho.revenueByMonth&&ctx.zoho.revenueByMonth.months)||{}; const exp=ctx.zoho.expenses||[];
+      const npPct=(m)=>{ const rev=Number(months[m]||0); if(rev<=0) return null; const ex=alSum(alInMonth(exp,m)); return (rev-ex)/rev*100; };
+      const cur=npPct(ctx.period); const prev=alPrevMonths(ctx.period,6).map(npPct).filter(v=>v!=null);
+      if(cur==null||prev.length<2) return {status:'pass', message:'Insufficient data to assess net-profit trend.'};
+      const avg=prev.reduce((a,b)=>a+b,0)/prev.length; const drop=avg-cur;
+      if(drop>0 && Math.abs(drop/((Math.abs(avg))||1)*100)>ctx.config.netProfitDropPct)
+        return {status:'fail', message:'Net profit margin fell to '+cur.toFixed(1)+'% from a '+avg.toFixed(1)+'% average. Investigate profitability.'};
+      return {status:'pass', message:'Net profit margin '+cur.toFixed(1)+'% in line with the '+avg.toFixed(1)+'% average.'};
+    }},
+  // R7 — Revenue completeness review (proxy: recurring customers by receipt history)
+  { ruleNo:7, title:'Revenue completeness', run:(ctx)=>{
+      const pays=ctx.zoho.payments||[]; const prev=alPrevMonths(ctx.period,6); const byCust={};
+      pays.forEach(p=>{ const c=String(p.customer||'').trim(); if(!c) return; if(!byCust[c]) byCust[c]={}; byCust[c][alMonthKey(p.date)]=true; });
+      const missing=[];
+      Object.keys(byCust).forEach(c=>{ const seen=byCust[c]; const presentPrev=prev.filter(m=>seen[m]).length; if(presentPrev>=4 && !seen[ctx.period]) missing.push(c); });
+      if(missing.length) return {status:'warn', message:missing.length+' recurring customer(s) with no receipt this month — verify revenue completeness: '+missing.slice(0,6).join('; ')+(missing.length>6?' …':'')+'.'};
+      return {status:'pass', message:'No recurring customer revenue appears omitted (by receipt history).'};
+    }},
+  // R8 — Revenue cut-off review (year-end only)
+  { ruleNo:8, title:'Revenue cut-off (year-end)', run:(ctx)=>{
+      const m=Number(String(ctx.period).split('-')[1]);
+      if(m!==ctx.config.fyEndMonth) return {status:'na', message:'Applies at financial year-end (month '+ctx.config.fyEndMonth+') only.'};
+      return {status:'warn', message:'Year-end — manually review the last 10 invoices of this month and the first 10 of next month for cut-off.'};
+    }},
+  // R9 — AR ageing review
+  { ruleNo:9, title:'AR ageing', run:(ctx)=>{
+      const end=ctx.monthBounds.end; const inv=(ctx.zoho.openInvoices||[]).filter(i=>Number(i.balance||0)>0);
+      const b={d90:0,d180:0,d365:0};
+      inv.forEach(i=>{ const age=alDaysBetween(i.date,end); if(age>365) b.d365+=Number(i.balance||0); else if(age>180) b.d180+=Number(i.balance||0); else if(age>90) b.d90+=Number(i.balance||0); });
+      if(b.d180>0||b.d365>0) return {status:'fail', message:'AR ageing — >90d '+alFmtAED(b.d90)+', >180d '+alFmtAED(b.d180)+', >365d '+alFmtAED(b.d365)+'. Review recoverability.'};
+      if(b.d90>0) return {status:'warn', message:'AR >90 days: '+alFmtAED(b.d90)+'.'};
+      return {status:'pass', message:'No material aged receivables beyond 90 days.'};
+    }},
+  // R10 — Customer concentration review
+  { ruleNo:10, title:'Customer concentration', run:(ctx)=>{
+      if(!ctx.dataAvailable.customerBalances) return {status:'pending', message:'Customer balances unavailable.'};
+      const cs=(ctx.zoho.customerBalances||[]).map(c=>({n:c.name,v:Number(c.receivable||0)})).filter(c=>c.v>0);
+      const total=cs.reduce((s,c)=>s+c.v,0); if(total<=0) return {status:'pass', message:'No receivables.'};
+      cs.sort((a,b)=>b.v-a.v); const top=cs[0]; const pct=Math.round(top.v/total*100);
+      if(pct>ctx.config.customerConcentrationPct) return {status:'fail', message:'Single customer '+top.n+' represents '+pct+'% of receivables ('+alFmtAED(top.v)+' of '+alFmtAED(total)+'). Concentration risk.'};
+      return {status:'pass', message:'Largest customer is '+pct+'% of receivables — within tolerance.'};
+    }},
+  // R11 — Bank movement review
+  { ruleNo:11, title:'Bank movement', run:(ctx)=>{
+      if(!ctx.dataAvailable.accountBalances) return {status:'pending', message:'Account balances unavailable for movement comparison.'};
+      const cur=ctx.zoho.accountBalancesCur||[], prev=ctx.zoho.accountBalancesPrev||[];
+      const banks=cur.filter(a=>/bank|cash/i.test((a.account_type||'')+' '+(a.account_name||''))); const flags=[];
+      banks.forEach(a=>{ const p=prev.find(x=>x.account_name===a.account_name); if(!p) return; const pb=Math.abs(Number(p.balance||0)), cb=Math.abs(Number(a.balance||0)); if(pb>0){ const d=Math.round((cb-pb)/pb*100); if(Math.abs(d)>ctx.config.bankMovementPct) flags.push(a.account_name+' '+(d>0?'+':'')+d+'%'); } });
+      if(flags.length) return {status:'warn', message:'Large bank movement(s) to review: '+flags.join('; ')+'.'};
+      return {status:'pass', message:'Bank balance movements within threshold.'};
+    }},
+  // R12 — Bank reconciliation review
+  { ruleNo:12, title:'Bank reconciliation', run:(ctx)=>{
+      const unc=(ctx.zoho.bankAccounts||[]).reduce((s,a)=>s+Number(a.uncategorized_transactions||0),0);
+      if(unc>0) return {status:'fail', message:unc+' unreconciled/uncategorised bank transaction(s) remain outstanding.'};
+      return {status:'pass', message:'No outstanding bank reconciliation items.'};
+    }},
+  // R13 — FAR reconciliation review (manual)
+  { ruleNo:13, title:'FAR reconciliation', run:(ctx)=>({status:'warn', message:'Manually reconcile the Fixed Asset Register to the GL fixed-asset balances; confirm no unexplained difference.'}) },
+  // R14 — Asset addition review
+  { ruleNo:14, title:'Asset additions', run:(ctx)=>{
+      const kw=(ctx.config.fixedAssetKeywords||AL_VALIDATION_DEFAULTS.fixedAssetKeywords).map(s=>s.toLowerCase());
+      const thr=ctx.config.assetAdditionThreshold;
+      const hits=alInMonth(ctx.zoho.expenses,ctx.period).filter(e=>Number(e.amount||0)>thr && kw.some(k=>String(e.description||'').toLowerCase().includes(k)));
+      if(hits.length) return {status:'warn', message:hits.length+' asset addition(s) over '+alFmtAED(thr)+' to review: '+hits.slice(0,5).map(e=>(e.description||'?')+' '+alFmtAED(e.amount)).join('; ')+(hits.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No significant asset additions.'};
+    }},
+  // R15 — Depreciation review (mirrors executor Rule 17)
+  { ruleNo:15, title:'Depreciation', run:(ctx)=>{
+      const ex=ctx.exec&&ctx.exec.rows&&ctx.exec.rows.find(r=>r.ruleNo===17);
+      if(!ex) return {status:'pending', message:'No executor depreciation check available.'};
+      if(ex.status==='fail') return {status:'fail', message:'Executor flagged depreciation — '+ex.message};
+      if(ex.status==='pending') return {status:'pending', message:'Depreciation data unavailable.'};
+      return {status:'pass', message:'Depreciation check passed at executor stage.'};
+    }},
+  // R16 — Prepaid roll-forward review
+  { ruleNo:16, title:'Prepaid roll-forward', run:(ctx)=>{
+      if(!(ctx.config.prepaidSchedules&&ctx.config.prepaidSchedules.length)) return {status:'warn', message:'Verify prepaid roll-forward (Opening + Additions − Amortization = Closing). No prepaid schedule configured.'};
+      const ex=ctx.exec&&ctx.exec.rows&&ctx.exec.rows.find(r=>r.ruleNo===24);
+      if(ex&&ex.status==='fail') return {status:'fail', message:ex.message};
+      return {status:'pass', message:'Prepaid schedules reconcile.'};
+    }},
+  // R17 — Significant prepaid review
+  { ruleNo:17, title:'Significant prepaid', run:(ctx)=>{
+      const thr=ctx.config.prepaidMateriality;
+      if(!ctx.dataAvailable.accountBalances) return {status:'pending', message:'Account balances unavailable.'};
+      const pp=(ctx.zoho.accountBalancesCur||[]).filter(a=>/prepaid/i.test(a.account_name||'') && Math.abs(Number(a.balance||0))>thr);
+      if(pp.length) return {status:'warn', message:'Significant prepaid balance(s) to verify: '+pp.map(a=>a.account_name+' '+alFmtAED(a.balance)).join('; ')+'.'};
+      return {status:'pass', message:'No prepaid balance above '+alFmtAED(thr)+'.'};
+    }},
+  // R18 — AP ageing review (>180d)
+  { ruleNo:18, title:'AP ageing (>180d)', run:(ctx)=>{
+      const end=ctx.monthBounds.end;
+      const old=(ctx.zoho.openBills||[]).filter(b=>Number(b.balance||0)>0 && alDaysBetween(b.date,end)>ctx.config.apAgeingDays);
+      if(old.length) return {status:'fail', message:old.length+' payable(s) outstanding >'+ctx.config.apAgeingDays+' days (total '+alFmtAED(alSum(old,b=>b.balance))+'). Review.'};
+      return {status:'pass', message:'No long-outstanding payables.'};
+    }},
+  // R19 — Salary accrual review (+ TP for related parties)
+  { ruleNo:19, title:'Salary accrual / TP', run:(ctx)=>{
+      const watch=[].concat(ctx.config.shareholders||[], ctx.config.relatedParties||[]).filter(Boolean);
+      const kw=(ctx.config.salaryKeywords||AL_VALIDATION_DEFAULTS.salaryKeywords);
+      const cur=alInMonth(ctx.zoho.expenses,ctx.period).concat(alInMonth(ctx.zoho.journals,ctx.period));
+      const hasSalary=cur.some(e=>kw.some(k=>(String(e.account||'')+' '+String(e.description||'')).toLowerCase().includes(k)));
+      const tp = watch.length && cur.some(e=>watch.some(w=>alNameSimilarity(w,String(e.description||''))>=0.6));
+      if(tp) return {status:'fail', message:'Salary/payment to a director/partner/connected person detected — Transfer Pricing compliance required.'};
+      if(!hasSalary) return {status:'warn', message:'Reconcile salary payable to payroll records — no salary expense found this month.'};
+      return {status:'pass', message:'Salary expense present; reconcile to payroll register.'};
+    }},
+  // R20 — Loan roll-forward review
+  { ruleNo:20, title:'Loan roll-forward', run:(ctx)=>{
+      if(!ctx.dataAvailable.accountBalances) return {status:'warn', message:'Verify loan roll-forward (Opening + Additions − Repayments = Closing) and accrue interest per the loan agreement.'};
+      const loans=(ctx.zoho.accountBalancesCur||[]).filter(a=>/loan|borrow/i.test((a.account_type||'')+' '+(a.account_name||'')) && Math.abs(Number(a.balance||0))>0);
+      if(!loans.length) return {status:'pass', message:'No loan balances.'};
+      const interest=alInMonth(ctx.zoho.expenses,ctx.period).concat(alInMonth(ctx.zoho.journals,ctx.period)).some(e=>/interest/i.test(String(e.account||'')+' '+String(e.description||'')));
+      if(!interest) return {status:'fail', message:'Loan account(s) exist ('+loans.map(a=>a.account_name).join(', ')+') but no interest accounted this month. Accrue interest if per the agreement.'};
+      return {status:'pass', message:'Loan balances present and interest accounted.'};
+    }},
+  // R21 — VAT reconciliation review (manual)
+  { ruleNo:21, title:'VAT reconciliation', run:(ctx)=>({status:'warn', message:'Reconcile the filed VAT return to the books; provide adjustments for prior-FY / next-FY months in the return and out-of-scope items.'}) },
+  // R22 — RCM review (mirrors executor Rule 7)
+  { ruleNo:22, title:'Reverse charge (RCM)', run:(ctx)=>{
+      const ex=ctx.exec&&ctx.exec.rows&&ctx.exec.rows.find(r=>r.ruleNo===7);
+      if(ex&&ex.status==='fail') return {status:'fail', message:'Executor flagged RCM — '+ex.message};
+      if(ex&&ex.status==='pending') return {status:'pending', message:'RCM data unavailable.'};
+      return {status:'pass', message:'No reverse-charge exceptions.'};
+    }},
+  // R23 — Blocked VAT review
+  { ruleNo:23, title:'Blocked VAT', run:(ctx)=>{
+      if(!ctx.dataAvailable.bills) return {status:'pending', message:'Bill detail unavailable.'};
+      const kw=(ctx.config.blockedVatKeywords||[]).map(s=>s.toLowerCase());
+      const hits=(ctx.zoho.bills||[]).filter(b=>Number(b.tax_amount||0)>0 && (b.line_items||[]).some(li=>kw.some(k=>String(li.account_name||li.name||'').toLowerCase().includes(k))));
+      if(hits.length) return {status:'warn', message:hits.length+' bill(s) with VAT claimed on potentially blocked categories (entertainment/motor/etc): '+hits.slice(0,5).map(b=>b.bill_number||b.bill_id).join(', ')+(hits.length>5?' …':'')+'. Confirm recoverability.'};
+      return {status:'pass', message:'No blocked-VAT exceptions.'};
+    }},
+  // R24 — Related party review (mirrors executor Rule 19)
+  { ruleNo:24, title:'Related party', run:(ctx)=>{
+      const ex=ctx.exec&&ctx.exec.rows&&ctx.exec.rows.find(r=>r.ruleNo===19);
+      if(ex&&ex.status==='fail') return {status:'fail', message:'Executor flagged related parties — '+ex.message};
+      if(ex&&ex.status==='warn') return {status:'warn', message:ex.message};
+      return {status:'pass', message:'No related-party transactions flagged.'};
+    }},
+  // R25 — Non-deductible expense review
+  { ruleNo:25, title:'Non-deductible expense', run:(ctx)=>{
+      const kw=(ctx.config.nonDeductibleKeywords||[]).map(s=>s.toLowerCase());
+      const hits=alInMonth(ctx.zoho.expenses,ctx.period).filter(e=>kw.some(k=>String(e.description||'').toLowerCase().includes(k)||String(e.account||'').toLowerCase().includes(k)));
+      if(hits.length) return {status:'warn', message:hits.length+' potentially non-deductible expense(s) for Corporate Tax review: '+hits.slice(0,5).map(e=>(e.account||e.description||'?')+' '+alFmtAED(e.amount)).join('; ')+(hits.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No non-deductible expenses flagged.'};
+    }},
+  // R26 — Large journal entry review
+  { ruleNo:26, title:'Large journal entries', run:(ctx)=>{
+      const thr=ctx.config.largeJournalThreshold;
+      const big=alInMonth(ctx.zoho.journals,ctx.period).filter(j=>Math.abs(Number(j.amount||0))>thr);
+      if(big.length) return {status:'warn', message:big.length+' manual journal(s) above '+alFmtAED(thr)+' require approval: '+big.slice(0,5).map(j=>'#'+j.id+' '+alFmtAED(j.amount)).join('; ')+(big.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No high-value manual journals.'};
+    }},
+  // R27 — MIS consistency review (manual)
+  { ruleNo:27, title:'MIS consistency', run:(ctx)=>({status:'warn', message:'Confirm MIS figures (revenue, profit, cash flow, KPIs) agree with the finalized books before release.'}) }
+];
+
+function alRunReviewer(ctx){
+  return AL_REVIEWER_RULES.map(rule=>{
+    let res; try{ res=rule.run(ctx); }catch(e){ res={status:'pending', message:'Could not evaluate: '+(e&&e.message||e)}; }
+    const status=res.status||'pending';
+    return { ruleNo:rule.ruleNo, title:rule.title, status, message:res.message||'', acknowledged:false, note:'' };
+  });
+}
+
+// R28 — Reviewer Risk Rating. Weighted score over open exceptions, manual
+// overrides, VAT issues, reconciliation issues, large variances and
+// related-party flags. Acknowledged warns no longer add risk.
+function alReviewerRisk(rows, ctx){
+  let score=0; const r=(no)=>rows.find(x=>x.ruleNo===no);
+  const ex=ctx.exec;
+  const open = (ex&&ex.rows)? ex.rows.filter(x=>x.requiresReason && !(x.reason&&x.reason.trim())).length : 0; score+=open*3;
+  const ov = (ex&&ex.rows)? ex.rows.filter(x=>x.requiresReason && x.reason && x.reason.trim()).length : 0; score+=ov*1;
+  [21,22,23].forEach(n=>{ const x=r(n); if(x&&x.status==='fail') score+=3; else if(x&&x.status==='warn'&&!x.acknowledged) score+=1; }); // VAT
+  [12,13].forEach(n=>{ const x=r(n); if(x&&x.status==='fail') score+=3; else if(x&&x.status==='warn'&&!x.acknowledged) score+=1; }); // reconciliation
+  [3,4,6].forEach(n=>{ const x=r(n); if(x&&x.status==='fail') score+=2; }); // variances
+  { const x=r(24); if(x&&x.status==='fail') score+=3; else if(x&&x.status==='warn'&&!x.acknowledged) score+=1; } // related party
+  const band = score<=ctx.config.riskLowMax?'Low Risk' : score<=ctx.config.riskMediumMax?'Medium Risk' : 'High Risk';
+  return { score, band };
+}
+
+// R29 — Reviewer Approval Score. Passed (or acknowledged) ÷ applicable
+// (pass/fail/warn; pending + na excluded).
+function alReviewerApproval(rows, ctx){
+  const appl=(rows||[]).filter(r=>r.status==='pass'||r.status==='fail'||r.status==='warn');
+  const passed=appl.filter(r=>r.status==='pass'||r.acknowledged).length;
+  const pct= appl.length? Math.round(passed/appl.length*100) : 0;
+  const ready=ctx&&ctx.config?ctx.config.approvalReadyPct:95, senior=ctx&&ctx.config?ctx.config.approvalSeniorPct:85;
+  const band= pct>=ready?'Ready for Client' : pct>=senior?'Senior Review Required' : 'Cannot be Released';
+  return { passed, applicable:appl.length, pct, band };
+}
+
 // Posting destination helper — decides whether a ledger lands on P&L or
 // Balance Sheet from its Zoho account_type. Shared by the Bank Statement
 // review, Revenue OCR review, and the pre-push guard so the accountant
@@ -3359,6 +3622,20 @@ function App(){
     const all=getClientData(activeClientId,'validation_results',{})||{};
     all[valPeriod]=run;
     setClientData(activeClientId,'validation_results',all);
+  },[activeClientId,valPeriod]);
+  // ===== Reviewer (admin) review state =====
+  const[reviewerRun,setReviewerRun]=useState(null); // {ranAt,ranBy,status,rows,reviewerNote}
+  useEffect(()=>{
+    if(!activeClientId){ setReviewerRun(null); return; }
+    const all=getClientData(activeClientId,'reviewer_results',{})||{};
+    setReviewerRun(all[valPeriod]||null);
+  },[activeClientId,valPeriod]);
+  const saveReviewerRun=useCallback((run)=>{
+    setReviewerRun(run);
+    if(!activeClientId) return;
+    const all=getClientData(activeClientId,'reviewer_results',{})||{};
+    all[valPeriod]=run;
+    setClientData(activeClientId,'reviewer_results',all);
   },[activeClientId,valPeriod]);
 
 
@@ -4289,6 +4566,56 @@ function App(){
   // Patch a single rule's reason (executor) and persist (debounced via setClientData).
   const setValidationReason=useCallback((ruleNo,reason)=>{
     setValidationRun(prev=>{ if(!prev) return prev; const rows=prev.rows.map(r=> r.ruleNo===ruleNo ? {...r,reason} : r); const run={...prev,rows}; if(activeClientId){ const all=getClientData(activeClientId,'validation_results',{})||{}; all[valPeriod]=run; setClientData(activeClientId,'validation_results',all); } return run; });
+  },[activeClientId,valPeriod]);
+
+  // Reviewer (admin) review orchestrator — reviews the executor's submitted
+  // self-review plus deeper analytics. Reuses the same Zoho pulls and the
+  // executor run (validationRun) as input.
+  const runReviewerReview = useCallback(async ()=>{
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ setValError("Connect this client to a Zoho organization before reviewing."); return; }
+    setValRunning(true); setValError(""); setValProgress("Reviewing — fetching data from Zoho…");
+    try{
+      const bounds=alMonthBounds(valPeriod);
+      const back=alPrevMonths(valPeriod,12);
+      const wideStart=(back[back.length-1]||valPeriod)+'-01';
+      const prevBounds=alMonthBounds(alPrevMonths(valPeriod,1)[0]);
+      const dataAvailable={revenueByMonth:false,invoices:false,bills:false,customerBalances:false,vendorBalances:false,accountBalances:false,bankTransactions:false};
+      const zoho={};
+      const tryFetch=async(key,kind,params)=>{ try{ const r=await window.zohoFetch(kind,orgId,params); dataAvailable[key]=true; return r; }catch(e){ dataAvailable[key]=false; return null; } };
+      const recent=await window.zohoFetch('recentEntries',orgId,{fromDate:wideStart,toDate:bounds.end,only:['expenses','journals','payments']}).catch(()=>({expenses:[],journals:[],payments:[]}));
+      zoho.expenses=recent.expenses||[]; zoho.journals=recent.journals||[]; zoho.payments=recent.payments||[];
+      zoho.openInvoices=await window.zohoFetch('openInvoices',orgId).catch(()=>[]);
+      zoho.openBills=await window.zohoFetch('openBills',orgId).catch(()=>[]);
+      zoho.bankAccounts=await window.zohoFetch('bankAccounts',orgId).catch(()=>[]);
+      zoho.revenueByMonth=await tryFetch('revenueByMonth','revenueByMonth',{fromDate:wideStart,toDate:bounds.end});
+      const bls=await tryFetch('bills','billsByDateRange',{fromDate:bounds.start,toDate:bounds.end}); zoho.bills=(bls&&bls.bills)||[];
+      zoho.customerBalances=await tryFetch('customerBalances','customerBalances')||[];
+      const abCur=await tryFetch('accountBalances','accountBalances',{fromDate:bounds.start,toDate:bounds.end}); zoho.accountBalancesCur=(abCur&&abCur.accounts)||[];
+      let abPrev=null; if(dataAvailable.accountBalances){ abPrev=await window.zohoFetch('accountBalances',orgId,{fromDate:prevBounds.start,toDate:prevBounds.end}).catch(()=>null); }
+      zoho.accountBalancesPrev=(abPrev&&abPrev.accounts)||[];
+
+      const overrides=getClientData(activeClientId,'validation_config',{})||{};
+      const config=Object.assign({},AL_VALIDATION_DEFAULTS,AL_REVIEWER_DEFAULTS,overrides,{
+        vatRegistered:getClientData(activeClientId,'vat_registered','no'),
+        supplyTypes:getClientData(activeClientId,'supply_types',[])||[],
+        bankAccountsCfg:getClientData(activeClientId,'bank_accounts',[])||[]
+      });
+      setValProgress("Running reviewer rules…");
+      const ctx={ period:valPeriod, monthBounds:bounds, config, zoho, dataAvailable, exec:validationRun };
+      const rows=alRunReviewer(ctx);
+      // Preserve acknowledgements / notes across re-runs.
+      if(reviewerRun && reviewerRun.rows){ const byNo={}; reviewerRun.rows.forEach(r=>{ byNo[r.ruleNo]={acknowledged:r.acknowledged,note:r.note}; }); rows.forEach(r=>{ const p=byNo[r.ruleNo]; if(p){ r.acknowledged=!!p.acknowledged; r.note=p.note||''; } }); }
+      const run={ ranAt:new Date().toISOString(), ranBy:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'', status:'draft', rows };
+      saveReviewerRun(run);
+    }catch(e){ setValError((e&&e.message)||String(e)); }
+    finally{ setValRunning(false); setValProgress(""); }
+  },[activeClientId,clients,valPeriod,validationRun,reviewerRun,saveReviewerRun]);
+
+  // Reviewer acknowledges (with optional note) a flagged review item.
+  const setReviewerAck=useCallback((ruleNo,patch)=>{
+    setReviewerRun(prev=>{ if(!prev) return prev; const rows=prev.rows.map(r=> r.ruleNo===ruleNo ? {...r,...patch} : r); const run={...prev,rows}; if(activeClientId){ const all=getClientData(activeClientId,'reviewer_results',{})||{}; all[valPeriod]=run; setClientData(activeClientId,'reviewer_results',all); } return run; });
   },[activeClientId,valPeriod]);
 
   // Upload a PDF / image, run AnalyzeExpense via the invoice-ocr Lambda
@@ -7592,6 +7919,58 @@ td,th{padding:8px 12px;vertical-align:middle}
                       </div>}
                     </div>
                   </div>; })}
+                </div>}
+
+                {/* ===== Reviewer (admin) review ===== */}
+                {isReviewer && <div style={{marginTop:22,borderTop:"2px solid #ece6fb",paddingTop:18}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:12}}>
+                    <div>
+                      <h3 style={{fontSize:16,fontWeight:700,color:"#4D3FA0",margin:0}}>🛡 Reviewer Review <span style={{fontSize:10,fontWeight:600,color:"#999"}}>(admin)</span></h3>
+                      <div style={{fontSize:12,color:"#888",marginTop:2}}>{(!run||run.status!=='submitted')?"Note: the executor has not submitted this period yet — review reflects current data. ":""}{reviewerRun?("Last reviewed "+new Date(reviewerRun.ranAt).toLocaleString('en-GB')+(reviewerRun.ranBy?(" by "+reviewerRun.ranBy):"")):"No reviewer review has been run yet."}</div>
+                    </div>
+                    <button disabled={valRunning} onClick={runReviewerReview} style={{padding:"8px 16px",borderRadius:8,border:"none",background:valRunning?"#b9b2e0":"#4D3FA0",color:"#fff",fontSize:12,fontWeight:700,cursor:valRunning?"default":"pointer"}}>{valRunning?(valProgress||"Working…"):(reviewerRun?"↻ Re-run reviewer review":"▶ Run reviewer review")}</button>
+                  </div>
+                  {reviewerRun && reviewerRun.rows && (()=>{
+                    const rConfig=Object.assign({},AL_VALIDATION_DEFAULTS,AL_REVIEWER_DEFAULTS,(getClientData(activeClientId,'validation_config',{})||{}));
+                    const rctx={exec:validationRun, config:rConfig};
+                    const risk=alReviewerRisk(reviewerRun.rows,rctx);
+                    const appr=alReviewerApproval(reviewerRun.rows,rctx);
+                    const riskTone=risk.band==='Low Risk'?TONE.pass:risk.band==='Medium Risk'?TONE.warn:TONE.fail;
+                    const apprTone=appr.pct>=95?TONE.pass:appr.pct>=85?TONE.warn:TONE.fail;
+                    const openAck=reviewerRun.rows.filter(r=>(r.status==='fail'||r.status==='warn')&&!r.acknowledged).length;
+                    const NA={bg:'rgba(120,120,140,0.06)',fg:'#9097a3',br:'rgba(120,120,140,0.2)',dot:'▫',label:'N/A'};
+                    return <>
+                      <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:14}}>
+                        <div style={{flex:1,minWidth:210,border:"1px solid "+riskTone.br,background:riskTone.bg,borderRadius:12,padding:"12px 16px"}}>
+                          <div style={{fontSize:11,color:"#666",fontWeight:700}}>Risk rating · R28</div>
+                          <div style={{fontSize:20,fontWeight:800,color:riskTone.fg}}>{riskTone.dot} {risk.band}</div>
+                          <div style={{fontSize:11,color:"#666",marginTop:2}}>Score {risk.score} · 0–5 Low · 6–15 Medium · &gt;15 High</div>
+                        </div>
+                        <div style={{flex:1,minWidth:210,border:"1px solid "+apprTone.br,background:apprTone.bg,borderRadius:12,padding:"12px 16px"}}>
+                          <div style={{fontSize:11,color:"#666",fontWeight:700}}>Approval score · R29</div>
+                          <div style={{fontSize:20,fontWeight:800,color:apprTone.fg}}>{appr.pct}% · {appr.band}</div>
+                          <div style={{fontSize:11,color:"#666",marginTop:2}}>{appr.passed}/{appr.applicable} cleared{openAck>0?(" · "+openAck+" item(s) to acknowledge"):""} · 95%+ Ready · 85%+ Senior review</div>
+                        </div>
+                      </div>
+                      <div style={{border:"1px solid #ececf2",borderRadius:12,overflow:"hidden"}}>
+                        {reviewerRun.rows.map((r,idx)=>{ const t=TONE[r.status]||NA; const needsAck=(r.status==='fail'||r.status==='warn'); return <div key={r.ruleNo} style={{display:"flex",gap:12,padding:"12px 16px",borderTop:idx===0?"none":"1px solid #f0f0f5",alignItems:"flex-start"}}>
+                          <div style={{minWidth:32,fontSize:11,color:"#aaa",fontWeight:700,paddingTop:2}}>R{r.ruleNo}</div>
+                          <div style={{minWidth:96}}><span style={{display:"inline-block",fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:10,background:t.bg,color:t.fg,border:"1px solid "+t.br,whiteSpace:"nowrap"}}>{t.dot} {t.label}</span></div>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>{r.title}</div>
+                            <div style={{fontSize:12,color:"#555",marginTop:2,lineHeight:1.45}}>{r.message}</div>
+                            {needsAck && <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>
+                              <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600,color:r.acknowledged?"#16a34a":"#d97706",cursor:"pointer"}}>
+                                <input type="checkbox" checked={!!r.acknowledged} onChange={e=>setReviewerAck(r.ruleNo,{acknowledged:e.target.checked})} />
+                                {r.acknowledged?"✓ Reviewed / accepted":"Mark as reviewed"}
+                              </label>
+                              <AutoGrowText value={r.note} onChange={e=>setReviewerAck(r.ruleNo,{note:e.target.value})} style={{width:"100%",border:"1px solid #d8d8e2",borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />
+                            </div>}
+                          </div>
+                        </div>; })}
+                      </div>
+                    </>;
+                  })()}
                 </div>}
               </div>;
             })()}
