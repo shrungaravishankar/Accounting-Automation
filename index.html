@@ -962,7 +962,8 @@ window.zohoFetch = async (kind, organizationId, extraParams) => {
   // accounts), so return the whole envelope for those too.
   if (kind === 'recentEntries' || kind === 'fxRate' || kind === 'orgProfile' ||
       kind === 'revenueByMonth' || kind === 'invoicesByDateRange' ||
-      kind === 'billsByDateRange' || kind === 'accountBalances') return d;
+      kind === 'billsByDateRange' || kind === 'accountBalances' ||
+      kind === 'trialBalance') return d;
   const items = d.items || [];
   if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
   return items;
@@ -2658,6 +2659,37 @@ function alValidationScore(rows){
   const pct= total? Math.round(passed/total*100) : 0;
   const band= pct>=95?'Ready for Review' : pct>=80?'Review Required' : 'Cannot Close';
   return { passed, total, pct, band };
+}
+
+// Maps an executor rule to the ledger(s) it implicates, so the Self-Review
+// trial balance can highlight exactly which account a failed/warning rule is
+// about. `dynamic` rules (e.g. expense spike) name the account in their own
+// message; we match the row whose name appears there.
+const AL_RULE_ACCOUNT_HINTS = {
+  3:  { types:['income','other_income'], names:['revenue','sales','income'] },           // revenue trend
+  4:  { dynamic:true, types:['expense','cost_of_goods_sold','other_expense'] },          // expense spike
+  10: { types:['bank','cash'], names:['bank','cash'] },                                  // bank completeness
+  11: { types:['bank','cash'], names:['bank','cash'] },                                  // bank reconciliation
+  12: { types:['accounts_receivable'], names:['receivable','debtor'] },                  // negative receivable
+  13: { types:['accounts_payable'], names:['payable','creditor'] },                      // negative payable
+  14: { names:['suspense'] },                                                            // suspense
+  16: { types:['fixed_asset'], names:['asset','equipment','furniture','vehicle','computer','machinery'] }, // capitalisation
+  17: { types:['accumulated_depreciation'], names:['depreciation'] },                    // depreciation
+  18: { types:['bank'], names:['bank'] },                                                // unaccounted bank txns
+  20: { types:['accounts_receivable'], names:['receivable'] },                           // old receivable
+  21: { types:['accounts_payable'], names:['payable'] },                                 // old payable
+  23: { names:['salary','salaries','payroll','wages'] },                                 // salary accrual
+  24: { names:['prepaid'] },                                                             // prepaid amortization
+  25: { names:['prepaid','insurance','license','subscription','rent','amc','hosting'] }  // missing prepaid
+};
+function alRuleMatchesAccount(rule, acct){
+  const h=AL_RULE_ACCOUNT_HINTS[rule.ruleNo]; if(!h) return false;
+  const name=String(acct.account_name||'').toLowerCase();
+  const type=String(acct.account_type||'').toLowerCase();
+  if(h.dynamic){ const msg=String(rule.message||'').toLowerCase(); if(name.length>3 && msg.includes(name)) return true; }
+  if(h.types && h.types.some(t=>type.includes(t))) return true;
+  if(h.names && h.names.some(n=>name.includes(n))) return true;
+  return false;
 }
 
 // ===================================================================
@@ -4566,7 +4598,16 @@ function App(){
       const score=alValidationScore(rows);
       // Preserve reasons already typed for the same rule numbers.
       if(validationRun && validationRun.rows){ const byNo={}; validationRun.rows.forEach(r=>{ byNo[r.ruleNo]=r.reason; }); rows.forEach(r=>{ if(r.requiresReason && byNo[r.ruleNo]) r.reason=byNo[r.ruleNo]; }); }
-      const run={ ranAt:new Date().toISOString(), ranBy:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'', status:'draft', score, rows, reviewerSignoff:null };
+      // Two-period trial balance (previous + current) for the ledger view.
+      // Risky report endpoint — degrades to an unavailable note, never fails the run.
+      setValProgress("Building trial balance…");
+      let trialBalance=null, tbError=null;
+      try{
+        const tb=await window.zohoFetch('trialBalance',orgId,{curStart:bounds.start,curEnd:bounds.end,prevStart:prevBounds.start,prevEnd:prevBounds.end});
+        if(tb && Array.isArray(tb.accounts) && tb.accounts.length) trialBalance=tb.accounts;
+        else tbError=(tb && tb.error) || 'No trial-balance rows returned.';
+      }catch(e){ tbError=(e&&e.message)||'Trial balance unavailable on this Zoho plan.'; }
+      const run={ ranAt:new Date().toISOString(), ranBy:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'', status:'draft', score, rows, trialBalance, tbError, prevPeriod:alPrevMonths(valPeriod,1)[0], reviewerSignoff:null };
       saveValidationRun(run);
     }catch(e){ setValError((e&&e.message)||String(e)); }
     finally{ setValRunning(false); setValProgress(""); }
@@ -7934,6 +7975,55 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{fontSize:11,color:"#666",marginTop:2}}>{run.score.passed} of {run.score.total} assessable checks passed{redOpen>0?(" · "+redOpen+" exception(s) awaiting a reason"):""}. 95–100% Ready · 80–94% Review Required · below 80% cannot close.</div>
                   </div>
                 </div>}
+
+                {/* Trial balance — two periods, 8 columns, with rule-flagged ledgers */}
+                {run && (run.trialBalance || run.tbError) && (()=>{
+                  const fmt=(n)=>{ const v=Number(n||0); return v===0?"—":v.toLocaleString('en-AE',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+                  const flagRules=(run.rows||[]).filter(r=>r.status==='fail'||r.status==='warn');
+                  const tb=run.trialBalance||[];
+                  // Map each ledger → the rules implicating it.
+                  const rowFlags={}; const matchedRuleNos=new Set();
+                  tb.forEach(a=>{ const hits=flagRules.filter(r=>alRuleMatchesAccount(r,a)); if(hits.length){ rowFlags[a.account_name]=hits; hits.forEach(r=>matchedRuleNos.add(r.ruleNo)); } });
+                  const unmapped=flagRules.filter(r=>!matchedRuleNos.has(r.ruleNo));
+                  const flaggedCount=Object.keys(rowFlags).length;
+                  const th={padding:"8px 10px",fontSize:10,fontWeight:700,color:"#666",textAlign:"right",whiteSpace:"nowrap",borderBottom:"1px solid #e8e8f0"};
+                  const td={padding:"7px 10px",fontSize:11,textAlign:"right",whiteSpace:"nowrap",fontFamily:"'IBM Plex Mono',monospace",color:"#333"};
+                  return <div style={{marginBottom:16,border:"1px solid #ececf2",borderRadius:12,overflow:"hidden"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",padding:"12px 16px",background:"#faf9ff",borderBottom:"1px solid #ececf2"}}>
+                      <div>
+                        <div style={{fontSize:14,fontWeight:700,color:"#4D3FA0"}}>📒 Trial Balance — {run.prevPeriod||"prev"} vs {valPeriod}</div>
+                        <div style={{fontSize:11,color:"#777",marginTop:2}}>Opening = prior period closing · Debit/Credit = period movement · Closing = period end. {flaggedCount>0?(flaggedCount+" ledger(s) flagged by the rules below."):"No ledger-specific exceptions detected."}</div>
+                      </div>
+                    </div>
+                    {run.tbError && <div style={{padding:"12px 16px",fontSize:12,color:"#d97706",background:"rgba(217,119,6,0.06)"}}>⚠ Trial balance unavailable: {run.tbError} (Zoho report access is plan/scope dependent.)</div>}
+                    {tb.length>0 && <div style={{overflowX:"auto"}}>
+                      <table style={{borderCollapse:"collapse",width:"100%",minWidth:920}}>
+                        <thead>
+                          <tr style={{background:"#f6f6fb"}}>
+                            <th style={{...th,textAlign:"left"}}>Ledger</th>
+                            <th colSpan={4} style={{...th,textAlign:"center",borderLeft:"2px solid #e8e8f0"}}>{run.prevPeriod||"Previous"}</th>
+                            <th colSpan={4} style={{...th,textAlign:"center",borderLeft:"2px solid #e8e8f0"}}>{valPeriod} (current)</th>
+                          </tr>
+                          <tr style={{background:"#f6f6fb"}}>
+                            <th style={{...th,textAlign:"left"}}></th>
+                            <th style={{...th,borderLeft:"2px solid #e8e8f0"}}>Opening</th><th style={th}>Debit</th><th style={th}>Credit</th><th style={th}>Closing</th>
+                            <th style={{...th,borderLeft:"2px solid #e8e8f0"}}>Opening</th><th style={th}>Debit</th><th style={th}>Credit</th><th style={th}>Closing</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {tb.map((a,idx)=>{ const flags=rowFlags[a.account_name]; const flagged=!!flags; return <tr key={idx} title={flagged?flags.map(r=>"⚠ "+r.title+": "+r.message).join("\n"):""} style={{background:flagged?"rgba(217,119,6,0.09)":(idx%2?"#fcfcfe":"#fff"),borderTop:"1px solid #f2f2f7"}}>
+                            <td style={{padding:"7px 10px",fontSize:11,color:"#1a1a2e",fontWeight:flagged?700:500,maxWidth:240,whiteSpace:"normal"}}>{flagged && <span style={{color:"#d97706",marginRight:4}}>⚠</span>}{a.account_name}</td>
+                            <td style={{...td,borderLeft:"2px solid #f0f0f5"}}>{fmt(a.prevOpening)}</td><td style={td}>{fmt(a.prevDebit)}</td><td style={td}>{fmt(a.prevCredit)}</td><td style={{...td,fontWeight:600}}>{fmt(a.prevClosing)}</td>
+                            <td style={{...td,borderLeft:"2px solid #f0f0f5"}}>{fmt(a.curOpening)}</td><td style={td}>{fmt(a.curDebit)}</td><td style={td}>{fmt(a.curCredit)}</td><td style={{...td,fontWeight:700,color:flagged?"#b45309":"#1a1a2e"}}>{fmt(a.curClosing)}</td>
+                          </tr>; })}
+                        </tbody>
+                      </table>
+                    </div>}
+                    {unmapped.length>0 && <div style={{padding:"10px 16px",borderTop:"1px solid #ececf2",fontSize:11,color:"#666"}}>
+                      <span style={{fontWeight:700,color:"#d97706"}}>Issues not tied to a specific ledger:</span> {unmapped.map(r=>"#"+r.ruleNo+" "+r.title).join(" · ")}
+                    </div>}
+                  </div>;
+                })()}
 
                 {/* Results table */}
                 {run && run.rows && <div style={{border:"1px solid #ececf2",borderRadius:12,overflow:"hidden"}}>
