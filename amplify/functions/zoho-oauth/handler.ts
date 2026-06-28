@@ -80,14 +80,18 @@ export const handler = async (event: Event) => {
       await ddb.send(new UpdateCommand({
         TableName: tableName,
         Key: { id: existing.Items[0].id },
-        UpdateExpression: 'SET refreshToken = :t, #r = :rg, connectedAt = :c, lastUsedAt = :u, #o = :o',
+        // Clear any cached access token so the new refresh token is used to
+        // mint a fresh one on the next call (zoho-sync caches access tokens).
+        UpdateExpression: 'SET refreshToken = :t, #r = :rg, connectedAt = :c, lastUsedAt = :u, #o = :o, accessToken = :empty, accessTokenExpiry = :zero',
         ExpressionAttributeNames: { '#r': 'region', '#o': 'owner' },
         ExpressionAttributeValues: {
           ':t': tok.refresh_token,
           ':rg': region,
           ':c': now,
           ':u': now,
-          ':o': existing.Items[0].owner || (ownerSub + '::' + ownerSub)
+          ':o': existing.Items[0].owner || (ownerSub + '::' + ownerSub),
+          ':empty': '',
+          ':zero': 0
         }
       }));
     } else {

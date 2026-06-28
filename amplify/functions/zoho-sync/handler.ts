@@ -19,7 +19,7 @@ type Event = {
 // and writes the new token back to DDB.
 let lastRotatedRefreshToken: string | null = null;
 
-async function getAccessToken(refreshToken: string, region: string): Promise<string> {
+async function getAccessToken(refreshToken: string, region: string): Promise<{ token: string; expiresIn: number }> {
   lastRotatedRefreshToken = null;
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
@@ -54,7 +54,7 @@ async function getAccessToken(refreshToken: string, region: string): Promise<str
   if (j.refresh_token && j.refresh_token !== refreshToken) {
     lastRotatedRefreshToken = j.refresh_token;
   }
-  return j.access_token;
+  return { token: j.access_token as string, expiresIn: Number(j.expires_in || 3600) };
 }
 
 // Pulled from the last Zoho call so we can return the org's daily API
@@ -142,29 +142,52 @@ export const handler = async (event: Event) => {
       TableName: tableName,
       FilterExpression: 'ownerEmail = :e',
       ExpressionAttributeValues: { ':e': ownerEmail },
-      Limit: 1
+      Limit: 1,
+      // Strongly consistent so that within a burst of calls (a self-review
+      // fires ~15 in seconds) the second call sees the access token the first
+      // one just cached, instead of minting a fresh one.
+      ConsistentRead: true
     }));
     const cred = credRes.Items && credRes.Items[0];
     if (!cred) {
       return JSON.stringify({ error: 'Not connected to Zoho yet. Click \'Connect Zoho\' first.' });
     }
     const region = cred.region || 'com';
-    const accessToken = await getAccessToken(cred.refreshToken, region);
 
-    // Stamp lastUsedAt — best-effort. Also persist a rotated
-    // refresh_token if Zoho returned one, so the integration stays
-    // connected without a manual reconnect.
-    const updateExpr = lastRotatedRefreshToken
-      ? 'SET lastUsedAt = :u, refreshToken = :t'
-      : 'SET lastUsedAt = :u';
-    const updateVals: any = { ':u': new Date().toISOString() };
-    if (lastRotatedRefreshToken) updateVals[':t'] = lastRotatedRefreshToken;
-    ddb.send(new UpdateCommand({
-      TableName: tableName,
-      Key: { id: cred.id },
-      UpdateExpression: updateExpr,
-      ExpressionAttributeValues: updateVals
-    })).catch(() => {});
+    // Reuse the cached access token while it is still valid. Zoho access tokens
+    // last ~1 hour; minting a new one on every call quickly trips Zoho's
+    // token-generation limit ("Access Denied"), which is what broke multi-call
+    // flows like the self-review. Only refresh when there is no token or it is
+    // within 2 minutes of expiry.
+    let accessToken = cred.accessToken as string | undefined;
+    const now = Date.now();
+    const cachedExpiry = Number(cred.accessTokenExpiry || 0);
+    if (!accessToken || cachedExpiry < now + 120000) {
+      const res = await getAccessToken(cred.refreshToken, region);
+      accessToken = res.token;
+      const newExpiry = now + res.expiresIn * 1000;
+      // Persist the cached token (+ expiry, + any rotated refresh token) and
+      // AWAIT it so the next call in the burst reads the fresh values.
+      const sets = ['lastUsedAt = :u', 'accessToken = :at', 'accessTokenExpiry = :ae'];
+      const updateVals: any = { ':u': new Date().toISOString(), ':at': accessToken, ':ae': newExpiry };
+      if (lastRotatedRefreshToken) { sets.push('refreshToken = :t'); updateVals[':t'] = lastRotatedRefreshToken; }
+      try {
+        await ddb.send(new UpdateCommand({
+          TableName: tableName,
+          Key: { id: cred.id },
+          UpdateExpression: 'SET ' + sets.join(', '),
+          ExpressionAttributeValues: updateVals
+        }));
+      } catch (_) { /* best-effort */ }
+    } else {
+      // Token still valid — just stamp lastUsedAt (best-effort, fire-and-forget).
+      ddb.send(new UpdateCommand({
+        TableName: tableName,
+        Key: { id: cred.id },
+        UpdateExpression: 'SET lastUsedAt = :u',
+        ExpressionAttributeValues: { ':u': new Date().toISOString() }
+      })).catch(() => {});
+    }
 
     if (kind === 'organizations') {
       const j = await zohoGet('organizations', accessToken, region);
