@@ -632,6 +632,281 @@ export const handler = async (event: Event) => {
       });
     }
 
+    // ===================================================================
+    // Self-Review / Validation data pulls. These feed the post-push
+    // validation engine in the frontend. Each returns a clean `error`
+    // string on failure so the engine can degrade a rule to `pending`
+    // (data unavailable) instead of a false pass.
+    // ===================================================================
+
+    // Monthly revenue (invoice accrual) over a date window — feeds the
+    // revenue-trend (Rule 1) and VAT-registration-threshold (Rule 15)
+    // checks. params = { fromDate, toDate, maxPages? }. Defaults to the
+    // last 365 days. Returns { months: { "YYYY-MM": sumOfTotals } }.
+    if (kind === 'revenueByMonth') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const today = new Date();
+      const past = new Date(today.getTime() - 365 * 86400000);
+      const fromDate = p.fromDate || past.toISOString().slice(0, 10);
+      const toDate = p.toDate || today.toISOString().slice(0, 10);
+      const maxPages = Math.max(1, Math.min(20, Number(p.maxPages || 20)));
+      try {
+        const months: Record<string, number> = {};
+        let page = 1;
+        while (true) {
+          const j: any = await zohoGet('invoices', accessToken, region, {
+            organization_id: orgId!, date_start: fromDate, date_end: toDate,
+            per_page: '200', page: String(page)
+          });
+          for (const inv of (j.invoices || [])) {
+            const m = String(inv.date || '').slice(0, 7);
+            if (!m) continue;
+            months[m] = (months[m] || 0) + Number(inv.total || 0);
+          }
+          if (!j.page_context || !j.page_context.has_more_page) break;
+          page++; if (page > maxPages) break;
+        }
+        return JSON.stringify({ error: null, fromDate, toDate, months, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), months: {}, apiUsage: lastApiUsage });
+      }
+    }
+
+    // Invoices in a date range with line-level tax detail — feeds the
+    // supply-type (Rule 2) and VAT-rate (Rule 6, sales side) checks.
+    // params = { fromDate, toDate, maxDetail? }. Pulls the list (cheap)
+    // then per-invoice detail (capped) to get tax_treatment + line taxes.
+    if (kind === 'invoicesByDateRange') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const today = new Date();
+      const fromDate = p.fromDate || new Date(today.getTime() - 31 * 86400000).toISOString().slice(0, 10);
+      const toDate = p.toDate || today.toISOString().slice(0, 10);
+      const maxDetail = Math.max(0, Math.min(150, Number(p.maxDetail || 120)));
+      try {
+        const list: any[] = [];
+        let page = 1;
+        while (true) {
+          const j: any = await zohoGet('invoices', accessToken, region, {
+            organization_id: orgId!, date_start: fromDate, date_end: toDate,
+            per_page: '200', page: String(page)
+          });
+          list.push(...(j.invoices || []));
+          if (!j.page_context || !j.page_context.has_more_page) break;
+          page++; if (page > 20) break;
+        }
+        const out: any[] = [];
+        let fetched = 0;
+        for (const inv of list) {
+          let d: any = inv;
+          if (fetched < maxDetail) {
+            try {
+              const r: any = await zohoGet(`invoices/${inv.invoice_id}`, accessToken, region, { organization_id: orgId! });
+              if (r && r.invoice) d = r.invoice;
+              fetched++;
+            } catch (_) { /* keep list-level fields */ }
+          }
+          out.push({
+            invoice_id: inv.invoice_id, invoice_number: inv.invoice_number, date: inv.date,
+            total: Number(d.total || inv.total || 0),
+            tax_total: Number(d.tax_total || 0),
+            sub_total: Number(d.sub_total || 0),
+            tax_treatment: d.tax_treatment || '',
+            place_of_supply: d.place_of_supply || '',
+            line_items: (d.line_items || []).map((li: any) => ({
+              name: li.name || li.description || '',
+              amount: Number(li.item_total || li.total || 0),
+              tax_percentage: Number(li.tax_percentage || 0)
+            }))
+          });
+        }
+        return JSON.stringify({ error: null, fromDate, toDate, truncatedDetail: list.length > maxDetail, invoices: out, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), invoices: [], apiUsage: lastApiUsage });
+      }
+    }
+
+    // Bills in a date range with line/tax detail + vendor TRN & country —
+    // feeds input-VAT validity (Rule 5), VAT-rate (Rule 6), reverse-charge
+    // (Rule 7) and prior-period/accrual (Rule 8). params = { fromDate,
+    // toDate, maxDetail? }. Vendor contacts are fetched once each (cached).
+    if (kind === 'billsByDateRange') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const today = new Date();
+      const fromDate = p.fromDate || new Date(today.getTime() - 31 * 86400000).toISOString().slice(0, 10);
+      const toDate = p.toDate || today.toISOString().slice(0, 10);
+      const maxDetail = Math.max(0, Math.min(150, Number(p.maxDetail || 120)));
+      try {
+        const list: any[] = [];
+        let page = 1;
+        while (true) {
+          const j: any = await zohoGet('bills', accessToken, region, {
+            organization_id: orgId!, date_start: fromDate, date_end: toDate,
+            per_page: '200', page: String(page)
+          });
+          list.push(...(j.bills || []));
+          if (!j.page_context || !j.page_context.has_more_page) break;
+          page++; if (page > 20) break;
+        }
+        const vendorCache: Record<string, any> = {};
+        const out: any[] = [];
+        let fetched = 0;
+        for (const b of list) {
+          let d: any = b;
+          if (fetched < maxDetail) {
+            try {
+              const r: any = await zohoGet(`bills/${b.bill_id}`, accessToken, region, { organization_id: orgId! });
+              if (r && r.bill) d = r.bill;
+              fetched++;
+            } catch (_) { /* keep list-level fields */ }
+          }
+          let vendor_trn = d.tax_reg_no || '';
+          let country = '';
+          const vid = b.vendor_id;
+          if (vid) {
+            if (!(vid in vendorCache)) {
+              try {
+                const cd: any = await zohoGet(`contacts/${vid}`, accessToken, region, { organization_id: orgId! });
+                vendorCache[vid] = (cd && cd.contact) ? cd.contact : {};
+              } catch (_) { vendorCache[vid] = {}; }
+            }
+            const vc = vendorCache[vid] || {};
+            vendor_trn = vendor_trn || vc.tax_reg_no || '';
+            country = (vc.billing_address && vc.billing_address.country) || vc.country || '';
+          }
+          out.push({
+            bill_id: b.bill_id, bill_number: b.bill_number, date: b.date,
+            created_time: d.created_time || b.created_time || '',
+            vendor_name: b.vendor_name || d.vendor_name || '',
+            vendor_trn, country,
+            sub_total: Number(d.sub_total || 0),
+            tax_amount: Number(d.tax_total || 0),
+            total: Number(d.total || b.total || 0),
+            line_items: (d.line_items || []).map((li: any) => ({
+              name: li.name || li.description || '',
+              account_name: li.account_name || '',
+              amount: Number(li.item_total || li.total || 0),
+              tax_percentage: Number(li.tax_percentage || 0)
+            }))
+          });
+        }
+        return JSON.stringify({ error: null, fromDate, toDate, truncatedDetail: list.length > maxDetail, bills: out, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), bills: [], apiUsage: lastApiUsage });
+      }
+    }
+
+    // Customer / vendor outstanding balances — feeds negative-receivable
+    // (Rule 12), negative-payable (Rule 13), old-receivable (Rule 20) and
+    // old-payable (Rule 21). Returns { items: [{ name, receivable, payable,
+    // status }] } from the contacts list (cheap, plan-independent).
+    if (kind === 'customerBalances' || kind === 'vendorBalances') {
+      const ctype = kind === 'customerBalances' ? 'customer' : 'vendor';
+      try {
+        const items: any[] = [];
+        let page = 1;
+        while (true) {
+          const j: any = await zohoGet('contacts', accessToken, region, {
+            organization_id: orgId!, contact_type: ctype, per_page: '200', page: String(page)
+          });
+          for (const c of (j.contacts || [])) {
+            items.push({
+              name: c.contact_name,
+              receivable: Number(c.outstanding_receivable_amount || 0),
+              payable: Number(c.outstanding_payable_amount || 0),
+              status: c.status
+            });
+          }
+          if (!j.page_context || !j.page_context.has_more_page) break;
+          page++; if (page > 20) break;
+        }
+        return JSON.stringify({ error: null, items, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), items: [], apiUsage: lastApiUsage });
+      }
+    }
+
+    // Per-account closing balances via the Trial Balance report — feeds
+    // the suspense-account (Rule 14) and depreciation (Rule 17) checks.
+    // RISKY: /reports/* is plan/scope dependent. On failure we return a
+    // populated `error` so the frontend marks these rules `pending`.
+    // params = { fromDate, toDate }. The frontend calls twice (current +
+    // prior month) for the month-on-month depreciation comparison.
+    if (kind === 'accountBalances') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const today = new Date();
+      const toDate = p.toDate || today.toISOString().slice(0, 10);
+      const fromDate = p.fromDate || new Date(today.getFullYear(), 0, 1).toISOString().slice(0, 10);
+      try {
+        const j: any = await zohoGet('reports/trialbalance', accessToken, region, {
+          organization_id: orgId!, from_date: fromDate, to_date: toDate
+        });
+        // Trial-balance schemas vary; walk the tree and collect any node
+        // that looks like an account row (has a name + a balance field).
+        const accounts: any[] = [];
+        const seen = new Set<string>();
+        const walk = (node: any): void => {
+          if (!node) return;
+          if (Array.isArray(node)) { node.forEach(walk); return; }
+          if (typeof node === 'object') {
+            const name = node.account_name || node.name;
+            const hasBal = node.debit !== undefined || node.credit !== undefined ||
+              node.net_amount !== undefined || node.amount !== undefined || node.closing_balance !== undefined;
+            if (name && hasBal && !seen.has(String(name))) {
+              const debit = Number(node.debit || 0), credit = Number(node.credit || 0);
+              let balance = node.closing_balance !== undefined ? Number(node.closing_balance)
+                : node.net_amount !== undefined ? Number(node.net_amount)
+                : node.amount !== undefined ? Number(node.amount)
+                : debit - credit;
+              accounts.push({ account_name: name, account_type: node.account_type || node.type || '', debit, credit, balance });
+              seen.add(String(name));
+            }
+            for (const k of Object.keys(node)) { if (node[k] && typeof node[k] === 'object') walk(node[k]); }
+          }
+        };
+        walk(j.trial_balance !== undefined ? j.trial_balance : j);
+        return JSON.stringify({ error: null, fromDate, toDate, accounts, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), accounts: [], apiUsage: lastApiUsage });
+      }
+    }
+
+    // Imported bank transactions — feeds the unaccounted-transactions
+    // check (Rule 18). RISKY: endpoint/scope dependent; the frontend
+    // falls back to bankAccounts.uncategorized_transactions when this
+    // errors. params = { fromDate, toDate, accountId? }.
+    if (kind === 'bankTransactions') {
+      let p: any = {};
+      try { p = JSON.parse(event.arguments?.params || '{}'); } catch (_) { p = {}; }
+      const today = new Date();
+      const fromDate = p.fromDate || new Date(today.getTime() - 31 * 86400000).toISOString().slice(0, 10);
+      const toDate = p.toDate || today.toISOString().slice(0, 10);
+      try {
+        const base: any = { organization_id: orgId!, per_page: '200', from_date: fromDate, to_date: toDate };
+        if (p.accountId) base.account_id = String(p.accountId);
+        const items: any[] = [];
+        let page = 1;
+        while (true) {
+          const j: any = await zohoGet('banktransactions', accessToken, region, { ...base, page: String(page) });
+          for (const t of (j.banktransactions || [])) {
+            items.push({
+              id: t.transaction_id, date: t.date, amount: Number(t.amount || 0),
+              status: t.status, type: t.transaction_type, reference: t.reference_number || '',
+              account_id: t.account_id
+            });
+          }
+          if (!j.page_context || !j.page_context.has_more_page) break;
+          page++; if (page > 20) break;
+        }
+        return JSON.stringify({ error: null, fromDate, toDate, items, apiUsage: lastApiUsage });
+      } catch (e: any) {
+        return JSON.stringify({ error: e?.message || String(e), items: [], apiUsage: lastApiUsage });
+      }
+    }
+
     // Search Zoho contacts by name (fuzzy contains match). Used by the
     // Revenue push flow to detect customers that already exist in Zoho
     // before creating a duplicate. payload = { name }. Returns

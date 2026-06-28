@@ -957,8 +957,12 @@ window.zohoFetch = async (kind, organizationId, extraParams) => {
   __recordApiUsage(d.apiUsage);
   if (d.error) throw new Error(d.error);
   // For 'recentEntries', 'fxRate' and 'orgProfile' we want the full object
-  // (multiple top-level keys), not just `items`.
-  if (kind === 'recentEntries' || kind === 'fxRate' || kind === 'orgProfile') return d;
+  // (multiple top-level keys), not just `items`. The Self-Review data
+  // pulls likewise carry custom top-level keys (months/invoices/bills/
+  // accounts), so return the whole envelope for those too.
+  if (kind === 'recentEntries' || kind === 'fxRate' || kind === 'orgProfile' ||
+      kind === 'revenueByMonth' || kind === 'invoicesByDateRange' ||
+      kind === 'billsByDateRange' || kind === 'accountBalances') return d;
   const items = d.items || [];
   if (d.idByName) { try { Object.defineProperty(items, '_idByName', { value: d.idByName, enumerable: false }); } catch(_){} }
   return items;
@@ -1111,7 +1115,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts','vat_registered','validation_config','validation_results'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -2309,6 +2313,353 @@ function alValidateOcrInvoice(item, ctx){
   return out;
 }
 
+// ===================================================================
+// SELF-REVIEW / VALIDATION ENGINE
+// Runs AFTER the three executor stages are pushed to Zoho. Pulls data
+// back from Zoho (via the new backend kinds) and runs 26 checks. Each
+// rule's run(ctx) returns { status:'pass'|'fail'|'warn'|'pending',
+// message, variancePct? }. 'fail' = Red exception (executor must give a
+// reason). 'pending' = data unavailable (e.g. Zoho report scope denied)
+// — never counted as pass/fail. Mirrors the validator pattern used by
+// alValidateOcrInvoice / runBillValidators above.
+// ===================================================================
+
+// Suggested thresholds + keyword lists from the Validation Rules doc.
+// Hardcoded defaults today; structured so a reviewer-editable config can
+// override any field later (merged in via validation_config).
+const AL_VALIDATION_DEFAULTS = {
+  revenueDeviationPct: 30,     // Rule 1
+  expenseSpikePct: 50,         // Rule 4
+  vatRatePct: 5,               // Rules 6,15
+  vatTolerancePct: 0.5,        // Rule 6 round-off allowance
+  fixedAssetThreshold: 5000,   // Rule 16
+  oldReceivableDays: 180,      // Rule 20
+  oldPayableDays: 180,         // Rule 21
+  vatThresholdAED: 300000,     // Rule 15 internal limit
+  recurringMinMonths: 4,       // Rule 3 (present in ≥4 of prev 6)
+  narrationMinLen: 15,         // Rule 9
+  ledgerSimilarity: 0.85,      // Rule 22
+  relatedPartySimilarity: 0.8, // Rule 19
+  genericNarrations: ['payment','receipt','jv','transfer','expense','entry','adjustment','journal','misc','being'],
+  fixedAssetKeywords: ['laptop','computer','furniture','equipment','vehicle','machinery','server','printer'],
+  prepaidKeywords: ['insurance','annual license','trade license','software subscription','subscription','amc','rent advance','domain renewal','hosting','annual'],
+  rcmCategories: ['consultancy','consulting','professional','software','subscription','advertising','legal','marketing'],
+  salaryKeywords: ['salary','salaries','payroll','wages','wps'],
+  shareholders: [],
+  relatedParties: [],
+  prepaidSchedules: []
+};
+
+function alMonthKey(d){ return String(d||'').slice(0,7); }
+function alPrevMonths(period, n){
+  const parts = String(period||'').split('-'); let y=Number(parts[0]), m=Number(parts[1]);
+  const out=[];
+  for(let i=1;i<=n;i++){ let mm=m-i, yy=y; while(mm<=0){ mm+=12; yy-=1; } out.push(yy+'-'+String(mm).padStart(2,'0')); }
+  return out;
+}
+function alMonthBounds(period){
+  const parts = String(period||'').split('-'); const y=Number(parts[0]), m=Number(parts[1]);
+  const last=new Date(y, m, 0).getDate();
+  const mm=String(m).padStart(2,'0');
+  return { start: y+'-'+mm+'-01', end: y+'-'+mm+'-'+String(last).padStart(2,'0') };
+}
+function alDaysBetween(aStr,bStr){ const a=new Date(aStr).getTime(), b=new Date(bStr).getTime(); if(isNaN(a)||isNaN(b)) return 0; return Math.round((b-a)/86400000); }
+function alInMonth(rows, mk){ return (rows||[]).filter(x=>alMonthKey(x.date)===mk); }
+function alSum(rows, f){ return (rows||[]).reduce((s,x)=>s+Number((f?f(x):x.amount)||0),0); }
+function alFmtAED(n){ try{ return 'AED '+Number(n||0).toLocaleString('en-AE',{maximumFractionDigits:2}); }catch(_){ return 'AED '+(Math.round(Number(n||0)*100)/100); } }
+
+const AL_VALIDATION_RULES = [
+  // 1 — Revenue trend
+  { ruleNo:1, title:'Revenue trend', run:(ctx)=>{
+      if(!ctx.dataAvailable.revenueByMonth) return {status:'pending', message:'Revenue history unavailable.'};
+      const months = (ctx.zoho.revenueByMonth&&ctx.zoho.revenueByMonth.months)||{};
+      const cur = Number(months[ctx.period]||0);
+      const prev = alPrevMonths(ctx.period,6).map(m=>Number(months[m]||0)).filter(v=>v>0);
+      if(prev.length<2) return {status:'pass', message:'Insufficient history to assess revenue trend.'};
+      const avg = prev.reduce((a,b)=>a+b,0)/prev.length;
+      if(avg<=0) return {status:'pass', message:'No comparable prior revenue.'};
+      const dropPct = Math.round((avg-cur)/avg*100);
+      if(cur<avg && dropPct>ctx.config.revenueDeviationPct)
+        return {status:'fail', variancePct:dropPct, message:'Current month revenue ('+alFmtAED(cur)+') is '+dropPct+'% lower than the '+prev.length+'-month average ('+alFmtAED(avg)+'). Verify missing invoices, revenue recognition or genuine decline.'};
+      return {status:'pass', message:'Revenue '+alFmtAED(cur)+' is within tolerance of the historical average '+alFmtAED(avg)+'.'};
+    }},
+  // 2 — Supply-type validation
+  { ruleNo:2, title:'Supply type match', run:(ctx)=>{
+      const cfg = ctx.config.supplyTypes||[];
+      if(!cfg.length) return {status:'warn', message:'No supply types configured for this client (reviewer Starting Configuration).'};
+      if(!ctx.dataAvailable.invoices) return {status:'pending', message:'Invoice detail unavailable.'};
+      const allow = new Set(cfg.map(s=>String(s).toLowerCase()));
+      const mismatches=[];
+      (ctx.zoho.invoices||[]).forEach(inv=>{
+        const cat = alSupplyCategory(inv);
+        if(cat && !allow.has(cat)) mismatches.push((inv.invoice_number||inv.invoice_id)+' → '+cat);
+      });
+      if(mismatches.length) return {status:'fail', message:mismatches.length+' invoice(s) classified outside the configured supply types ['+cfg.join(', ')+']: '+mismatches.slice(0,5).join('; ')+(mismatches.length>5?' …':'')+'. Verify VAT treatment.'};
+      return {status:'pass', message:'All invoices match the configured supply types.'};
+    }},
+  // 3 — Missing recurring expense
+  { ruleNo:3, title:'Missing recurring expense', run:(ctx)=>{
+      const exp = ctx.zoho.expenses||[];
+      const prev6 = alPrevMonths(ctx.period,6);
+      const groups={};
+      exp.forEach(e=>{ const k=String(e.account||e.description||'').trim().toLowerCase(); if(!k) return; if(!groups[k]) groups[k]={name:e.account||e.description, months:{}}; const mk=alMonthKey(e.date); groups[k].months[mk]=(groups[k].months[mk]||0)+Number(e.amount||0); });
+      const missing=[];
+      Object.keys(groups).forEach(k=>{ const g=groups[k]; const presentPrev=prev6.filter(m=>g.months[m]>0); if(presentPrev.length>=ctx.config.recurringMinMonths && !(g.months[ctx.period]>0)){ const lastM=prev6.find(m=>g.months[m]>0); missing.push(g.name+(lastM?(' (was '+alFmtAED(g.months[lastM])+' in '+lastM+')'):'')); } });
+      if(missing.length) return {status:'fail', message:missing.length+' recurring expense(s) present in ≥'+ctx.config.recurringMinMonths+' of the last 6 months are missing this month: '+missing.slice(0,6).join('; ')+(missing.length>6?' …':'')+'. Verify whether not incurred, invoice pending, or entry missing.'};
+      return {status:'pass', message:'All recurring expenses appear in the current month.'};
+    }},
+  // 4 — Expense spike
+  { ruleNo:4, title:'Expense spike', run:(ctx)=>{
+      const exp = ctx.zoho.expenses||[];
+      const cur = alSum(alInMonth(exp, ctx.period));
+      const prev = alPrevMonths(ctx.period,6).map(m=>alSum(alInMonth(exp,m))).filter(v=>v>0);
+      if(prev.length<2) return {status:'pass', message:'Insufficient history to assess expense spike.'};
+      const avg = prev.reduce((a,b)=>a+b,0)/prev.length;
+      if(avg<=0) return {status:'pass', message:'No comparable prior expenses.'};
+      const incPct = Math.round((cur-avg)/avg*100);
+      if(cur>avg && incPct>ctx.config.expenseSpikePct)
+        return {status:'fail', variancePct:incPct, message:'Total expenses ('+alFmtAED(cur)+') increased '+incPct+'% vs the '+prev.length+'-month average ('+alFmtAED(avg)+'). Review supporting documents; check whether the cost spans multiple periods and needs accrual.'};
+      return {status:'pass', message:'Expenses '+alFmtAED(cur)+' within tolerance of average '+alFmtAED(avg)+'.'};
+    }},
+  // 5 — VAT invoice (input) field completeness
+  { ruleNo:5, title:'Input-VAT invoice validity', run:(ctx)=>{
+      if(!ctx.dataAvailable.bills) return {status:'pending', message:'Bill detail unavailable.'};
+      const bad=[];
+      (ctx.zoho.bills||[]).filter(b=>Number(b.tax_amount||0)>0).forEach(b=>{
+        const miss=[];
+        if(!b.vendor_name) miss.push('supplier');
+        if(!b.vendor_trn || String(b.vendor_trn).replace(/\D/g,'').length<15) miss.push('TRN');
+        if(!b.bill_number) miss.push('invoice no');
+        if(!b.date) miss.push('date');
+        if(!(Number(b.sub_total||0)>0)) miss.push('taxable amount');
+        if(!(Number(b.tax_amount||0)>0)) miss.push('VAT amount');
+        if(miss.length) bad.push((b.bill_number||b.bill_id)+' ['+miss.join(', ')+']');
+      });
+      if(bad.length) return {status:'fail', message:bad.length+' VAT-claimed bill(s) missing mandatory tax-invoice fields: '+bad.slice(0,5).join('; ')+(bad.length>5?' …':'')+'. Obtain valid tax invoices.'};
+      return {status:'pass', message:'All input-VAT bills carry the mandatory tax-invoice fields.'};
+    }},
+  // 6 — VAT rate recompute
+  { ruleNo:6, title:'VAT rate accuracy', run:(ctx)=>{
+      const invOk=ctx.dataAvailable.invoices, billOk=ctx.dataAvailable.bills;
+      if(!invOk && !billOk) return {status:'pending', message:'Invoice/bill detail unavailable.'};
+      const rate=ctx.config.vatRatePct/100, tol=ctx.config.vatTolerancePct/100;
+      const bad=[];
+      const check=(label, sub, tax)=>{ if(!(sub>0)||!(tax>0)) return; const expected=sub*rate; if(Math.abs(tax-expected) > sub*tol) bad.push(label+' (taxable '+alFmtAED(sub)+', VAT '+alFmtAED(tax)+' vs expected '+alFmtAED(expected)+')'); };
+      if(invOk) (ctx.zoho.invoices||[]).forEach(i=>check('Inv '+(i.invoice_number||i.invoice_id), Number(i.sub_total||0), Number(i.tax_total||0)));
+      if(billOk) (ctx.zoho.bills||[]).forEach(b=>check('Bill '+(b.bill_number||b.bill_id), Number(b.sub_total||0), Number(b.tax_amount||0)));
+      if(bad.length) return {status:'fail', message:bad.length+' document(s) have VAT outside the '+ctx.config.vatRatePct+'% ±'+ctx.config.vatTolerancePct+'% tolerance: '+bad.slice(0,5).join('; ')+(bad.length>5?' …':'')+'.'};
+      return {status:'pass', message:'Recorded VAT matches the expected '+ctx.config.vatRatePct+'% within tolerance.'};
+    }},
+  // 7 — Reverse charge
+  { ruleNo:7, title:'Reverse charge (RCM)', run:(ctx)=>{
+      if(!ctx.dataAvailable.bills) return {status:'pending', message:'Bill detail unavailable.'};
+      const cats=(ctx.config.rcmCategories||[]).map(s=>s.toLowerCase());
+      const suspect=[];
+      (ctx.zoho.bills||[]).forEach(b=>{
+        const foreign = b.country && !/uae|united arab|emirat|^ae$/i.test(String(b.country));
+        if(!foreign) return;
+        const matchesCat = (b.line_items||[]).some(li=>cats.some(c=>String(li.account_name||li.name||'').toLowerCase().includes(c)));
+        const noVat = !(Number(b.tax_amount||0)>0);
+        if(matchesCat && noVat) suspect.push((b.bill_number||b.bill_id)+' / '+(b.vendor_name||'?')+' ('+b.country+')');
+      });
+      if(suspect.length) return {status:'fail', message:suspect.length+' foreign-supplier bill(s) in RCM categories with no VAT accounted — potential reverse charge not recorded: '+suspect.slice(0,5).join('; ')+(suspect.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No unaccounted reverse-charge transactions detected.'};
+    }},
+  // 8 — Prior-period expense / missing accrual
+  { ruleNo:8, title:'Prior-period expense / accrual', run:(ctx)=>{
+      if(!ctx.dataAvailable.bills) return {status:'pending', message:'Bill detail unavailable.'};
+      const flagged=[];
+      (ctx.zoho.bills||[]).forEach(b=>{
+        const docM=alMonthKey(b.date); const bookM=alMonthKey(b.created_time)||ctx.period;
+        if(docM && docM<ctx.period && bookM===ctx.period) flagged.push((b.bill_number||b.bill_id)+' dated '+b.date);
+      });
+      if(flagged.length) return {status:'fail', message:flagged.length+' bill(s) relate to a prior period but were booked this month: '+flagged.slice(0,5).join('; ')+(flagged.length>5?' …':'')+'. Verify whether a prior-period accrual/provision was required.'};
+      return {status:'pass', message:'No prior-period expenses booked without accrual.'};
+    }},
+  // 9 — Narration quality
+  { ruleNo:9, title:'Narration quality', run:(ctx)=>{
+      const minLen=ctx.config.narrationMinLen;
+      const generic=new Set((ctx.config.genericNarrations||[]).map(s=>s.toLowerCase()));
+      const items=[].concat(alInMonth(ctx.zoho.journals,ctx.period).map(x=>({id:'JV '+x.id,t:x.description})), alInMonth(ctx.zoho.expenses,ctx.period).map(x=>({id:'Exp '+x.id,t:x.description})), alInMonth(ctx.zoho.payments,ctx.period).map(x=>({id:'Pay '+x.id,t:x.description})));
+      const bad=[];
+      items.forEach(it=>{ const t=String(it.t||'').trim(); const low=t.toLowerCase(); if(!t || t.length<minLen || generic.has(low)) bad.push(it.id); });
+      if(bad.length) return {status:'fail', message:bad.length+' entr(y/ies) have blank, too-short (<'+minLen+' chars) or generic narrations: '+bad.slice(0,6).join(', ')+(bad.length>6?' …':'')+'. Add counterparty, invoice no, or purpose.'};
+      return {status:'pass', message:'Narrations carry sufficient transaction detail.'};
+    }},
+  // 10 — Bank account completeness
+  { ruleNo:10, title:'Bank account completeness', run:(ctx)=>{
+      const cfg=(ctx.config.bankAccountsCfg||[]).map(a=>(typeof a==='string'?a:(a.account_name||a.name||''))).filter(Boolean);
+      const books=(ctx.zoho.bankAccounts||[]).map(a=>a.account_name||a.name||'');
+      const imported=(ctx.local.importedAccounts||[]);
+      if(!cfg.length) return {status:'warn', message:'No bank accounts configured in the client master (reviewer Starting Configuration).'};
+      const missing=[];
+      cfg.forEach(name=>{ const inBooks=books.some(b=>alNameSimilarity(b,name)>=0.8); const inStmt=imported.some(b=>alNameSimilarity(b,name)>=0.8); if(!inBooks||!inStmt) missing.push(name+(!inBooks?' (no ledger)':'')+(!inStmt?' (no statement)':'')); });
+      if(missing.length) return {status:'fail', message:missing.length+' configured bank account(s) missing from books/statements: '+missing.join('; ')+'. Import the statement, create the ledger, or note no transactions this month.'};
+      return {status:'pass', message:'All configured bank accounts exist in books and have statements.'};
+    }},
+  // 11 — Bank reconciliation
+  { ruleNo:11, title:'Bank reconciliation', run:(ctx)=>{
+      const stmts=ctx.local.statementClosing||[];
+      if(!stmts.length) return {status:'warn', message:'No imported statement closing balances to reconcile against.'};
+      const diffs=[];
+      stmts.forEach(s=>{ const acct=(ctx.zoho.bankAccounts||[]).find(a=>alNameSimilarity(a.account_name||a.name,s.account)>=0.8); if(!acct) return; const d=Number(acct.balance||0)-Number(s.closing||0); if(Math.abs(d)>=1) diffs.push(s.account+': '+alFmtAED(d)); });
+      if(diffs.length) return {status:'fail', message:'Bank reconciliation difference on '+diffs.length+' account(s): '+diffs.join('; ')+'.'};
+      return {status:'pass', message:'Book and statement closing balances agree.'};
+    }},
+  // 12 — Negative receivable
+  { ruleNo:12, title:'Negative receivable', run:(ctx)=>{
+      if(!ctx.dataAvailable.customerBalances) return {status:'pending', message:'Customer balances unavailable.'};
+      const neg=(ctx.zoho.customerBalances||[]).filter(c=>Number(c.receivable||0)<0);
+      if(neg.length) return {status:'fail', message:neg.length+' customer(s) have a negative receivable (advance): '+neg.slice(0,5).map(c=>c.name+' '+alFmtAED(c.receivable)).join('; ')+(neg.length>5?' …':'')+'. Reclassify to Advance from Customer.'};
+      return {status:'pass', message:'No negative customer receivables.'};
+    }},
+  // 13 — Negative payable
+  { ruleNo:13, title:'Negative payable', run:(ctx)=>{
+      if(!ctx.dataAvailable.vendorBalances) return {status:'pending', message:'Vendor balances unavailable.'};
+      const neg=(ctx.zoho.vendorBalances||[]).filter(v=>Number(v.payable||0)<0);
+      if(neg.length) return {status:'fail', message:neg.length+' vendor(s) have a negative payable (advance): '+neg.slice(0,5).map(v=>v.name+' '+alFmtAED(v.payable)).join('; ')+(neg.length>5?' …':'')+'. Reclassify to Advance to Vendor.'};
+      return {status:'pass', message:'No negative vendor payables.'};
+    }},
+  // 14 — Suspense account
+  { ruleNo:14, title:'Suspense account', run:(ctx)=>{
+      if(!ctx.dataAvailable.accountBalances) return {status:'pending', message:'Account balances (Trial Balance) unavailable.'};
+      const susp=(ctx.zoho.accountBalancesCur||[]).filter(a=>/suspense|uncategor|ask my account/i.test(a.account_name||'') && Math.abs(Number(a.balance||0))>=1);
+      if(susp.length) return {status:'fail', message:'Suspense/uncategorised balance pending allocation: '+susp.map(a=>a.account_name+' '+alFmtAED(a.balance)).join('; ')+'. Allocate before month closure.'};
+      return {status:'pass', message:'Suspense account is nil.'};
+    }},
+  // 15 — VAT registration threshold
+  { ruleNo:15, title:'VAT registration threshold', run:(ctx)=>{
+      if(ctx.config.vatRegistered==='yes') return {status:'pass', message:'Client is VAT-registered; threshold monitoring not applicable.'};
+      if(!ctx.dataAvailable.revenueByMonth) return {status:'pending', message:'Revenue history unavailable.'};
+      const months=(ctx.zoho.revenueByMonth&&ctx.zoho.revenueByMonth.months)||{};
+      const window=[ctx.period].concat(alPrevMonths(ctx.period,11));
+      const turnover=window.reduce((s,m)=>s+Number(months[m]||0),0);
+      if(turnover>ctx.config.vatThresholdAED) return {status:'fail', message:'Rolling 12-month taxable turnover ('+alFmtAED(turnover)+') exceeds the '+alFmtAED(ctx.config.vatThresholdAED)+' internal limit. Advise the client on VAT registration.'};
+      return {status:'pass', message:'12-month turnover ('+alFmtAED(turnover)+') is below the registration threshold.'};
+    }},
+  // 16 — Fixed asset classification
+  { ruleNo:16, title:'Fixed asset classification', run:(ctx)=>{
+      const kw=(ctx.config.fixedAssetKeywords||[]).map(s=>s.toLowerCase());
+      const hits=alInMonth(ctx.zoho.expenses,ctx.period).filter(e=>Number(e.amount||0)>ctx.config.fixedAssetThreshold && kw.some(k=>String(e.description||'').toLowerCase().includes(k)));
+      if(hits.length) return {status:'fail', message:hits.length+' high-value purchase(s) over '+alFmtAED(ctx.config.fixedAssetThreshold)+' may require capitalization: '+hits.slice(0,5).map(e=>(e.description||'?')+' '+alFmtAED(e.amount)).join('; ')+(hits.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No expensed purchases flagged for capitalization.'};
+    }},
+  // 17 — Depreciation
+  { ruleNo:17, title:'Depreciation', run:(ctx)=>{
+      if(!ctx.dataAvailable.accountBalances) return {status:'pending', message:'Account balances (Trial Balance) unavailable.'};
+      const cur=ctx.zoho.accountBalancesCur||[], prev=ctx.zoho.accountBalancesPrev||[];
+      const assets=cur.filter(a=>/fixed asset|property|plant|equipment|furniture|vehicle|machinery/i.test((a.account_type||'')+' '+(a.account_name||'')));
+      if(!assets.length) return {status:'pass', message:'No depreciable fixed assets found.'};
+      const depJournal=alInMonth(ctx.zoho.journals,ctx.period).some(j=>/deprec/i.test(j.description||''));
+      const unchanged=assets.filter(a=>{ const p=prev.find(x=>x.account_name===a.account_name); return p && Math.abs(Number(a.balance||0))>=Math.abs(Number(p.balance||0))-1; });
+      if(unchanged.length && !depJournal) return {status:'fail', message:'Fixed asset balances unchanged month-on-month and no depreciation entry posted ('+unchanged.slice(0,4).map(a=>a.account_name).join(', ')+'). Post depreciation.'};
+      return {status:'pass', message:'Depreciation appears posted for existing assets.'};
+    }},
+  // 18 — Unaccounted bank transactions
+  { ruleNo:18, title:'Unaccounted bank transactions', run:(ctx)=>{
+      if(ctx.dataAvailable.bankTransactions){
+        const un=(ctx.zoho.bankTransactions||[]).filter(t=>/uncategor|unaccounted/i.test(t.status||''));
+        if(un.length) return {status:'fail', message:un.length+' bank transaction(s) remain unaccounted.'};
+        return {status:'pass', message:'All imported bank transactions are booked.'};
+      }
+      // Fallback: uncategorized counter on the bank accounts list.
+      const unc=(ctx.zoho.bankAccounts||[]).reduce((s,a)=>s+Number(a.uncategorized_transactions||0),0);
+      if(unc>0) return {status:'fail', message:unc+' uncategorised bank transaction(s) across accounts (from account summary). Categorise before closure.'};
+      return {status:'pass', message:'No uncategorised bank transactions reported.'};
+    }},
+  // 19 — Related party detection
+  { ruleNo:19, title:'Related party detection', run:(ctx)=>{
+      const watch=[].concat(ctx.config.shareholders||[], ctx.config.relatedParties||[]).filter(Boolean);
+      if(!watch.length) return {status:'warn', message:'No shareholders / related parties configured to screen against.'};
+      const names=[].concat((ctx.zoho.vendors||[]), (ctx.zoho.customers||[]));
+      const thr=ctx.config.relatedPartySimilarity;
+      const hits=[];
+      names.forEach(n=>{ const m=watch.find(w=>alNameSimilarity(w,n)>=thr); if(m) hits.push(n+' ~ '+m); });
+      if(hits.length) return {status:'fail', message:hits.length+' potential related-party counterpart(ies) detected (Corporate Tax review): '+hits.slice(0,5).join('; ')+(hits.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No related-party transactions detected.'};
+    }},
+  // 20 — Old receivable
+  { ruleNo:20, title:'Old receivable (>180d)', run:(ctx)=>{
+      const lim=ctx.config.oldReceivableDays, end=ctx.monthBounds.end;
+      const old=(ctx.zoho.openInvoices||[]).filter(i=>Number(i.balance||0)>0 && alDaysBetween(i.date,end)>lim);
+      if(old.length) return {status:'fail', message:old.length+' receivable(s) outstanding >'+lim+' days (total '+alFmtAED(alSum(old,i=>i.balance))+'): '+old.slice(0,5).map(i=>(i.customer_name||'?')+' '+alFmtAED(i.balance)).join('; ')+(old.length>5?' …':'')+'. Review collection risk.'};
+      return {status:'pass', message:'No receivables outstanding beyond '+lim+' days.'};
+    }},
+  // 21 — Old payable
+  { ruleNo:21, title:'Old payable (>180d)', run:(ctx)=>{
+      const lim=ctx.config.oldPayableDays, end=ctx.monthBounds.end;
+      const old=(ctx.zoho.openBills||[]).filter(b=>Number(b.balance||0)>0 && alDaysBetween(b.date,end)>lim);
+      if(old.length) return {status:'fail', message:old.length+' payable(s) outstanding >'+lim+' days (total '+alFmtAED(alSum(old,b=>b.balance))+'): '+old.slice(0,5).map(b=>(b.vendor_name||'?')+' '+alFmtAED(b.balance)).join('; ')+(old.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No payables outstanding beyond '+lim+' days.'};
+    }},
+  // 22 — Duplicate ledger creation
+  { ruleNo:22, title:'Duplicate ledger', run:(ctx)=>{
+      const coa=(ctx.zoho.coa||[]).map(a=>a.name||a.account_name||'').filter(Boolean);
+      const thr=ctx.config.ledgerSimilarity;
+      const pairs=[];
+      for(let i=0;i<coa.length;i++) for(let j=i+1;j<coa.length;j++){ const s=alNameSimilarity(coa[i],coa[j]); if(s>=thr && coa[i].toLowerCase()!==coa[j].toLowerCase()) pairs.push('"'+coa[i]+'" ~ "'+coa[j]+'"'); }
+      if(pairs.length) return {status:'warn', message:pairs.length+' similar ledger pair(s) in the chart of accounts — review for duplicates: '+pairs.slice(0,5).join('; ')+(pairs.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No duplicate-looking ledgers detected.'};
+    }},
+  // 23 — Salary accrual
+  { ruleNo:23, title:'Salary accrual', run:(ctx)=>{
+      const kw=(ctx.config.salaryKeywords||[]).map(s=>s.toLowerCase());
+      const cur=alInMonth(ctx.zoho.expenses,ctx.period).concat(alInMonth(ctx.zoho.journals,ctx.period));
+      const hasSalary=cur.some(e=>kw.some(k=>(String(e.account||'')+' '+String(e.description||'')).toLowerCase().includes(k)));
+      if(!hasSalary) return {status:'fail', message:'No salary/payroll expense or accrual found this month. Verify against the payroll register (external) and post any month-end accrual.'};
+      return {status:'pass', message:'Salary expense / accrual present this month.'};
+    }},
+  // 24 — Prepaid amortization
+  { ruleNo:24, title:'Prepaid amortization', run:(ctx)=>{
+      const sched=ctx.config.prepaidSchedules||[];
+      if(!sched.length) return {status:'pass', message:'No prepaid schedules configured to verify.'};
+      const bad=[];
+      sched.forEach(s=>{ const months=Math.max(1, Math.round(alDaysBetween(s.start,s.end)/30)); const expected=Number(s.total||0)/months; const booked=alInMonth(ctx.zoho.journals,ctx.period).filter(j=>alNameSimilarity(j.description,s.name)>=0.6).reduce((a,j)=>a+Number(j.amount||0),0); if(Math.abs(booked-expected)>Math.max(1,expected*0.05)) bad.push(s.name+': expected '+alFmtAED(expected)+', booked '+alFmtAED(booked)); });
+      if(bad.length) return {status:'fail', message:'Prepaid amortization mismatch: '+bad.join('; ')+'.'};
+      return {status:'pass', message:'Prepaid amortization matches the configured schedules.'};
+    }},
+  // 25 — Missing prepaid
+  { ruleNo:25, title:'Missing prepaid', run:(ctx)=>{
+      const kw=(ctx.config.prepaidKeywords||[]).map(s=>s.toLowerCase());
+      const hits=alInMonth(ctx.zoho.expenses,ctx.period).filter(e=>Number(e.amount||0)>ctx.config.fixedAssetThreshold && kw.some(k=>String(e.description||'').toLowerCase().includes(k)));
+      if(hits.length) return {status:'warn', message:hits.length+' expense(s) look like multi-period prepayments fully expensed — consider prepaid treatment: '+hits.slice(0,5).map(e=>(e.description||'?')+' '+alFmtAED(e.amount)).join('; ')+(hits.length>5?' …':'')+'.'};
+      return {status:'pass', message:'No likely-prepaid expenses fully expensed.'};
+    }}
+];
+
+// Map a Zoho invoice to one of the configured supply-type buckets used by
+// Rule 2. Heuristic from tax_treatment + place_of_supply + line VAT.
+function alSupplyCategory(inv){
+  const tt=String(inv.tax_treatment||'').toLowerCase();
+  const pos=String(inv.place_of_supply||'').toLowerCase();
+  if(/out_of_scope|outofscope/.test(tt)) return 'out of scope';
+  if(/non_gcc|gcc_vat|overseas|export/.test(tt)) return 'export';
+  if(pos && !/^ae|uae|united arab|dubai|abu|sharjah|ajman|fujairah|quwain|khaimah/.test(pos)) return 'export';
+  const hasVat=(inv.line_items||[]).some(li=>Number(li.tax_percentage||0)>0) || Number(inv.tax_total||0)>0;
+  if(!hasVat) return 'exempt';
+  return 'local supply';
+}
+
+function alRunValidation(ctx){
+  return AL_VALIDATION_RULES.filter(rule=>!(ctx.config.disabledRules||[]).includes(rule.ruleNo)).map(rule=>{
+    let res;
+    try { res = rule.run(ctx); } catch(e){ res = {status:'pending', message:'Could not evaluate: '+(e&&e.message||e)}; }
+    const status=res.status||'pending';
+    return { ruleNo:rule.ruleNo, title:rule.title, status, message:res.message||'', variancePct:(res.variancePct!=null?res.variancePct:null), requiresReason:status==='fail', reason:'' };
+  });
+}
+
+// Rule 26 — Month closure score. Counts pass/fail only (warn + pending
+// are advisory / not assessable). Bands per the doc.
+function alValidationScore(rows){
+  const scored=(rows||[]).filter(r=>r.status==='pass'||r.status==='fail');
+  const passed=scored.filter(r=>r.status==='pass').length;
+  const total=scored.length;
+  const pct= total? Math.round(passed/total*100) : 0;
+  const band= pct>=95?'Ready for Review' : pct>=80?'Review Required' : 'Cannot Close';
+  return { passed, total, pct, band };
+}
+
 // Posting destination helper — decides whether a ledger lands on P&L or
 // Balance Sheet from its Zoho account_type. Shared by the Bank Statement
 // review, Revenue OCR review, and the pre-push guard so the accountant
@@ -2988,6 +3339,27 @@ function App(){
   const[billProcessing,setBillProcessing]=useState(false);
   const[billProgress,setBillProgress]=useState("");
   const billInputRef=useRef(null);
+
+  // ===== Self-Review / Validation state =====
+  const[valPeriod,setValPeriod]=useState(()=>{ try{ return new Date().toISOString().slice(0,7); }catch(e){ return "2026-01"; } });
+  const[valRunning,setValRunning]=useState(false);
+  const[valProgress,setValProgress]=useState("");
+  const[valError,setValError]=useState("");
+  const[validationRun,setValidationRun]=useState(null); // current period's run: {ranAt,ranBy,status,score,rows,reviewerSignoff}
+  const[valCfgTick,setValCfgTick]=useState(0); // bump to re-read Starting Configuration after a write
+  // Load the saved run for the active client + period.
+  useEffect(()=>{
+    if(!activeClientId){ setValidationRun(null); return; }
+    const all=getClientData(activeClientId,'validation_results',{})||{};
+    setValidationRun(all[valPeriod]||null);
+  },[activeClientId,valPeriod]);
+  const saveValidationRun=useCallback((run)=>{
+    setValidationRun(run);
+    if(!activeClientId) return;
+    const all=getClientData(activeClientId,'validation_results',{})||{};
+    all[valPeriod]=run;
+    setClientData(activeClientId,'validation_results',all);
+  },[activeClientId,valPeriod]);
 
 
 
@@ -3855,6 +4227,69 @@ function App(){
     else push('push','Ready for Zoho','pass','All '+lines.length+' line(s) have an account chosen.');
     return out;
   },[activeClientId,activeClientName,vendors]);
+
+  // Self-Review orchestrator — pulls data back from Zoho for the selected
+  // period, runs the 26-rule engine, and saves the run. Risky report
+  // endpoints degrade to `pending` rather than failing the whole run.
+  const runValidation = useCallback(async ()=>{
+    const c=clients.find(x=>x.id===activeClientId);
+    const orgId=c && c.zohoOrgId;
+    if(!orgId){ setValError("Connect this client to a Zoho organization before running the self-review."); return; }
+    setValRunning(true); setValError(""); setValProgress("Fetching data from Zoho…");
+    try{
+      const bounds=alMonthBounds(valPeriod);
+      const back=alPrevMonths(valPeriod,12);
+      const wideStart=(back[back.length-1]||valPeriod)+'-01';
+      const prevBounds=alMonthBounds(alPrevMonths(valPeriod,1)[0]);
+      const dataAvailable={revenueByMonth:false,invoices:false,bills:false,customerBalances:false,vendorBalances:false,accountBalances:false,bankTransactions:false};
+      const zoho={};
+      const tryFetch=async(key,kind,params)=>{ try{ const r=await window.zohoFetch(kind,orgId,params); dataAvailable[key]=true; return r; }catch(e){ dataAvailable[key]=false; return null; } };
+
+      // Always-available pulls (existing kinds).
+      const recent=await window.zohoFetch('recentEntries',orgId,{fromDate:wideStart,toDate:bounds.end,only:['expenses','journals','payments']}).catch(()=>({expenses:[],journals:[],payments:[]}));
+      zoho.expenses=recent.expenses||[]; zoho.journals=recent.journals||[]; zoho.payments=recent.payments||[];
+      zoho.openInvoices=await window.zohoFetch('openInvoices',orgId).catch(()=>[]);
+      zoho.openBills=await window.zohoFetch('openBills',orgId).catch(()=>[]);
+      zoho.bankAccounts=await window.zohoFetch('bankAccounts',orgId).catch(()=>[]);
+      zoho.coa=await window.zohoFetch('chartofaccounts',orgId).catch(()=>[]);
+      zoho.vendors=(vendors||[]); zoho.customers=(customers||[]);
+
+      // New-kind pulls (degrade gracefully).
+      setValProgress("Pulling revenue, balances and tax detail…");
+      zoho.revenueByMonth=await tryFetch('revenueByMonth','revenueByMonth',{fromDate:wideStart,toDate:bounds.end});
+      const invs=await tryFetch('invoices','invoicesByDateRange',{fromDate:bounds.start,toDate:bounds.end}); zoho.invoices=(invs&&invs.invoices)||[];
+      const bls=await tryFetch('bills','billsByDateRange',{fromDate:bounds.start,toDate:bounds.end}); zoho.bills=(bls&&bls.bills)||[];
+      zoho.customerBalances=await tryFetch('customerBalances','customerBalances')||[];
+      zoho.vendorBalances=await tryFetch('vendorBalances','vendorBalances')||[];
+      const abCur=await tryFetch('accountBalances','accountBalances',{fromDate:bounds.start,toDate:bounds.end}); zoho.accountBalancesCur=(abCur&&abCur.accounts)||[];
+      let abPrev=null; if(dataAvailable.accountBalances){ abPrev=await window.zohoFetch('accountBalances',orgId,{fromDate:prevBounds.start,toDate:prevBounds.end}).catch(()=>null); }
+      zoho.accountBalancesPrev=(abPrev&&abPrev.accounts)||[];
+      zoho.bankTransactions=await tryFetch('bankTransactions','bankTransactions',{fromDate:bounds.start,toDate:bounds.end})||[];
+
+      // Config (defaults + per-client overrides + Starting Configuration).
+      const overrides=getClientData(activeClientId,'validation_config',{})||{};
+      const config=Object.assign({},AL_VALIDATION_DEFAULTS,overrides,{
+        vatRegistered:getClientData(activeClientId,'vat_registered','no'),
+        supplyTypes:getClientData(activeClientId,'supply_types',[])||[],
+        bankAccountsCfg:getClientData(activeClientId,'bank_accounts',[])||[]
+      });
+
+      setValProgress("Running validation rules…");
+      const ctx={ period:valPeriod, monthBounds:bounds, config, zoho, dataAvailable, local:{importedAccounts:[],statementClosing:[]} };
+      const rows=alRunValidation(ctx);
+      const score=alValidationScore(rows);
+      // Preserve reasons already typed for the same rule numbers.
+      if(validationRun && validationRun.rows){ const byNo={}; validationRun.rows.forEach(r=>{ byNo[r.ruleNo]=r.reason; }); rows.forEach(r=>{ if(r.requiresReason && byNo[r.ruleNo]) r.reason=byNo[r.ruleNo]; }); }
+      const run={ ranAt:new Date().toISOString(), ranBy:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'', status:'draft', score, rows, reviewerSignoff:null };
+      saveValidationRun(run);
+    }catch(e){ setValError((e&&e.message)||String(e)); }
+    finally{ setValRunning(false); setValProgress(""); }
+  },[activeClientId,clients,valPeriod,vendors,customers,validationRun,saveValidationRun]);
+
+  // Patch a single rule's reason (executor) and persist (debounced via setClientData).
+  const setValidationReason=useCallback((ruleNo,reason)=>{
+    setValidationRun(prev=>{ if(!prev) return prev; const rows=prev.rows.map(r=> r.ruleNo===ruleNo ? {...r,reason} : r); const run={...prev,rows}; if(activeClientId){ const all=getClientData(activeClientId,'validation_results',{})||{}; all[valPeriod]=run; setClientData(activeClientId,'validation_results',all); } return run; });
+  },[activeClientId,valPeriod]);
 
   // Upload a PDF / image, run AnalyzeExpense via the invoice-ocr Lambda
   // (Textract is doc-type-agnostic), and create a bill draft from the
@@ -5966,6 +6401,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {key:"revenue",    label:"Revenue",               icon:"💰", count: ocrQueue.length||undefined},
                 {key:"bills",      label:"Bills",                 icon:"🧾", count: (billOcrQueue||[]).length||undefined},
                 {key:"projects",   label:"Bank Statement Upload", icon:"🏦", count: projects.length||undefined},
+                {key:"validation", label:"Self-Review",           icon:"✅"},
                 {key:"masterData", label:"Master Data",           icon:"📚"},
                 {key:"settings",   label:"Settings",              icon:"⚙"},
                 {key:"activity",   label:"Activity",              icon:"📊"},
@@ -7052,6 +7488,111 @@ td,th{padding:8px 12px;vertical-align:middle}
                     Vendor payments will be recorded here. For now use the Bank Statement Upload flow — debit rows with a vendor selected can apply against an open bill via the Bills picker.
                   </div>
                 )}
+              </div>;
+            })()}
+
+            {clientDetailTab==="validation" && (()=>{
+              const role=window.AUTH_USER&&window.AUTH_USER.role;
+              const isReviewer=role==='admin'||role==='team-lead';
+              const run=validationRun;
+              void valCfgTick; // re-read config on bump
+              const vatReg=getClientData(activeClientId,'vat_registered','no');
+              const supplyTypes=getClientData(activeClientId,'supply_types',[])||[];
+              const bankCfg=getClientData(activeClientId,'bank_accounts',[])||[];
+              const writeCfg=(key,val)=>{ setClientData(activeClientId,key,val); setValCfgTick(t=>t+1); };
+              const SUPPLY_OPTS=['Local Supply','Export','Exempt','Out of Scope'];
+              const toggleSupply=(label)=>{ const set=supplyTypes.map(String); const i=set.findIndex(s=>s.toLowerCase()===label.toLowerCase()); if(i>=0) set.splice(i,1); else set.push(label); writeCfg('supply_types',set); };
+              // Build a period selector: last 18 months (plus the selected one).
+              const months=[]; { const d=new Date(); d.setDate(1); for(let i=0;i<18;i++){ months.push(d.toISOString().slice(0,7)); d.setMonth(d.getMonth()-1); } }
+              if(months.indexOf(valPeriod)<0) months.unshift(valPeriod);
+              const fmtPeriod=(p)=>{ try{ const [y,m]=p.split('-'); return new Date(Number(y),Number(m)-1,1).toLocaleDateString('en-GB',{month:'short',year:'numeric'}); }catch(e){ return p; } };
+              const redOpen = (run&&run.rows)? run.rows.filter(r=>r.requiresReason && !(r.reason&&r.reason.trim())).length : 0;
+              const canSubmit = run && run.rows && redOpen===0 && run.status!=='submitted';
+              const TONE={ pass:{bg:'rgba(22,163,74,0.08)',fg:'#16a34a',br:'rgba(22,163,74,0.25)',dot:'🟢',label:'Pass'},
+                           fail:{bg:'rgba(220,38,38,0.07)',fg:'#dc2626',br:'rgba(220,38,38,0.28)',dot:'🔴',label:'Exception'},
+                           warn:{bg:'rgba(217,119,6,0.08)',fg:'#d97706',br:'rgba(217,119,6,0.28)',dot:'🟡',label:'Review'},
+                           pending:{bg:'rgba(120,120,140,0.08)',fg:'#6b7280',br:'rgba(120,120,140,0.25)',dot:'⚪',label:'Data N/A'} };
+              const submitReview=()=>{ if(!run) return; saveValidationRun({...run,status:'submitted',submittedAt:new Date().toISOString()}); };
+              const signoff=()=>{ if(!run) return; saveValidationRun({...run,reviewerSignoff:{by:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'',at:new Date().toISOString()}}); };
+              const scoreTone = run&&run.score ? (run.score.pct>=95?TONE.pass:run.score.pct>=80?TONE.warn:TONE.fail) : TONE.pending;
+              return <div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
+                  <div>
+                    <h2 style={{fontSize:18,fontWeight:700,color:"#1a1a2e",margin:0}}>✅ Self-Review</h2>
+                    <div style={{fontSize:12,color:"#888",marginTop:2}}>Post-push data validation pulled back from Zoho. Resolve every 🔴 exception with a reason before submitting for review.</div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:11,color:"#666"}}>Accounting period</span>
+                    <select value={valPeriod} onChange={e=>setValPeriod(e.target.value)} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #d8d8e2",fontSize:12}}>
+                      {months.map(m=><option key={m} value={m}>{fmtPeriod(m)}</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Starting Configuration — reviewer only */}
+                {isReviewer && <div style={{border:"1px solid rgba(105,88,194,0.22)",borderRadius:12,padding:"14px 18px",marginBottom:16,background:"rgba(105,88,194,0.04)"}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:10}}>⚙ Starting Configuration <span style={{fontSize:10,fontWeight:600,color:"#999"}}>(reviewer)</span></div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:16}}>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>1 · Bank accounts</div>
+                      <div style={{fontSize:11,color:"#777",marginBottom:6}}>{(bankCfg||[]).length} configured. Synced from Zoho on the Bank Statement tab.</div>
+                      <button onClick={async()=>{ const c2=clients.find(x=>x.id===activeClientId); const orgId=c2&&c2.zohoOrgId; if(!orgId){ alert('Connect Zoho first.'); return;} try{ const accts=await window.zohoFetch('bankAccounts',orgId); writeCfg('bank_accounts',(accts||[]).map(a=>({account_name:a.account_name||a.name,account_id:a.account_id}))); alert('Fetched '+(accts||[]).length+' bank account(s).'); }catch(e){ alert('Could not fetch: '+(e.message||e)); } }} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #6958C2",background:"#6958C2",color:"#fff",fontSize:11,fontWeight:600,cursor:"pointer"}}>↻ Fetch bank accounts</button>
+                    </div>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>2 · Supply types</div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                        {SUPPLY_OPTS.map(opt=>{ const on=supplyTypes.some(s=>String(s).toLowerCase()===opt.toLowerCase()); return <span key={opt} onClick={()=>toggleSupply(opt)} style={{cursor:"pointer",fontSize:11,fontWeight:600,padding:"4px 10px",borderRadius:14,border:"1px solid "+(on?"#4D3FA0":"#d8d8e2"),background:on?"rgba(105,88,194,0.12)":"#fff",color:on?"#4D3FA0":"#888"}}>{on?"✓ ":""}{opt}</span>; })}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>3 · VAT registration</div>
+                      <div style={{display:"flex",gap:6}}>
+                        {['yes','no'].map(v=><span key={v} onClick={()=>writeCfg('vat_registered',v)} style={{cursor:"pointer",fontSize:11,fontWeight:600,padding:"4px 14px",borderRadius:14,border:"1px solid "+(vatReg===v?"#4D3FA0":"#d8d8e2"),background:vatReg===v?"rgba(105,88,194,0.12)":"#fff",color:vatReg===v?"#4D3FA0":"#888"}}>{v==='yes'?'Registered':'Not registered'}</span>)}
+                      </div>
+                    </div>
+                  </div>
+                </div>}
+
+                {/* Run / status bar */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
+                  <div style={{fontSize:12,color:"#666"}}>
+                    {run ? <>Last run {new Date(run.ranAt).toLocaleString('en-GB')} {run.ranBy?("by "+run.ranBy):""} · <span style={{fontWeight:700,color:run.status==='submitted'?'#16a34a':'#d97706'}}>{run.status==='submitted'?'Submitted for review':'Draft'}</span>{run.reviewerSignoff?(" · ✓ Signed off by "+run.reviewerSignoff.by):""}</> : <>No self-review has been run for {fmtPeriod(valPeriod)} yet.</>}
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <button disabled={valRunning} onClick={runValidation} style={{padding:"8px 16px",borderRadius:8,border:"none",background:valRunning?"#b9b2e0":"#6958C2",color:"#fff",fontSize:12,fontWeight:700,cursor:valRunning?"default":"pointer"}}>{valRunning?(valProgress||"Running…"):(run?"↻ Re-run self-review":"▶ Run self-review")}</button>
+                    {!isReviewer && run && <button disabled={!canSubmit} onClick={submitReview} title={redOpen>0?(redOpen+" exception(s) still need a reason"):""} style={{padding:"8px 16px",borderRadius:8,border:"1px solid "+(canSubmit?"#16a34a":"#d8d8e2"),background:canSubmit?"#16a34a":"#f3f3f7",color:canSubmit?"#fff":"#aaa",fontSize:12,fontWeight:700,cursor:canSubmit?"pointer":"default"}}>Submit for review</button>}
+                    {isReviewer && run && run.status==='submitted' && !run.reviewerSignoff && <button onClick={signoff} style={{padding:"8px 16px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>✓ Sign off</button>}
+                  </div>
+                </div>
+
+                {valError && <div style={{background:"rgba(220,38,38,0.07)",border:"1px solid rgba(220,38,38,0.28)",borderRadius:8,padding:"10px 14px",fontSize:12,color:"#dc2626",marginBottom:12}}>{valError}</div>}
+
+                {/* Month-closure score (Rule 26) */}
+                {run && run.score && <div style={{display:"flex",alignItems:"center",gap:14,border:"1px solid "+scoreTone.br,background:scoreTone.bg,borderRadius:12,padding:"14px 18px",marginBottom:16}}>
+                  <div style={{fontSize:30,fontWeight:800,color:scoreTone.fg,minWidth:70}}>{run.score.pct}%</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:14,fontWeight:700,color:scoreTone.fg}}>{scoreTone.dot} {run.score.band}</div>
+                    <div style={{fontSize:11,color:"#666",marginTop:2}}>{run.score.passed} of {run.score.total} assessable checks passed{redOpen>0?(" · "+redOpen+" exception(s) awaiting a reason"):""}. 95–100% Ready · 80–94% Review Required · below 80% cannot close.</div>
+                  </div>
+                </div>}
+
+                {/* Results table */}
+                {run && run.rows && <div style={{border:"1px solid #ececf2",borderRadius:12,overflow:"hidden"}}>
+                  {run.rows.map((r,idx)=>{ const t=TONE[r.status]||TONE.pending; return <div key={r.ruleNo} style={{display:"flex",gap:12,padding:"12px 16px",borderTop:idx===0?"none":"1px solid #f0f0f5",alignItems:"flex-start"}}>
+                    <div style={{minWidth:24,fontSize:11,color:"#aaa",fontWeight:700,paddingTop:2}}>{r.ruleNo}</div>
+                    <div style={{minWidth:96}}><span style={{display:"inline-block",fontSize:10,fontWeight:700,padding:"3px 8px",borderRadius:10,background:t.bg,color:t.fg,border:"1px solid "+t.br,whiteSpace:"nowrap"}}>{t.dot} {t.label}</span></div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>{r.title}{r.variancePct!=null?(" · "+r.variancePct+"%"):""}</div>
+                      <div style={{fontSize:12,color:"#555",marginTop:2,lineHeight:1.45}}>{r.message}</div>
+                      {r.requiresReason && <div style={{marginTop:8}}>
+                        <div style={{fontSize:10,fontWeight:700,color:"#dc2626",marginBottom:3}}>Reason / explanation {(!r.reason||!r.reason.trim())?"(required)":""}</div>
+                        {isReviewer && run.status==='submitted'
+                          ? <div style={{fontSize:12,color:"#333",background:"#faf7ff",border:"1px solid #ece6fb",borderRadius:8,padding:"8px 10px",whiteSpace:"pre-wrap"}}>{r.reason||<span style={{color:"#bbb"}}>— no reason given —</span>}</div>
+                          : <AutoGrowText value={r.reason} onChange={e=>setValidationReason(r.ruleNo,e.target.value)} style={{width:"100%",border:"1px solid "+((!r.reason||!r.reason.trim())?"#f3b4b4":"#d8d8e2"),borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />}
+                      </div>}
+                    </div>
+                  </div>; })}
+                </div>}
               </div>;
             })()}
 
