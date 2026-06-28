@@ -177,12 +177,18 @@ const CLAUDE_PROMPT = [
   '  "invoice_date": string|null,       // YYYY-MM-DD',
   '  "due_date": string|null,           // YYYY-MM-DD',
   '  "currency": string|null,           // 3-letter code, e.g. AED',
-  '  "line_items": [ { "description": string, "quantity": number, "rate": number, "amount": number } ],',
-  '  "subtotal": number|null,           // sum of line taxable amounts (BEFORE VAT)',
-  '  "tax": number|null,                // total VAT amount',
-  '  "total": number|null               // subtotal + VAT',
+  '  "line_items": [ { "description": string, "quantity": number, "rate": number } ],',
+  '  "subtotal": number|null,           // the subtotal/net total PRINTED on the bill (before VAT)',
+  '  "tax": number|null,                // the total VAT amount PRINTED on the bill',
+  '  "total": number|null               // the grand total PRINTED on the bill (incl. VAT)',
   '}',
-  'Rules: All monetary values are plain numbers — strip currency symbols, codes and thousands separators. For each line item: quantity defaults to 1 when not shown; rate is the unit price BEFORE VAT; amount is the TAXABLE line value (quantity x rate, BEFORE VAT) — never the VAT-inclusive figure. subtotal = sum of line amounts. tax = total VAT. total = subtotal + tax. Never invent a TRN; ignore all-zero placeholders. Use null for anything not present. Return JSON only.'
+  'CRITICAL line-item rules:',
+  '- Return EVERY line on the bill. Never merge two lines into one and never drop a line — if the bill lists 6 products, return 6 line items.',
+  '- Keep each description COMPLETE and verbatim (e.g. "VINUVA ORGANIC PINOT GRIGIO 6X75CL", not just "GRIGIO"). Do not truncate.',
+  '- quantity = the QTY shown for that line (default 1 only if no quantity column exists).',
+  '- rate = the UNIT PRICE BEFORE VAT for ONE unit. If the bill has several price columns (e.g. Unit Price, Net Price, Price Tax Incl., Amount Incl. M.Tax, Grand Total), pick the per-unit price that EXCLUDES VAT (Unit/Net Price), never a tax-inclusive column and never a line total.',
+  '- Do NOT return a line amount; the system computes amount = quantity x rate itself.',
+  'Totals rules: subtotal, tax and total must be the figures literally PRINTED on the bill (do not recompute them). All monetary values are plain numbers — strip currency symbols, codes and thousands separators. Never invent a TRN; ignore all-zero placeholders. Use null for anything not present. Return JSON only.'
 ].join('\n');
 
 /**
@@ -219,31 +225,37 @@ async function extractInvoiceWithClaude(rawB64: string, mediaType: string): Prom
   const num = (v: any) => { const n = Number(v); return isFinite(n) && n > 0 ? n : 0; };
   const validTrn = (s: any) => typeof s === 'string' && /^\d{15}$/.test(s.replace(/\D/g, '')) && !/^(\d)\1{14}$/.test(s.replace(/\D/g, ''));
 
-  // Normalize line items: quantity ≥ 1, amount = quantity × rate (taxable).
+  // Line items: keep quantity and the per-unit rate (before VAT) exactly as
+  // read; the tool computes amount = quantity × rate itself (bottom-up) rather
+  // than copying — and never back-distributes the total across lines.
   const lineItems = (Array.isArray(f.line_items) ? f.line_items : []).map((li: any) => {
     const quantity = num(li.quantity) || 1;
     let rate = num(li.rate);
-    let amount = num(li.amount);
-    if (!rate && amount) rate = round2(amount / quantity);
-    amount = round2(quantity * rate);
+    // Tolerate older shape / models that still send an amount: derive the unit rate.
+    if (!rate && num(li.amount)) rate = round2(num(li.amount) / quantity);
+    const amount = round2(quantity * rate);
     return { description: String(li.description || '').trim(), quantity, rate, amount, confidence: 99 };
   }).filter((li: any) => li.description || li.amount > 0);
 
-  // Totals with the same arithmetic guard used elsewhere: subtotal is the
-  // taxable base, total = subtotal + VAT. Trust Claude, but reconcile.
-  const taxN = num(f.tax);
-  let subtotalN = num(f.subtotal);
-  let totalN = num(f.total);
+  // Tool-computed totals (bottom-up): subtotal = Σ(qty × rate), VAT at the
+  // rate the bill implies (UAE standard 5%), total = subtotal + VAT.
   const sumLines = round2(lineItems.reduce((s: number, li: any) => s + li.amount, 0));
-  if (!subtotalN && sumLines) subtotalN = sumLines;
-  // If line amounts came back VAT-inclusive (sum ≈ total, not subtotal), strip VAT.
-  if (sumLines && totalN && Math.abs(sumLines - totalN) <= Math.max(1, totalN * 0.03) &&
-      subtotalN && Math.abs(sumLines - subtotalN) > Math.max(1, subtotalN * 0.03)) {
-    for (const li of lineItems) { li.amount = round2(li.amount * (subtotalN / sumLines)); li.rate = li.quantity > 0 ? round2(li.amount / li.quantity) : li.amount; }
-  }
-  if (!totalN && subtotalN) totalN = round2(subtotalN + taxN);
-  if (subtotalN && taxN && Math.abs((subtotalN + taxN) - totalN) > 1) totalN = round2(subtotalN + taxN);
-  const vatPercent = subtotalN > 0 && taxN > 0 ? round2((taxN / subtotalN) * 100) : null;
+  // What the bill PRINTS — kept separately so the validator can flag (not
+  // silently overwrite) any disagreement with the tool's own calculation.
+  const printedSubtotal = num(f.subtotal) || null;
+  const printedTax = num(f.tax) || null;
+  const printedTotal = num(f.total) || null;
+  // Detect the VAT rate from the printed figures; default to UAE 5% when VAT is present.
+  let vatPercent: number | null = null;
+  if (printedSubtotal && printedTax) vatPercent = round2((printedTax / printedSubtotal) * 100);
+  else if (printedTax && sumLines) vatPercent = round2((printedTax / sumLines) * 100);
+  if (vatPercent != null && Math.abs(vatPercent - 5) <= 1) vatPercent = 5;            // snap to standard
+  if (vatPercent != null && Math.abs(vatPercent) <= 0.5) vatPercent = 0;              // zero-rated/exempt
+  const subtotalN = sumLines || printedSubtotal || 0;
+  const rateForCalc = vatPercent != null ? vatPercent : (printedTax || printedTotal ? 5 : 0);
+  const taxN = round2(subtotalN * (rateForCalc / 100));
+  const totalN = round2(subtotalN + taxN);
+  if (vatPercent == null) vatPercent = rateForCalc || null;
 
   const vendorTrn = validTrn(f.vendor_trn) ? String(f.vendor_trn).replace(/\D/g, '') : null;
   const receiverTrn = validTrn(f.receiver_trn) ? String(f.receiver_trn).replace(/\D/g, '') : null;
@@ -267,6 +279,11 @@ async function extractInvoiceWithClaude(rawB64: string, mediaType: string): Prom
     subtotal: subtotalN,
     tax: taxN,
     vat_percent: vatPercent,
+    // What the bill literally prints — for the validator to cross-check the
+    // tool's own bottom-up calculation against (flag, never silently replace).
+    printed_subtotal: printedSubtotal,
+    printed_tax: printedTax,
+    printed_total: printedTotal,
     line_items: lineItems,
     doc_type: f.doc_type || 'invoice',
     is_invoice: true,

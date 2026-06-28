@@ -4485,6 +4485,15 @@ function App(){
     if((d.lineItems||[]).length>0 && sub>0 && Math.abs(lineSum - sub) > Math.max(1, sub*0.01)){
       push('linesum','Lines = Subtotal','warn','Line amounts add up to '+lineSum.toFixed(2)+' but subtotal is '+sub.toFixed(2)+' — check the line items.');
     }
+    // The tool calculated its own total bottom-up. Cross-check it against the
+    // figures PRINTED on the bill and FLAG (don't overwrite) any disagreement —
+    // a mismatch usually means a line was mis-read, dropped or merged by OCR.
+    const pTot = Number(d.printedTotal||0), pSub = Number(d.printedSubtotal||0);
+    if(pTot>0 && Math.abs(tot - pTot) > Math.max(1, pTot*0.01)){
+      push('printed','Calc vs bill','warn','Tool calculated total '+tot.toFixed(2)+' but the bill prints '+pTot.toFixed(2)+(pSub>0?(' (printed subtotal '+pSub.toFixed(2)+')'):'')+'. A line may be mis-read or missing — verify the line items.');
+    } else if(pTot>0){
+      push('printed','Calc vs bill','pass','Tool-calculated total '+tot.toFixed(2)+' matches the bill.');
+    }
     // VAT should be ~5% of the taxable subtotal (UAE standard). Flag big drift
     // (helps catch an OCR mis-read where VAT grabbed the wrong figure).
     if(sub>0 && vat>0){
@@ -4663,15 +4672,37 @@ function App(){
         //   receiver_name             → the client we're paying on behalf of
         // The line_items array gives us description + amount per row;
         // user picks the expense account for each in the review panel.
+        const round2 = n => Math.round((Number(n)||0)*100)/100;
         const lineItemsRaw = Array.isArray(ocr && ocr.line_items) ? ocr.line_items : [];
-        const lineItems = lineItemsRaw.map((li,i)=>({
-          id: 'li-'+id.slice(0,8)+'-'+i,
-          description: li.description || '',
-          quantity: (Number.isFinite(Number(li.quantity)) && Number(li.quantity) > 0 ? Number(li.quantity) : 1),
-          rate: Number(li.rate || li.amount || 0),
-          amount: Number(li.amount || (li.rate||0) * (li.quantity||1) || 0),
-          accountId: '',  // chosen by the user, like Zoho's manual bill entry
-        }));
+        const lineItems = lineItemsRaw.map((li,i)=>{
+          const quantity = (Number.isFinite(Number(li.quantity)) && Number(li.quantity) > 0 ? Number(li.quantity) : 1);
+          // rate = unit price BEFORE VAT. Prefer the explicit rate (Claude);
+          // fall back to deriving it from a line total (legacy/Textract).
+          let rate = Number(li.rate||0);
+          if(!rate && Number(li.amount||0)) rate = round2(Number(li.amount)/quantity);
+          return {
+            id: 'li-'+id.slice(0,8)+'-'+i,
+            description: li.description || '',
+            quantity,
+            rate,
+            amount: round2(quantity*rate),   // the tool computes the line amount itself
+            accountId: '',  // chosen by the user, like Zoho's manual bill entry
+          };
+        });
+        // The tool does its OWN arithmetic bottom-up: subtotal = Σ(qty×rate),
+        // VAT at the bill's implied rate (UAE 5% default), total = subtotal+VAT.
+        // The figures PRINTED on the bill are kept separately and only used to
+        // FLAG a disagreement (never to silently overwrite the calculation).
+        const printedSubtotal = Number((ocr && (ocr.printed_subtotal!=null?ocr.printed_subtotal:ocr.subtotal)) || 0);
+        const printedTotal    = Number((ocr && (ocr.printed_total!=null?ocr.printed_total:ocr.total)) || 0);
+        const printedVat      = Number((ocr && (ocr.printed_tax!=null?ocr.printed_tax:ocr.tax)) || 0);
+        const computedSubtotal = round2(lineItems.reduce((s,li)=>s+(Number(li.amount)||0),0));
+        let vatPct = Number((ocr && ocr.vat_percent) || 0);
+        if(!vatPct) vatPct = (printedSubtotal>0 && printedVat>0) ? Math.round((printedVat/printedSubtotal)*100) : 5;
+        if(Math.abs(vatPct-5)<=1) vatPct = 5; if(Math.abs(vatPct)<=0.5) vatPct = 0;
+        const calcSubtotal = computedSubtotal>0 ? computedSubtotal : printedSubtotal;
+        const calcVat   = round2(calcSubtotal*(vatPct/100));
+        const calcTotal = round2(calcSubtotal+calcVat);
         const draft = {
           id,
           docType: 'bill',
@@ -4686,10 +4717,11 @@ function App(){
           billDate:   (ocr && (ocr.invoice_date  || '')) || '',
           dueDate:    (ocr && (ocr.due_date || '')) || '',
           currency:   ((ocr && ocr.currency) || 'AED').toUpperCase(),
-          subtotal:   Number((ocr && ocr.subtotal) || 0),
-          vat:        Number((ocr && ocr.tax) || 0),
-          total:      Number((ocr && ocr.total) || 0),
-          vatPercent: Number((ocr && ocr.vat_percent) || 5),
+          subtotal:   calcSubtotal,
+          vat:        calcVat,
+          total:      calcTotal,
+          vatPercent: vatPct,
+          printedSubtotal, printedVat, printedTotal,
           vendorAddress: (ocr && ocr.vendor_address) || '',
           docTypeDetected: (ocr && ocr.doc_type) || '',
           lineItems,
