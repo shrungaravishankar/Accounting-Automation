@@ -4676,8 +4676,8 @@ function App(){
         const lineItemsRaw = Array.isArray(ocr && ocr.line_items) ? ocr.line_items : [];
         const lineItems = lineItemsRaw.map((li,i)=>{
           const quantity = (Number.isFinite(Number(li.quantity)) && Number(li.quantity) > 0 ? Number(li.quantity) : 1);
-          // rate = unit price BEFORE VAT. Prefer the explicit rate (Claude);
-          // fall back to deriving it from a line total (legacy/Textract).
+          // rate = unit price BEFORE VAT. Prefer the explicit rate when the
+          // OCR provides one; else derive it from the line total ÷ quantity.
           let rate = Number(li.rate||0);
           if(!rate && Number(li.amount||0)) rate = round2(Number(li.amount)/quantity);
           return {
