@@ -943,31 +943,35 @@ export const handler = async (event: Event) => {
         organization_id: orgId!, from_date: from, to_date: to
       }));
       try {
-        // oPrev/cPrev/cCur are cumulative as-of balances; rPrev/rCur are period movements.
-        const [oPrev, cPrev, cCur, rPrev, rCur] = await Promise.all([
-          tb(EARLY, dayBefore(prevStart)),
-          tb(EARLY, prevEnd),
-          tb(EARLY, curEnd),
-          tb(prevStart, prevEnd),
-          tb(curStart, curEnd)
-        ]);
+        // Only THREE report calls (Zoho's report API is heavily rate-limited and
+        // concurrency-capped — 5 parallel calls trip "max requests per minute").
+        // Run them SEQUENTIALLY and derive the closing balances arithmetically:
+        //   opening (prev) = cumulative debit−credit up to the day before prev start
+        //   closing (prev) = opening + (period debit − period credit)
+        //   opening (cur)  = closing (prev)
+        //   closing (cur)  = opening (cur) + (period debit − period credit)
+        const oPrev = await tb(EARLY, dayBefore(prevStart));   // cumulative opening
+        const rPrev = await tb(prevStart, prevEnd);            // previous-period movement
+        const rCur  = await tb(curStart, curEnd);              // current-period movement
         const names = new Set<string>([
-          ...Object.keys(oPrev), ...Object.keys(cPrev), ...Object.keys(cCur), ...Object.keys(rPrev), ...Object.keys(rCur)
+          ...Object.keys(oPrev), ...Object.keys(rPrev), ...Object.keys(rCur)
         ]);
         const accounts: any[] = [];
         names.forEach((name) => {
-          const meta = rCur[name] || rPrev[name] || cCur[name] || cPrev[name] || oPrev[name] || {};
+          const meta = rCur[name] || rPrev[name] || oPrev[name] || {};
+          const o = oPrev[name] || {}, pm = rPrev[name] || {}, cm = rCur[name] || {};
+          // Debit-positive convention throughout, so openings + movements reconcile.
+          const prevOpening = Number(o.debit || 0) - Number(o.credit || 0);
+          const prevDebit = Number(pm.debit || 0), prevCredit = Number(pm.credit || 0);
+          const prevClosing = prevOpening + prevDebit - prevCredit;
+          const curOpening = prevClosing;
+          const curDebit = Number(cm.debit || 0), curCredit = Number(cm.credit || 0);
+          const curClosing = curOpening + curDebit - curCredit;
           accounts.push({
             account_name: name,
             account_type: meta.account_type || '',
-            prevOpening: (oPrev[name] || {}).balance || 0,
-            prevDebit: (rPrev[name] || {}).debit || 0,
-            prevCredit: (rPrev[name] || {}).credit || 0,
-            prevClosing: (cPrev[name] || {}).balance || 0,
-            curOpening: (cPrev[name] || {}).balance || 0,   // current opening = previous closing
-            curDebit: (rCur[name] || {}).debit || 0,
-            curCredit: (rCur[name] || {}).credit || 0,
-            curClosing: (cCur[name] || {}).balance || 0
+            prevOpening, prevDebit, prevCredit, prevClosing,
+            curOpening, curDebit, curCredit, curClosing
           });
         });
         accounts.sort((a, b) => String(a.account_name).localeCompare(String(b.account_name)));
