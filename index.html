@@ -2386,7 +2386,7 @@ const AL_VALIDATION_RULES = [
   // 2 — Supply-type validation
   { ruleNo:2, title:'Supply type match', run:(ctx)=>{
       const cfg = ctx.config.supplyTypes||[];
-      if(!cfg.length) return {status:'warn', message:'No supply types configured for this client (reviewer Starting Configuration).'};
+      if(!cfg.length) return {status:'warn', message:'No supply types configured for this client (Starting Configuration).'};
       if(!ctx.dataAvailable.invoices) return {status:'pending', message:'Invoice detail unavailable.'};
       const allow = new Set(cfg.map(s=>String(s).toLowerCase()));
       const mismatches=[];
@@ -3605,7 +3605,11 @@ function App(){
   const billInputRef=useRef(null);
 
   // ===== Self-Review / Validation state =====
+  // valPeriod is the client-level Accounting Period that drives every tab
+  // (Revenue, Bills, Bank, Self-Review). Persisted per client.
   const[valPeriod,setValPeriod]=useState(()=>{ try{ return new Date().toISOString().slice(0,7); }catch(e){ return "2026-01"; } });
+  useEffect(()=>{ if(!activeClientId) return; try{ const p=localStorage.getItem('al_'+activeClientId+'_active_period'); if(p) setValPeriod(p); }catch(_){ } },[activeClientId]);
+  const setActivePeriod=(p)=>{ setValPeriod(p); try{ if(activeClientId) localStorage.setItem('al_'+activeClientId+'_active_period',p); }catch(_){ } };
   const[valRunning,setValRunning]=useState(false);
   const[valProgress,setValProgress]=useState("");
   const[valError,setValError]=useState("");
@@ -7043,6 +7047,14 @@ td,th{padding:8px 12px;vertical-align:middle}
                   {c.zohoOrgId && <span style={{fontSize:10,padding:"3px 8px",borderRadius:6,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>🔗 Zoho linked</span>}
                 </div>
               </div>
+              {/* Client-level Accounting Period — drives Revenue, Bills, Bank and Self-Review. */}
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:11,color:"#666",marginBottom:4,fontWeight:600}}>Accounting period</div>
+                <select value={valPeriod} onChange={e=>setActivePeriod(e.target.value)} style={{padding:"7px 12px",borderRadius:8,border:"1.5px solid #6958C2",fontSize:13,fontWeight:700,color:"#4D3FA0",background:"#fff",cursor:"pointer"}}>
+                  {(()=>{ const ms=[]; const d=new Date(); d.setDate(1); for(let i=0;i<18;i++){ ms.push(d.toISOString().slice(0,7)); d.setMonth(d.getMonth()-1); } if(ms.indexOf(valPeriod)<0) ms.unshift(valPeriod); return ms.map(m=>{ let lbl=m; try{ const a=m.split('-'); lbl=new Date(Number(a[0]),Number(a[1])-1,1).toLocaleDateString('en-GB',{month:'short',year:'numeric'}); }catch(_){ } return <option key={m} value={m}>{lbl}</option>; }); })()}
+                </select>
+                <div style={{fontSize:10,color:"#999",marginTop:4}}>Drives Revenue · Bills · Bank · Self-Review</div>
+              </div>
             </div>
             {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
             {clientDetailTab==="projects" && (<>
@@ -7883,15 +7895,15 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
                     <span style={{fontSize:11,color:"#666"}}>Accounting period</span>
-                    <select value={valPeriod} onChange={e=>setValPeriod(e.target.value)} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #d8d8e2",fontSize:12}}>
+                    <select value={valPeriod} onChange={e=>setActivePeriod(e.target.value)} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #d8d8e2",fontSize:12}}>
                       {months.map(m=><option key={m} value={m}>{fmtPeriod(m)}</option>)}
                     </select>
                   </div>
                 </div>
 
-                {/* Starting Configuration — reviewer only */}
-                {isReviewer && <div style={{border:"1px solid rgba(105,88,194,0.22)",borderRadius:12,padding:"14px 18px",marginBottom:16,background:"rgba(105,88,194,0.04)"}}>
-                  <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:10}}>⚙ Starting Configuration <span style={{fontSize:10,fontWeight:600,color:"#999"}}>(reviewer)</span></div>
+                {/* Starting Configuration — set by the executor (user) */}
+                {<div style={{border:"1px solid rgba(105,88,194,0.22)",borderRadius:12,padding:"14px 18px",marginBottom:16,background:"rgba(105,88,194,0.04)"}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:10}}>⚙ Starting Configuration <span style={{fontSize:10,fontWeight:600,color:"#999"}}>(set by user)</span></div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:16}}>
                     <div>
                       <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>1 · Bank accounts</div>
@@ -7946,9 +7958,9 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <div style={{fontSize:12,color:"#555",marginTop:2,lineHeight:1.45}}>{r.message}</div>
                       {r.requiresReason && <div style={{marginTop:8}}>
                         <div style={{fontSize:10,fontWeight:700,color:"#dc2626",marginBottom:3}}>Reason / explanation {(!r.reason||!r.reason.trim())?"(required)":""}</div>
-                        {isReviewer && run.status==='submitted'
-                          ? <div style={{fontSize:12,color:"#333",background:"#faf7ff",border:"1px solid #ece6fb",borderRadius:8,padding:"8px 10px",whiteSpace:"pre-wrap"}}>{r.reason||<span style={{color:"#bbb"}}>— no reason given —</span>}</div>
-                          : <AutoGrowText value={r.reason} onChange={e=>setValidationReason(r.ruleNo,e.target.value)} style={{width:"100%",border:"1px solid "+((!r.reason||!r.reason.trim())?"#f3b4b4":"#d8d8e2"),borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />}
+                        {/* Editable by the executor and by the admin (who can amend / run on the user's behalf). */}
+                        <AutoGrowText value={r.reason} onChange={e=>setValidationReason(r.ruleNo,e.target.value)} style={{width:"100%",border:"1px solid "+((!r.reason||!r.reason.trim())?"#f3b4b4":"#d8d8e2"),borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />
+                        {isReviewer && run.status==='submitted' && <div style={{fontSize:10,color:"#999",marginTop:3}}>You are editing the executor's submitted reason (admin override).</div>}
                       </div>}
                     </div>
                   </div>; })}
