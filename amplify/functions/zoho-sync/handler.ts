@@ -133,6 +133,36 @@ export const handler = async (event: Event) => {
   const ownerEmail = (claims.email || event.identity?.username || '').toLowerCase();
   if (!ownerEmail) return JSON.stringify({ error: 'Could not determine caller identity.' });
 
+  // Post a message to a Microsoft Teams Incoming Webhook (or Power Automate
+  // workflow URL). Server-side to dodge browser CORS. Needs NO Zoho
+  // credentials, so handle it before the credential lookup.
+  // payload = { webhookUrl, text, title?, summary? }.
+  if (kind === 'postTeams') {
+    let p: any = {};
+    try { p = JSON.parse(event.arguments?.payload || '{}'); } catch (_) { p = {}; }
+    const url = String(p.webhookUrl || '').trim();
+    const text = String(p.text || '').trim();
+    if (!/^https:\/\//i.test(url)) return JSON.stringify({ error: 'A valid https Teams webhook URL is required.' });
+    if (!text) return JSON.stringify({ error: 'Message text is required.' });
+    // MessageCard is what classic Incoming Webhooks render; Power Automate
+    // flows can read `text`/`title` straight off the JSON body too.
+    const card = {
+      '@type': 'MessageCard', '@context': 'http://schema.org/extensions',
+      summary: p.summary || 'Accounting period closed',
+      themeColor: '16A34A',
+      title: p.title || 'Accounting period closed',
+      text
+    };
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(card) });
+      const body = await r.text();
+      if (!r.ok) return JSON.stringify({ error: 'Teams webhook returned HTTP ' + r.status + (body ? (': ' + body.slice(0, 200)) : '') });
+      return JSON.stringify({ error: null, success: true });
+    } catch (e: any) {
+      return JSON.stringify({ error: e?.message || String(e) });
+    }
+  }
+
   const tableName = process.env.ZOHOCRED_TABLE_NAME;
   if (!tableName) return JSON.stringify({ error: 'Server misconfiguration — table env var missing.' });
 
