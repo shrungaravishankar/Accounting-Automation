@@ -166,6 +166,48 @@ export const handler = async (event: Event) => {
   const tableName = process.env.ZOHOCRED_TABLE_NAME;
   if (!tableName) return JSON.stringify({ error: 'Server misconfiguration — table env var missing.' });
 
+  // ---- Per-admin Teams webhook (stored on the admin's own credentials row) ----
+  // These need only DynamoDB, not a Zoho token, so handle them before the
+  // credential/token bootstrap. The webhook is per ADMIN, set once; closures
+  // resolve the OWNING admin's webhook so the message lands in their group
+  // regardless of who clicks Close.
+  const findCredByEmail = async (email: string) => {
+    const cr = await ddb.send(new ScanCommand({
+      TableName: tableName, FilterExpression: 'ownerEmail = :e',
+      ExpressionAttributeValues: { ':e': email }, Limit: 1, ConsistentRead: true
+    }));
+    return (cr.Items && cr.Items[0]) || null;
+  };
+  if (kind === 'getMyTeamsWebhook') {
+    const cred = await findCredByEmail(ownerEmail);
+    return JSON.stringify({ error: null, webhook: (cred && cred.teamsWebhook) || '' });
+  }
+  if (kind === 'setMyTeamsWebhook') {
+    let p: any = {}; try { p = JSON.parse(event.arguments?.payload || '{}'); } catch (_) { p = {}; }
+    const url = String(p.url || '').trim();
+    if (url && !/^https:\/\//i.test(url)) return JSON.stringify({ error: 'A valid https URL is required.' });
+    const cred = await findCredByEmail(ownerEmail);
+    if (!cred) return JSON.stringify({ error: 'Connect your account to Zoho first — the webhook is stored on your admin record.' });
+    await ddb.send(new UpdateCommand({ TableName: tableName, Key: { id: cred.id }, UpdateExpression: 'SET teamsWebhook = :w', ExpressionAttributeValues: { ':w': url } }));
+    return JSON.stringify({ error: null, success: true });
+  }
+  if (kind === 'postTeamsForOwner') {
+    let p: any = {}; try { p = JSON.parse(event.arguments?.payload || '{}'); } catch (_) { p = {}; }
+    const target = (String(p.ownerEmail || '').toLowerCase().trim()) || ownerEmail;
+    const text = String(p.text || '').trim();
+    if (!text) return JSON.stringify({ error: 'Message text is required.' });
+    const cred = await findCredByEmail(target);
+    const url = String((cred && cred.teamsWebhook) || '').trim();
+    if (!/^https:\/\//i.test(url)) return JSON.stringify({ error: null, skipped: true, reason: 'No Teams webhook configured for ' + target });
+    const card = { '@type': 'MessageCard', '@context': 'http://schema.org/extensions', summary: p.summary || 'Accounting period closed', themeColor: '16A34A', title: p.title || 'Accounting period closed', text };
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(card) });
+      const body = await r.text();
+      if (!r.ok) return JSON.stringify({ error: 'Teams webhook returned HTTP ' + r.status + (body ? (': ' + body.slice(0, 200)) : '') });
+      return JSON.stringify({ error: null, success: true });
+    } catch (e: any) { return JSON.stringify({ error: e?.message || String(e) }); }
+  }
+
   try {
     // Find the caller's stored Zoho credentials.
     const credRes = await ddb.send(new ScanCommand({
