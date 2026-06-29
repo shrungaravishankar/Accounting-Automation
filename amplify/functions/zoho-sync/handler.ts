@@ -950,12 +950,21 @@ export const handler = async (event: Event) => {
         //   closing (prev) = opening + (period debit − period credit)
         //   opening (cur)  = closing (prev)
         //   closing (cur)  = opening (cur) + (period debit − period credit)
-        const oPrev = await tb(EARLY, dayBefore(prevStart));   // cumulative opening
+        const rawOpen = await zohoGet('reports/trialbalance', accessToken, region, { organization_id: orgId!, from_date: EARLY, to_date: dayBefore(prevStart) });
+        const oPrev = parseTB(rawOpen);                        // cumulative opening
         const rPrev = await tb(prevStart, prevEnd);            // previous-period movement
         const rCur  = await tb(curStart, curEnd);              // current-period movement
         const names = new Set<string>([
           ...Object.keys(oPrev), ...Object.keys(rPrev), ...Object.keys(rCur)
         ]);
+        // Diagnostic: if nothing parsed, surface Zoho's actual JSON shape so we
+        // can map it (trial-balance schemas vary across Zoho accounts/regions).
+        if (names.size === 0) {
+          return JSON.stringify({
+            error: 'No trial-balance rows parsed. Zoho response top-level keys: [' + Object.keys(rawOpen || {}).join(', ') + ']. Sample: ' + JSON.stringify(rawOpen).slice(0, 600),
+            accounts: [], apiUsage: lastApiUsage
+          });
+        }
         const accounts: any[] = [];
         names.forEach((name) => {
           const meta = rCur[name] || rPrev[name] || oPrev[name] || {};

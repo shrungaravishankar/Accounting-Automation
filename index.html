@@ -2491,12 +2491,13 @@ const AL_VALIDATION_RULES = [
   { ruleNo:10, title:'Bank account completeness', run:(ctx)=>{
       const cfg=(ctx.config.bankAccountsCfg||[]).map(a=>(typeof a==='string'?a:(a.account_name||a.name||''))).filter(Boolean);
       const books=(ctx.zoho.bankAccounts||[]).map(a=>a.account_name||a.name||'');
-      const imported=(ctx.local.importedAccounts||[]);
-      if(!cfg.length) return {status:'warn', message:'No bank accounts configured in the client master (reviewer Starting Configuration).'};
-      const missing=[];
-      cfg.forEach(name=>{ const inBooks=books.some(b=>alNameSimilarity(b,name)>=0.8); const inStmt=imported.some(b=>alNameSimilarity(b,name)>=0.8); if(!inBooks||!inStmt) missing.push(name+(!inBooks?' (no ledger)':'')+(!inStmt?' (no statement)':'')); });
-      if(missing.length) return {status:'fail', message:missing.length+' configured bank account(s) missing from books/statements: '+missing.join('; ')+'. Import the statement, create the ledger, or note no transactions this month.'};
-      return {status:'pass', message:'All configured bank accounts exist in books and have statements.'};
+      if(!cfg.length) return {status:'warn', message:'No bank accounts configured in the client master (Starting Configuration).'};
+      // A bank account is "accounted" once it exists as a ledger in Zoho books.
+      // The statements live in Zoho/Banking, so ledger presence is the signal —
+      // we do NOT require a tool-side statement import.
+      const noLedger=cfg.filter(name=>!books.some(b=>alNameSimilarity(b,name)>=0.6));
+      if(noLedger.length) return {status:'fail', message:noLedger.length+' configured bank account(s) have no ledger in Zoho books: '+noLedger.join('; ')+'. Create the bank ledger, or update the client master if the account is closed.'};
+      return {status:'pass', message:'All '+cfg.length+' configured bank account(s) exist as ledgers in Zoho books.'};
     }},
   // 11 — Bank reconciliation
   { ruleNo:11, title:'Bank reconciliation', run:(ctx)=>{
