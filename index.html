@@ -1115,7 +1115,7 @@ window.projectDelete = async (id, dataPath) => {
 };
 
 // ===== Per-client working config + global reference DB (S3 JSON, cached in localStorage) =====
-const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts','vat_registered','validation_config','validation_results','reviewer_results'];
+const CONFIG_KEYS = ['rules','refdb','bank','coa','coa_name','vendors','customers','vendor_file','customer_file','version','routing','accountIds','vendorIds','customerIds','legal_name','trade_name','trn','currency','address','ocrDrafts','bank_accounts','supply_types','billOcrDrafts','vat_registered','validation_config','validation_results','reviewer_results','period_status'];
 
 // Download a client's config bundle from S3 into localStorage (the cache the
 // app reads). Tries the shared per-client path first (so assigned Users see
@@ -3610,6 +3610,13 @@ function App(){
   const[valPeriod,setValPeriod]=useState(()=>{ try{ return new Date().toISOString().slice(0,7); }catch(e){ return "2026-01"; } });
   useEffect(()=>{ if(!activeClientId) return; try{ const p=localStorage.getItem('al_'+activeClientId+'_active_period'); if(p) setValPeriod(p); }catch(_){ } },[activeClientId]);
   const setActivePeriod=(p)=>{ setValPeriod(p); try{ if(activeClientId) localStorage.setItem('al_'+activeClientId+'_active_period',p); }catch(_){ } };
+  // Period close/lock status — per client, per period. Admin-only close locks
+  // the period (Self-Review + pushes become read-only) until an admin reopens.
+  const[periodStatus,setPeriodStatus]=useState({});
+  useEffect(()=>{ if(!activeClientId){ setPeriodStatus({}); return; } setPeriodStatus(getClientData(activeClientId,'period_status',{})||{}); },[activeClientId]);
+  const isPeriodClosed=(p)=> !!(periodStatus && periodStatus[p] && periodStatus[p].status==='closed');
+  const closePeriod=(p,info)=>{ const ns={...periodStatus,[p]:{status:'closed',...(info||{})}}; setPeriodStatus(ns); if(activeClientId) setClientData(activeClientId,'period_status',ns); return ns; };
+  const reopenPeriod=(p,info)=>{ const ns={...periodStatus,[p]:{status:'open',...(info||{})}}; setPeriodStatus(ns); if(activeClientId) setClientData(activeClientId,'period_status',ns); return ns; };
   const[valRunning,setValRunning]=useState(false);
   const[valProgress,setValProgress]=useState("");
   const[valError,setValError]=useState("");
@@ -7054,6 +7061,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                   {(()=>{ const ms=[]; const d=new Date(); d.setDate(1); for(let i=0;i<18;i++){ ms.push(d.toISOString().slice(0,7)); d.setMonth(d.getMonth()-1); } if(ms.indexOf(valPeriod)<0) ms.unshift(valPeriod); return ms.map(m=>{ let lbl=m; try{ const a=m.split('-'); lbl=new Date(Number(a[0]),Number(a[1])-1,1).toLocaleDateString('en-GB',{month:'short',year:'numeric'}); }catch(_){ } return <option key={m} value={m}>{lbl}</option>; }); })()}
                 </select>
                 <div style={{fontSize:10,color:"#999",marginTop:4}}>Drives Revenue · Bills · Bank · Self-Review</div>
+                {isPeriodClosed(valPeriod) && <div style={{marginTop:6,fontSize:11,fontWeight:700,color:"#16a34a",background:"rgba(22,163,74,0.08)",border:"1px solid rgba(22,163,74,0.25)",borderRadius:8,padding:"4px 8px",display:"inline-block"}}>🔒 Period closed</div>}
               </div>
             </div>
             {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
@@ -7866,6 +7874,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             {clientDetailTab==="validation" && (()=>{
               const role=window.AUTH_USER&&window.AUTH_USER.role;
               const isReviewer=role==='admin'||role==='team-lead';
+              const periodClosed=isPeriodClosed(valPeriod);
               const run=validationRun;
               void valCfgTick; // re-read config on bump
               const vatReg=getClientData(activeClientId,'vat_registered','no');
@@ -7931,11 +7940,15 @@ td,th{padding:8px 12px;vertical-align:middle}
                     {run ? <>Last run {new Date(run.ranAt).toLocaleString('en-GB')} {run.ranBy?("by "+run.ranBy):""} · <span style={{fontWeight:700,color:run.status==='submitted'?'#16a34a':'#d97706'}}>{run.status==='submitted'?'Submitted for review':'Draft'}</span>{run.reviewerSignoff?(" · ✓ Signed off by "+run.reviewerSignoff.by):""}</> : <>No self-review has been run for {fmtPeriod(valPeriod)} yet.</>}
                   </div>
                   <div style={{display:"flex",gap:8}}>
-                    <button disabled={valRunning} onClick={runValidation} style={{padding:"8px 16px",borderRadius:8,border:"none",background:valRunning?"#b9b2e0":"#6958C2",color:"#fff",fontSize:12,fontWeight:700,cursor:valRunning?"default":"pointer"}}>{valRunning?(valProgress||"Running…"):(run?"↻ Re-run self-review":"▶ Run self-review")}</button>
-                    {!isReviewer && run && <button disabled={!canSubmit} onClick={submitReview} title={redOpen>0?(redOpen+" exception(s) still need a reason"):""} style={{padding:"8px 16px",borderRadius:8,border:"1px solid "+(canSubmit?"#16a34a":"#d8d8e2"),background:canSubmit?"#16a34a":"#f3f3f7",color:canSubmit?"#fff":"#aaa",fontSize:12,fontWeight:700,cursor:canSubmit?"pointer":"default"}}>Submit for review</button>}
-                    {isReviewer && run && run.status==='submitted' && !run.reviewerSignoff && <button onClick={signoff} style={{padding:"8px 16px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>✓ Sign off</button>}
+                    <button disabled={valRunning||periodClosed} onClick={runValidation} style={{padding:"8px 16px",borderRadius:8,border:"none",background:(valRunning||periodClosed)?"#b9b2e0":"#6958C2",color:"#fff",fontSize:12,fontWeight:700,cursor:(valRunning||periodClosed)?"default":"pointer"}}>{valRunning?(valProgress||"Running…"):(run?"↻ Re-run self-review":"▶ Run self-review")}</button>
+                    {!isReviewer && run && <button disabled={!canSubmit||periodClosed} onClick={submitReview} title={redOpen>0?(redOpen+" exception(s) still need a reason"):""} style={{padding:"8px 16px",borderRadius:8,border:"1px solid "+((canSubmit&&!periodClosed)?"#16a34a":"#d8d8e2"),background:(canSubmit&&!periodClosed)?"#16a34a":"#f3f3f7",color:(canSubmit&&!periodClosed)?"#fff":"#aaa",fontSize:12,fontWeight:700,cursor:(canSubmit&&!periodClosed)?"pointer":"default"}}>Submit for review</button>}
+                    {isReviewer && run && run.status==='submitted' && !run.reviewerSignoff && !periodClosed && <button onClick={signoff} style={{padding:"8px 16px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>✓ Sign off</button>}
+                    {isReviewer && !periodClosed && run && run.status==='submitted' && <button onClick={()=>{ if(confirm('Close '+fmtPeriod(valPeriod)+' for '+(c.name||'this client')+'?\n\nThis LOCKS the period — the self-review and Zoho pushes become read-only until an admin reopens it.')){ closePeriod(valPeriod,{by:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'',at:new Date().toISOString()}); } }} style={{padding:"8px 16px",borderRadius:8,border:"none",background:"#15803d",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>🔒 Close period</button>}
+                    {isReviewer && periodClosed && <button onClick={()=>{ if(confirm('Reopen '+fmtPeriod(valPeriod)+'? This unlocks editing for the period.')) reopenPeriod(valPeriod,{by:(window.AUTH_USER&&window.AUTH_USER.name)||(window.AUTH_USER&&window.AUTH_USER.email)||'',at:new Date().toISOString()}); }} style={{padding:"8px 16px",borderRadius:8,border:"1px solid #d8d8e2",background:"#fff",color:"#555",fontSize:12,fontWeight:700,cursor:"pointer"}}>🔓 Reopen period</button>}
                   </div>
                 </div>
+
+                {periodClosed && <div style={{background:"rgba(22,163,74,0.07)",border:"1px solid rgba(22,163,74,0.28)",borderRadius:8,padding:"10px 14px",fontSize:12,color:"#15803d",marginBottom:12}}>🔒 <strong>{fmtPeriod(valPeriod)} is closed{periodStatus[valPeriod]&&periodStatus[valPeriod].by?(' by '+periodStatus[valPeriod].by):''}{periodStatus[valPeriod]&&periodStatus[valPeriod].at?(' on '+new Date(periodStatus[valPeriod].at).toLocaleDateString('en-GB')):''}.</strong> The self-review and Zoho pushes for this period are locked.{isReviewer?' Use “Reopen period” to make changes.':' Ask an admin to reopen it if changes are needed.'}</div>}
 
                 {valError && <div style={{background:"rgba(220,38,38,0.07)",border:"1px solid rgba(220,38,38,0.28)",borderRadius:8,padding:"10px 14px",fontSize:12,color:"#dc2626",marginBottom:12}}>{valError}</div>}
 
@@ -7958,9 +7971,11 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <div style={{fontSize:12,color:"#555",marginTop:2,lineHeight:1.45}}>{r.message}</div>
                       {r.requiresReason && <div style={{marginTop:8}}>
                         <div style={{fontSize:10,fontWeight:700,color:"#dc2626",marginBottom:3}}>Reason / explanation {(!r.reason||!r.reason.trim())?"(required)":""}</div>
-                        {/* Editable by the executor and by the admin (who can amend / run on the user's behalf). */}
-                        <AutoGrowText value={r.reason} onChange={e=>setValidationReason(r.ruleNo,e.target.value)} style={{width:"100%",border:"1px solid "+((!r.reason||!r.reason.trim())?"#f3b4b4":"#d8d8e2"),borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />
-                        {isReviewer && run.status==='submitted' && <div style={{fontSize:10,color:"#999",marginTop:3}}>You are editing the executor's submitted reason (admin override).</div>}
+                        {/* Read-only once the period is closed; otherwise editable by the executor and by the admin (who can amend / run on the user's behalf). */}
+                        {periodClosed
+                          ? <div style={{fontSize:12,color:"#333",background:"#f6f6fb",border:"1px solid #ececf2",borderRadius:8,padding:"8px 10px",whiteSpace:"pre-wrap"}}>{r.reason||<span style={{color:"#bbb"}}>— no reason given —</span>}</div>
+                          : <><AutoGrowText value={r.reason} onChange={e=>setValidationReason(r.ruleNo,e.target.value)} style={{width:"100%",border:"1px solid "+((!r.reason||!r.reason.trim())?"#f3b4b4":"#d8d8e2"),borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />
+                          {isReviewer && run.status==='submitted' && <div style={{fontSize:10,color:"#999",marginTop:3}}>You are editing the executor's submitted reason (admin override).</div>}</>}
                       </div>}
                     </div>
                   </div>; })}
@@ -7973,7 +7988,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                       <h3 style={{fontSize:16,fontWeight:700,color:"#4D3FA0",margin:0}}>🛡 Reviewer Review <span style={{fontSize:10,fontWeight:600,color:"#999"}}>(admin)</span></h3>
                       <div style={{fontSize:12,color:"#888",marginTop:2}}>{(!run||run.status!=='submitted')?"Note: the executor has not submitted this period yet — review reflects current data. ":""}{reviewerRun?("Last reviewed "+new Date(reviewerRun.ranAt).toLocaleString('en-GB')+(reviewerRun.ranBy?(" by "+reviewerRun.ranBy):"")):"No reviewer review has been run yet."}</div>
                     </div>
-                    <button disabled={valRunning} onClick={runReviewerReview} style={{padding:"8px 16px",borderRadius:8,border:"none",background:valRunning?"#b9b2e0":"#4D3FA0",color:"#fff",fontSize:12,fontWeight:700,cursor:valRunning?"default":"pointer"}}>{valRunning?(valProgress||"Working…"):(reviewerRun?"↻ Re-run reviewer review":"▶ Run reviewer review")}</button>
+                    <button disabled={valRunning||periodClosed} onClick={runReviewerReview} style={{padding:"8px 16px",borderRadius:8,border:"none",background:(valRunning||periodClosed)?"#b9b2e0":"#4D3FA0",color:"#fff",fontSize:12,fontWeight:700,cursor:(valRunning||periodClosed)?"default":"pointer"}}>{valRunning?(valProgress||"Working…"):(reviewerRun?"↻ Re-run reviewer review":"▶ Run reviewer review")}</button>
                   </div>
                   {reviewerRun && reviewerRun.rows && (()=>{
                     const rConfig=Object.assign({},AL_VALIDATION_DEFAULTS,AL_REVIEWER_DEFAULTS,(getClientData(activeClientId,'validation_config',{})||{}));
@@ -8006,7 +8021,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                             <div style={{fontSize:12,color:"#555",marginTop:2,lineHeight:1.45}}>{r.message}</div>
                             {needsAck && <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:6}}>
                               <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600,color:r.acknowledged?"#16a34a":"#d97706",cursor:"pointer"}}>
-                                <input type="checkbox" checked={!!r.acknowledged} onChange={e=>setReviewerAck(r.ruleNo,{acknowledged:e.target.checked})} />
+                                <input type="checkbox" disabled={periodClosed} checked={!!r.acknowledged} onChange={e=>setReviewerAck(r.ruleNo,{acknowledged:e.target.checked})} />
                                 {r.acknowledged?"✓ Reviewed / accepted":"Mark as reviewed"}
                               </label>
                               <AutoGrowText value={r.note} onChange={e=>setReviewerAck(r.ruleNo,{note:e.target.value})} style={{width:"100%",border:"1px solid #d8d8e2",borderRadius:8,padding:"8px 10px",fontSize:12,color:"#333"}} />
