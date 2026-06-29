@@ -6698,7 +6698,7 @@ td,th{padding:8px 12px;vertical-align:middle}
         {/* Logo + collapse */}
         <div style={{padding:sidebarOpen?"12px 14px":"12px 6px",display:"flex",alignItems:"center",justifyContent:sidebarOpen?"space-between":"center",borderBottom:"1px solid #f0f0f4"}}>
           {sidebarOpen && <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.04em",color:"#4D3FA0",textTransform:"uppercase"}}>Navigation</span>}
-          <button onClick={()=>setSidebarOpen(o=>!o)} title={sidebarOpen?"Collapse":"Expand"} style={{background:"transparent",border:"none",cursor:"pointer",color:"#777777",fontSize:14,padding:"2px 6px",borderRadius:4}}>{sidebarOpen?"‹":"›"}</button>
+          <button onClick={()=>setSidebarOpen(o=>!o)} title={sidebarOpen?"Collapse sidebar":"Expand sidebar"} style={{background:sidebarOpen?"#efecfb":"transparent",border:sidebarOpen?"1px solid #d8d2f0":"none",cursor:"pointer",color:"#4D3FA0",fontSize:15,fontWeight:700,padding:sidebarOpen?"4px 10px":"4px 6px",borderRadius:6,lineHeight:1}}>{sidebarOpen?"‹ Hide":"☰"}</button>
         </div>
 
         {/* Signed-in user card — click to open the user menu (popover
@@ -6780,7 +6780,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {key:"validation", label:"Self-Review",           icon:"✅"},
                 {key:"masterData", label:"Master Data",           icon:"📚"},
                 {key:"settings",   label:"Settings",              icon:"⚙"},
-                {key:"activity",   label:"Activity",              icon:"📊"},
               ];
               return <>
                 {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:"4px 10px 6px"}}>Client</div>}
@@ -6792,7 +6791,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {sidebarOpen && <div onClick={()=>setClientTourOpen(true)} title="Show the workflow walkthrough" style={{padding:"0 10px 10px",fontSize:10,color:"#4D3FA0",cursor:"pointer",fontWeight:600}}>↻ Take a tour</div>}
                 {clientItems.map(n=>{
                   const active = clientDetailTab===n.key;
-                  return <div key={n.key} onClick={()=>{ setClientDetailTab(n.key); setSidebarOpen(false); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                  return <div key={n.key} onClick={()=>{ setClientDetailTab(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
                     <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
                     {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
                     {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
@@ -6815,7 +6814,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:i===0?"4px 10px 6px":"12px 10px 6px"}}>{sec.title}</div>}
                 {sec.items.map(n=>{
                   const active = view===n.key;
-                  return <div key={n.key} onClick={()=>{ setView(n.key); setSidebarOpen(false); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
+                  return <div key={n.key} onClick={()=>{ setView(n.key); }} title={n.label} style={{display:"flex",alignItems:"center",gap:10,padding:sidebarOpen?"8px 10px":"10px 4px",borderRadius:6,cursor:"pointer",background:active?"rgba(77,63,160,0.12)":"transparent",border:active?"1px solid rgba(77,63,160,0.3)":"1px solid transparent",color:active?"#4D3FA0":"#1a1a2e",justifyContent:sidebarOpen?"flex-start":"center",fontSize:12,fontWeight:active?600:500}}>
                     <span style={{fontSize:14,minWidth:18,textAlign:"center"}}>{n.icon}</span>
                     {sidebarOpen && <span style={{flex:1}}>{n.label}</span>}
                     {sidebarOpen && n.count!=null && <span style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:active?"rgba(77,63,160,0.15)":"#f0f0f4",color:active?"#4D3FA0":"#777777",fontFamily:"'IBM Plex Mono',monospace"}}>{n.count}</span>}
@@ -6836,7 +6835,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               {icon:"🧾",tab:"bills",   title:"Bills",          desc:"Upload supplier bills (if any), review vendor / TRN / amounts, then push to Zoho."},
               {icon:"🏦",tab:"projects",title:"Bank Statement", desc:"Upload the bank statement, classify each transaction, then push to Zoho."},
             ].map((s,i)=>(
-              <div key={s.tab} onClick={()=>{ setClientDetailTab(s.tab); setClientTourOpen(false); setSidebarOpen(false); }} style={{display:"flex",gap:14,alignItems:"flex-start",padding:"12px 14px",border:"1px solid #eee",borderRadius:10,marginBottom:10,cursor:"pointer",background:"#fafbff"}}>
+              <div key={s.tab} onClick={()=>{ setClientDetailTab(s.tab); setClientTourOpen(false); }} style={{display:"flex",gap:14,alignItems:"flex-start",padding:"12px 14px",border:"1px solid #eee",borderRadius:10,marginBottom:10,cursor:"pointer",background:"#fafbff"}}>
                 <div style={{width:30,height:30,borderRadius:8,background:"#4D3FA0",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>{i+1}</div>
                 <div style={{flex:1}}>
                   <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>{s.icon} {s.title}</div>
@@ -6851,7 +6850,7 @@ td,th{padding:8px 12px;vertical-align:middle}
               </label>
               <div style={{display:"flex",gap:8}}>
                 <button onClick={()=>setClientTourOpen(false)} style={{background:"#f8f9fc",border:"1px solid #e2e2ea",borderRadius:8,padding:"9px 18px",color:"#555",fontSize:12,fontWeight:600,cursor:"pointer"}}>Skip</button>
-                <button onClick={()=>{ setClientDetailTab("revenue"); setClientTourOpen(false); setSidebarOpen(false); }} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",border:"none",borderRadius:8,padding:"9px 20px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>Start with Revenue →</button>
+                <button onClick={()=>{ setClientDetailTab("revenue"); setClientTourOpen(false); }} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",border:"none",borderRadius:8,padding:"9px 20px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>Start with Revenue →</button>
               </div>
             </div>
           </div>
@@ -7081,12 +7080,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>Bank Accounts</div>
                     <div style={{fontSize:11,color:"#777"}}>Pick the account that this statement belongs to — we'll use its exact Zoho name on every journal we push.</div>
                   </div>
-                  {c.zohoOrgId && <button onClick={async()=>{
-                    setBankAccountsLoading(true); setBankAccountsError("");
-                    try { const banks = await window.zohoFetch('bankAccounts', c.zohoOrgId); setBankAccounts(banks||[]); setClientData(activeClientId,'bank_accounts',banks||[]); }
-                    catch(e){ setBankAccountsError(e.message||String(e)); }
-                    finally { setBankAccountsLoading(false); }
-                  }} disabled={bankAccountsLoading} style={{background:"#ffffff",border:"1.5px solid #4D3FA0",borderRadius:8,padding:"8px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:bankAccountsLoading?"default":"pointer",opacity:bankAccountsLoading?0.6:1}}>{bankAccountsLoading?"Syncing…":"🔄 Sync from Zoho"}</button>}
+                  {/* Bank accounts come from the Zoho import (Sync on Master Data / Settings); no separate sync here. */}
                 </div>
                 {bankAccountsError && <div style={{padding:"8px 12px",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:6,color:"#dc2626",fontSize:11,marginBottom:10}}>{bankAccountsError}</div>}
                 {bankAccounts.length===0 ? (
@@ -8178,10 +8172,6 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <button onClick={()=>openAssignDialog(c.id)} style={{background:"#ffffff",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 12px",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer"}}>👥 Assign Users</button>
                 <button onClick={()=>deleteClient(c.id)} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"6px 12px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>🗑 Delete Client</button>
               </div>}
-            </div>}
-            {clientDetailTab==="activity" && <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18}}>
-              <div style={{fontSize:13,color:"#888888"}}>Activity log will appear here as the client accumulates exports, pushes, and reverts. (Pulled from ExportLog — coming next.)</div>
-              {(()=>{ const cnt = apiCounts && apiCounts[c.id]; if(!cnt) return null; return <div style={{marginTop:14,padding:14,background:"#f8f9fc",borderRadius:8,fontSize:12}}><strong>Zoho API calls:</strong> {cnt.total} total · last action: <code style={{fontFamily:"'IBM Plex Mono',monospace"}}>{cnt.lastKind||"—"}</code>{cnt.lastAt?(" · "+new Date(cnt.lastAt).toLocaleString()):""}</div>; })()}
             </div>}
           </div>;
         })()}
