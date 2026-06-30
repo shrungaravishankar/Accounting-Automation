@@ -1394,12 +1394,14 @@ export const handler = async (event: Event) => {
 
     // Revert a previously-pushed entry. resourceId comes through `payload`
     // (the existing string argument, reused so we don't need a schema bump).
-    if (kind === 'deleteExpense' || kind === 'deleteJournal' || kind === 'deletePayment' || kind === 'deleteBillPayment') {
+    if (kind === 'deleteExpense' || kind === 'deleteJournal' || kind === 'deletePayment' || kind === 'deleteBillPayment' || kind === 'deleteBill' || kind === 'deleteInvoice') {
       const resourceId = (event.arguments?.payload || '').trim();
       if (!resourceId) return JSON.stringify({ error: 'resourceId is required (pass via payload)' });
       const path = kind === 'deleteExpense' ? `expenses/${resourceId}`
         : kind === 'deleteJournal' ? `journals/${resourceId}`
         : kind === 'deleteBillPayment' ? `vendorpayments/${resourceId}`
+        : kind === 'deleteBill' ? `bills/${resourceId}`
+        : kind === 'deleteInvoice' ? `invoices/${resourceId}`
         : `customerpayments/${resourceId}`;
       const j = await zohoDelete(path, accessToken, region, { organization_id: orgId });
       return JSON.stringify({ error: null, success: true, message: j.message || 'Deleted', apiUsage: lastApiUsage });

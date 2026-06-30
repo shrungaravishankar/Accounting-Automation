@@ -7899,7 +7899,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                     <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
                       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                         <thead><tr style={{background:"#f8f9fc"}}>
-                          {["Bill #","Vendor","Date","Total","Pushed","Zoho ID"].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
+                          {["Bill #","Vendor","Date","Total","Pushed","Zoho ID",""].map(h=><th key={h} style={{padding:"10px 14px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}
                         </tr></thead>
                         <tbody>{pushed.map(b=>(
                           <tr key={b.id} style={{borderBottom:"1px solid #f8f9fc"}}>
@@ -7909,6 +7909,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                             <td style={{padding:"10px 14px",color:"#dc2626",fontFamily:"'IBM Plex Mono',monospace",fontWeight:600}}>{b.currency} {Number(b.total||0).toFixed(2)}</td>
                             <td style={{padding:"10px 14px",color:"#777",fontSize:11}}>{b.pushedAt?new Date(b.pushedAt).toLocaleString():'—'}</td>
                             <td style={{padding:"10px 14px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{b.pushedBillId||'—'}</td>
+                            <td style={{padding:"10px 14px"}}><button onClick={async()=>{ if(!b.pushedBillId){ alert('No Zoho bill id on record — cannot revert.'); return; } if(!confirm('Revert bill '+(b.pushedBillNumber||b.pushedBillId)+'?\n\nThis DELETES it from Zoho Books and returns the draft to your Bill OCR queue.')) return; try{ await window.zohoDelete('deleteBill', c.zohoOrgId, b.pushedBillId); updateBillDraft(b.id,{status:'Draft',pushedBillId:null,pushedBillNumber:null,pushedAt:null}); alert('Reverted — the bill was deleted from Zoho and returned to drafts.'); }catch(e){ alert('Revert failed: '+(e.message||e)+'\n\n(A bill that already has payments applied cannot be deleted — remove the payment in Zoho first.)'); } }} style={{background:"#fff",border:"1px solid rgba(220,38,38,0.4)",borderRadius:6,padding:"5px 10px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>↩ Revert</button></td>
                           </tr>
                         ))}</tbody>
                       </table>
