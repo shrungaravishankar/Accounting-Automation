@@ -7097,6 +7097,24 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {isPeriodClosed(valPeriod) && <div style={{marginTop:6,fontSize:11,fontWeight:700,color:"#16a34a",background:"rgba(22,163,74,0.08)",border:"1px solid rgba(22,163,74,0.25)",borderRadius:8,padding:"4px 8px",display:"inline-block"}}>🔒 Period closed</div>}
               </div>
             </div>
+            {/* Per-period status strip — at-a-glance progress for the selected period. */}
+            {(()=>{
+              const a=String(valPeriod).split('-'); let plabel=valPeriod; try{ plabel=new Date(Number(a[0]),Number(a[1])-1,1).toLocaleDateString('en-GB',{month:'short',year:'numeric'}); }catch(_){}
+              const vr=(getClientData(activeClientId,'validation_results',{})||{})[valPeriod];
+              const srStatus = !vr?'Not run':(vr.reviewerSignoff?'Signed off':(vr.status==='submitted'?'Submitted':'Draft'));
+              const srTone = !vr?{bg:'#f3f3f7',fg:'#888'}:(vr.reviewerSignoff?{bg:'rgba(22,163,74,0.12)',fg:'#16a34a'}:(vr.status==='submitted'?{bg:'rgba(22,163,74,0.08)',fg:'#15803d'}:{bg:'rgba(217,119,6,0.12)',fg:'#d97706'}));
+              const stmts=(projectLog[activeClientId]||[]); const bankOk=stmts.some(s=>{ const e=alStatementEndMonth(s.period); return e&&e>=valPeriod; });
+              const closed=isPeriodClosed(valPeriod);
+              const pill=(label,val,tone)=><span style={{fontSize:11,padding:"4px 10px",borderRadius:14,background:tone.bg,color:tone.fg,fontWeight:600,whiteSpace:"nowrap"}}>{label}: {val}</span>;
+              return <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:16}}>
+                <span style={{fontSize:10,fontWeight:700,color:"#999",textTransform:"uppercase",letterSpacing:"0.04em"}}>{plabel} status</span>
+                {pill('💰 Revenue',(ocrQueue||[]).length+' draft(s)',{bg:'#f3f3f7',fg:'#555'})}
+                {pill('🧾 Bills',(billOcrQueue||[]).length+' draft(s)',{bg:'#f3f3f7',fg:'#555'})}
+                {pill('🏦 Bank',bankOk?'✓ classified':'⚠ none for period',bankOk?{bg:'rgba(22,163,74,0.12)',fg:'#16a34a'}:{bg:'rgba(217,119,6,0.12)',fg:'#d97706'})}
+                {pill('✅ Self-Review',srStatus,srTone)}
+                {pill('🔒 Period',closed?'Closed':'Open',closed?{bg:'rgba(22,163,74,0.12)',fg:'#16a34a'}:{bg:'#f3f3f7',fg:'#888'})}
+              </div>;
+            })()}
             {/* Inline tabs removed — the left sidebar now drives client navigation when a client is selected. */}
             {clientDetailTab==="projects" && (<>
               {/* Bank accounts strip — pick a bank to start uploading a statement.
