@@ -6809,6 +6809,7 @@ td,th{padding:8px 12px;vertical-align:middle}
                 {key:"validation", label:"Self-Review",           icon:"✅"},
                 {key:"masterData", label:"Master Data",           icon:"📚"},
                 {key:"settings",   label:"Settings",              icon:"⚙"},
+                {key:"audit",      label:"Audit Log",             icon:"📜"},
               ];
               return <>
                 {sidebarOpen && <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.06em",color:"#aaaaaa",textTransform:"uppercase",padding:"4px 10px 6px"}}>Client</div>}
@@ -8231,6 +8232,31 @@ td,th{padding:8px 12px;vertical-align:middle}
                 <button onClick={()=>deleteClient(c.id)} style={{background:"#ffffff",border:"1px solid rgba(220,38,38,0.3)",borderRadius:6,padding:"6px 12px",color:"#dc2626",fontSize:11,fontWeight:600,cursor:"pointer"}}>🗑 Delete Client</button>
               </div>}
             </div>}
+            {clientDetailTab==="audit" && (()=>{
+              // Real audit log — aggregated from actual events recorded across the
+              // tool: bank-statement exports, bill/invoice pushes, self-review
+              // submit/sign-off, and period close/reopen. Newest first.
+              const ev=[]; const ts=(x)=>{ const n=typeof x==='number'?x:Date.parse(x); return isFinite(n)?n:0; };
+              (projectLog[activeClientId]||[]).forEach(p=>{ if(p.exportedAt) ev.push({t:ts(p.exportedAt),type:'Bank statement',icon:'🏦',detail:(p.bankName||p.name||'statement')+(p.period?(' · '+p.period):'')+(p.txnCount?(' · '+p.txnCount+' txns'):''),who:p.createdByName||p.ownerName||''}); });
+              (billOcrQueue||[]).filter(b=>b.status==='Pushed To Zoho'&&b.pushedAt).forEach(b=>ev.push({t:ts(b.pushedAt),type:'Bill pushed',icon:'🧾',detail:(b.pushedBillNumber||b.billNumber||'')+(b.vendorName?(' · '+b.vendorName):''),who:''}));
+              (ocrQueue||[]).filter(q=>q.status==='Pushed To Zoho'&&q.pushedAt).forEach(q=>ev.push({t:ts(q.pushedAt),type:'Invoice pushed',icon:'💰',detail:(q.zohoInvoiceNumber||q.invoiceNumber||''),who:''}));
+              const vrs=getClientData(activeClientId,'validation_results',{})||{}; Object.keys(vrs).forEach(per=>{ const r=vrs[per]; if(r&&r.submittedAt) ev.push({t:ts(r.submittedAt),type:'Self-review submitted',icon:'✅',detail:per,who:r.ranBy||''}); if(r&&r.reviewerSignoff&&r.reviewerSignoff.at) ev.push({t:ts(r.reviewerSignoff.at),type:'Self-review signed off',icon:'✅',detail:per,who:r.reviewerSignoff.by||''}); });
+              Object.keys(periodStatus||{}).forEach(per=>{ const s=periodStatus[per]; if(s&&s.at) ev.push({t:ts(s.at),type:(s.status==='closed'?'Period closed':'Period reopened'),icon:'🔒',detail:per,who:s.by||''}); });
+              ev.sort((a,b)=>b.t-a.t);
+              return <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,overflow:"hidden"}}>
+                <div style={{padding:"12px 16px",borderBottom:"1px solid #f0f0f4",fontSize:13,fontWeight:700,color:"#1a1a2e"}}>📜 Audit Log <span style={{color:"#888",fontWeight:500,fontSize:11}}>({ev.length} events)</span></div>
+                {ev.length===0 ? <div style={{padding:"30px 20px",textAlign:"center",color:"#999",fontSize:12}}>No recorded activity yet for {c.name}.</div>
+                : <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead><tr style={{background:"#f8f9fc"}}>{["When","Event","Detail","By"].map(h=><th key={h} style={{padding:"9px 14px",textAlign:"left",color:"#888",fontWeight:600,borderBottom:"1px solid #e2e2ea",fontSize:11}}>{h}</th>)}</tr></thead>
+                    <tbody>{ev.map((e,i)=>(<tr key={i} style={{borderBottom:"1px solid #f8f9fc"}}>
+                      <td style={{padding:"9px 14px",color:"#777",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,whiteSpace:"nowrap"}}>{e.t?new Date(e.t).toLocaleString('en-GB'):'—'}</td>
+                      <td style={{padding:"9px 14px",color:"#1a1a2e",fontWeight:600,whiteSpace:"nowrap"}}>{e.icon} {e.type}</td>
+                      <td style={{padding:"9px 14px",color:"#555"}}>{e.detail||'—'}</td>
+                      <td style={{padding:"9px 14px",color:"#777"}}>{e.who||'—'}</td>
+                    </tr>))}</tbody>
+                  </table>}
+              </div>;
+            })()}
           </div>;
         })()}
 
