@@ -4540,6 +4540,12 @@ function App(){
         push('vatrate','VAT rate check','warn','VAT is '+impliedRate.toFixed(1)+'% of subtotal — UAE standard is 5%. Verify the VAT amount.');
     }
 
+    // 4b — Foreign currency needs an exchange rate before push (Zoho books in AED).
+    if(d.currency && d.currency!=='AED'){
+      if(d.fx && Number(d.fx.rate)>0) push('fx','Currency','pass','Foreign currency '+d.currency+' → AED @ '+d.fx.rate+' ('+(d.fx.source||'manual')+').');
+      else push('fx','Currency','warn','Foreign currency '+d.currency+' — fetch or enter an exchange rate before pushing.');
+    }
+
     // 5 — Required for Zoho push
     const lines = d.lineItems || [];
     const linesWithoutAccount = lines.filter(li => !li.accountId).length;
@@ -4847,6 +4853,8 @@ function App(){
         date: d.billDate,
         due_date: d.dueDate || d.billDate,
         currency_code: d.currency || 'AED',
+        // Foreign-currency bill: send the exchange rate so Zoho books it in AED.
+        ...((d.currency && d.currency!=='AED' && d.fx && Number(d.fx.rate)>0)?{exchange_rate:Number(d.fx.rate)}:{}),
         line_items: lines,
         notes: 'Created via AutoLedger Bill OCR · file: '+d.fileName,
       };
@@ -7754,9 +7762,19 @@ td,th{padding:8px 12px;vertical-align:middle}
                             </div>
                             <div>
                               <label style={{fontSize:10,color:"#888"}}>Currency</label>
-                              <select value={d.currency||'AED'} onChange={e=>setField({currency:e.target.value})} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select>
+                              <select value={d.currency||'AED'} onChange={e=>{ const cc=e.target.value; setField({currency:cc}); if(cc&&cc!=='AED'){ const c2=clients.find(x=>x.id===activeClientId); const orgId=c2&&c2.zohoOrgId; if(orgId){ window.zohoFetch('fxRate',orgId,{from:cc,to:'AED',date:d.billDate||new Date().toISOString().slice(0,10)}).then(fx=>{ if(fx&&fx.rate) setField({fx:{rate:fx.rate,source:fx.source||'auto',dateUsed:fx.dateUsed||''}}); }).catch(()=>{}); } } else { setField({fx:null}); } }} style={{width:"100%",padding:"7px 10px",border:"1px solid #e2e2ea",borderRadius:6,fontSize:12,marginTop:3}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select>
                             </div>
                           </div>
+                          {/* Foreign-currency FX rate → AED (auto-fetched; Zoho books the bill in AED). */}
+                          {d.currency && d.currency!=='AED' && <div style={{marginTop:10,padding:"8px 12px",borderRadius:8,background:"rgba(217,119,6,0.06)",border:"1px solid rgba(217,119,6,0.25)",fontSize:11}}>
+                            {(d.fx && Number(d.fx.rate)>0)
+                              ? <span style={{color:"#15803d"}}>FX: 1 {d.currency} = <strong>{d.fx.rate}</strong> AED{d.fx.source?(" · "+d.fx.source):""}{d.fx.dateUsed?(" · "+d.fx.dateUsed):""}</span>
+                              : <span style={{color:"#92400e"}}>Foreign currency <strong>{d.currency}</strong> — fetch an exchange rate before pushing.</span>}
+                            <div style={{display:"flex",gap:6,marginTop:6}}>
+                              <button onClick={async()=>{ const c2=clients.find(x=>x.id===activeClientId); const orgId=c2&&c2.zohoOrgId; if(!orgId){ alert('Connect Zoho first.'); return; } try{ const fx=await window.zohoFetch('fxRate',orgId,{from:d.currency,to:'AED',date:d.billDate||new Date().toISOString().slice(0,10)}); if(fx&&fx.rate) setField({fx:{rate:fx.rate,source:fx.source||'auto',dateUsed:fx.dateUsed||''}}); else alert('Could not fetch rate: '+((fx&&fx.error)||'unavailable')); }catch(e){ alert('FX fetch failed: '+(e.message||e)); } }} style={{background:"#fff",border:"1px solid #4D3FA0",borderRadius:5,padding:"4px 10px",color:"#4D3FA0",fontSize:10,fontWeight:600,cursor:"pointer"}}>↻ Fetch rate</button>
+                              <button onClick={()=>{ const r=prompt("Manual exchange rate (1 "+d.currency+" = ? AED):", (d.fx&&d.fx.rate)||""); if(r&&Number(r)>0) setField({fx:{rate:Number(r),source:'manual override',dateUsed:(d.billDate||new Date().toISOString().slice(0,10))}}); }} style={{background:"#fff",border:"1px solid #e2e2ea",borderRadius:5,padding:"4px 10px",color:"#1a1a2e",fontSize:10,fontWeight:600,cursor:"pointer"}}>✎ Enter rate</button>
+                            </div>
+                          </div>}
 
                           {/* Line items — description from OCR (read-only), user picks account per line */}
                           <div style={{marginTop:6,border:"1px solid #e2e2ea",borderRadius:8,overflow:"hidden"}}>
