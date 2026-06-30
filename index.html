@@ -8977,7 +8977,12 @@ td,th{padding:8px 12px;vertical-align:middle}
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:8,height:8,borderRadius:"50%",background:"linear-gradient(135deg,#6958C2,#8576C8)"}} />
             <span style={{fontSize:14,fontWeight:600,color:"#4D3FA0"}}>{activeClientName}</span>
-            {bankAccount && bankAccount !== "Bank Account" && <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.1)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>{bankAccount}</span>}
+            {(bankAccounts||[]).length>0
+              ? <select value={bankAccount||""} onChange={e=>{ const v=e.target.value; setBankAccount(v); try{localStorage.setItem("autoledger_bank",v);}catch(x){} if(activeClientId) setClientData(activeClientId,"bank",v); }} title="Bank account being classified — switch to classify a different bank" style={{fontSize:11,padding:"4px 10px",borderRadius:6,border:"1px solid rgba(22,163,74,0.4)",background:"rgba(22,163,74,0.06)",color:"#15803d",fontWeight:600,cursor:"pointer",maxWidth:260,outline:"none"}}>
+                  <option value="">— select bank —</option>
+                  {bankAccounts.map(ba=><option key={ba.account_id} value={ba.account_name}>{ba.account_name}</option>)}
+                </select>
+              : (bankAccount && bankAccount !== "Bank Account" && <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.1)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.2)"}}>{bankAccount}</span>)}
             <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(105,88,194,0.15)",color:"#6958C2",border:"1px solid rgba(105,88,194,0.3)"}}>{Object.keys(refDB).length} refs</span>
             {globalRefCount>0&&<span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:"rgba(22,163,74,0.08)",color:"#16a34a",border:"1px solid rgba(22,163,74,0.15)"}}>{globalRefCount} global</span>}
 
@@ -8996,6 +9001,10 @@ td,th{padding:8px 12px;vertical-align:middle}
         {/* ── BANK STATEMENT MODE ── */}
         {appMode==="bank"&&step===1&&(<div style={{display:"flex",flexDirection:"column",gap:24}}>
           <div><h2 style={{fontSize:22,fontWeight:600,marginBottom:4}}>Upload Files</h2><p style={{color:"#888888",fontSize:13}}>Upload your bank statement and Chart of Accounts to begin processing.</p></div>
+          {transactions.length > 0 && <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap",padding:"12px 18px",borderRadius:10,background:"rgba(22,163,74,0.06)",border:"1px solid rgba(22,163,74,0.28)"}}>
+            <div style={{fontSize:12,color:"#15803d",fontWeight:600}}>✓ {transactions.length} transactions parsed{bankAccount&&bankAccount!=="Bank Account"?(" · "+bankAccount):""} — ready to classify.</div>
+            <button onClick={()=>setStep(2)} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#fff",border:"none",borderRadius:8,padding:"10px 30px",fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:"0.02em"}}>Continue to AI Processing →</button>
+          </div>}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
             {/* Bank Statement Upload */}
             <div style={{border:bankFileName?"1px solid rgba(22,163,74,0.3)":"2px dashed #e2e2ea",borderRadius:12,padding:bankFileName?20:40,textAlign:"center",background:bankFileName?"rgba(22,163,74,0.03)":"#f8f9fc",transition:"all 0.2s"}}>
@@ -9209,12 +9218,7 @@ td,th{padding:8px 12px;vertical-align:middle}
             </div>
           </div>}
 
-          {transactions.length > 0 ? (
-            <div style={{textAlign:"center",padding:16}}>
-              <button onClick={()=>setStep(2)} style={{background:"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 40px",fontSize:14,fontWeight:700,cursor:"pointer",letterSpacing:"0.02em"}}>Continue to AI Processing →</button>
-              <div style={{fontSize:11,color:"#777777",marginTop:8}}>{transactions.length} transactions ready for classification</div>
-            </div>
-          ) : (
+          {transactions.length===0 && (
             <div style={{textAlign:"center",padding:16}}>
               <div style={{fontSize:12,color:"#777777",marginBottom:12}}>— or try with sample data —</div>
               <button onClick={loadSampleData} style={{background:"linear-gradient(135deg,#6958C2,#4D3FA0)",color:"#fff",border:"none",borderRadius:8,padding:"10px 28px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Load Sample Bank Statement</button>
@@ -9979,6 +9983,13 @@ td,th{padding:8px 12px;vertical-align:middle}
               <div style={{fontSize:11,color:"#888888"}}>{Math.floor(((journalEntries.journals||[]).length+(journalEntries.revenue||[]).length)/2)} entries</div>
             </div>
           </div>
+          {(()=>{ const others=(bankAccounts||[]).filter(ba=>ba.account_name && ba.account_name!==bankAccount); if(!others.length) return null; return <div style={{maxWidth:600,margin:"0 auto 22px",padding:"14px 18px",background:"rgba(105,88,194,0.05)",border:"1px solid rgba(105,88,194,0.2)",borderRadius:10,textAlign:"left"}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:6}}>Classify another bank?</div>
+            <div style={{fontSize:11,color:"#777",marginBottom:10}}>You just finished <strong>{bankAccount||"this account"}</strong>. {others.length} other bank account(s) are configured for {activeClientName} — start the next one:</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {others.map(ba=><button key={ba.account_id} onClick={()=>{ setBankAccount(ba.account_name); try{localStorage.setItem("autoledger_bank",ba.account_name);}catch(x){} if(activeClientId) setClientData(activeClientId,"bank",ba.account_name); startNewStatement(); }} style={{background:"#fff",border:"1px solid #6958C2",borderRadius:8,padding:"8px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:"pointer"}}>🏦 {ba.account_name} →</button>)}
+            </div>
+          </div>; })()}
           <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:14}}>
             <button onClick={prePushCheck} disabled={pushing} style={{background:pushing?"#cccccc":"linear-gradient(135deg,#16a34a,#15803d)",color:"#ffffff",border:"none",borderRadius:8,padding:"12px 28px",fontSize:13,fontWeight:700,cursor:pushing?"default":"pointer",boxShadow:"0 4px 14px rgba(22,163,74,0.3)"}}>⚡ {pushing?"Posting…":"Post to Zoho Books"}</button>
             {(()=>{
