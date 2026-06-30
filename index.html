@@ -2358,6 +2358,17 @@ function alPrevMonths(period, n){
   for(let i=1;i<=n;i++){ let mm=m-i, yy=y; while(mm<=0){ mm+=12; yy-=1; } out.push(yy+'-'+String(mm).padStart(2,'0')); }
   return out;
 }
+// Parse a saved statement's period string ("01-02-2026 to 28-02-2026" or
+// "2026-02 …") and return the END month as YYYY-MM (for Rule 27 coverage).
+function alStatementEndMonth(periodStr){
+  try{
+    const parts=String(periodStr||'').split(/\bto\b/i);
+    const end=(parts[1]||parts[0]||'').trim();
+    let d=end.match(/(\d{1,2})-(\d{1,2})-(\d{4})/); if(d) return d[3]+'-'+String(d[2]).padStart(2,'0');
+    d=end.match(/(\d{4})-(\d{1,2})/); if(d) return d[1]+'-'+String(d[2]).padStart(2,'0');
+  }catch(_){}
+  return null;
+}
 function alMonthBounds(period){
   const parts = String(period||'').split('-'); const y=Number(parts[0]), m=Number(parts[1]);
   const last=new Date(y, m, 0).getDate();
@@ -2626,6 +2637,16 @@ const AL_VALIDATION_RULES = [
       const hits=alInMonth(ctx.zoho.expenses,ctx.period).filter(e=>Number(e.amount||0)>ctx.config.fixedAssetThreshold && kw.some(k=>String(e.description||'').toLowerCase().includes(k)));
       if(hits.length) return {status:'warn', message:hits.length+' expense(s) look like multi-period prepayments fully expensed — consider prepaid treatment: '+hits.slice(0,5).map(e=>(e.description||'?')+' '+alFmtAED(e.amount)).join('; ')+(hits.length>5?' …':'')+'.'};
       return {status:'pass', message:'No likely-prepaid expenses fully expensed.'};
+    }},
+  // 27 — Bank statement coverage for the selected period
+  { ruleNo:27, title:'Bank statement coverage', run:(ctx)=>{
+      const stmts=(ctx.local && ctx.local.statements)||[];
+      if(!stmts.length) return {status:'fail', message:'No bank statement has been imported/classified in the tool. Import and classify the statement for '+ctx.period+' before review.'};
+      const ends=stmts.map(s=>alStatementEndMonth(s.period)).filter(Boolean).sort();
+      const latest=ends[ends.length-1]||null;
+      const covers=ends.some(e=>e>=ctx.period);
+      if(!covers) return {status:'fail', message:'Bank statements imported only up to '+(latest||'—')+'. The selected period '+ctx.period+' is not yet covered — import & classify this period’s statement.'};
+      return {status:'pass', message:'Bank statement classified covering '+ctx.period+' (latest reaches '+(latest||ctx.period)+').'};
     }}
 ];
 
@@ -4578,7 +4599,7 @@ function App(){
       });
 
       setValProgress("Running validation rules…");
-      const ctx={ period:valPeriod, monthBounds:bounds, config, zoho, dataAvailable, local:{importedAccounts:[],statementClosing:[]} };
+      const ctx={ period:valPeriod, monthBounds:bounds, config, zoho, dataAvailable, local:{importedAccounts:[],statementClosing:[],statements:(projectLog[activeClientId]||[])} };
       const rows=alRunValidation(ctx);
       const score=alValidationScore(rows);
       // Preserve reasons already typed for the same rule numbers.
@@ -4587,7 +4608,7 @@ function App(){
       saveValidationRun(run);
     }catch(e){ setValError((e&&e.message)||String(e)); }
     finally{ setValRunning(false); setValProgress(""); }
-  },[activeClientId,clients,valPeriod,vendors,customers,validationRun,saveValidationRun]);
+  },[activeClientId,clients,valPeriod,vendors,customers,validationRun,saveValidationRun,projectLog]);
 
   // Patch a single rule's reason (executor) and persist (debounced via setClientData).
   const setValidationReason=useCallback((ruleNo,reason)=>{
@@ -7909,28 +7930,15 @@ td,th{padding:8px 12px;vertical-align:middle}
                   </div>
                 </div>
 
-                {/* Starting Configuration — set by the executor (user) */}
-                {<div style={{border:"1px solid rgba(105,88,194,0.22)",borderRadius:12,padding:"14px 18px",marginBottom:16,background:"rgba(105,88,194,0.04)"}}>
-                  <div style={{fontSize:13,fontWeight:700,color:"#4D3FA0",marginBottom:10}}>⚙ Starting Configuration <span style={{fontSize:10,fontWeight:600,color:"#999"}}>(set by user)</span></div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:16}}>
-                    <div>
-                      <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>1 · Bank accounts</div>
-                      <div style={{fontSize:11,color:"#777",marginBottom:6}}>{(bankCfg||[]).length} configured. Synced from Zoho on the Bank Statement tab.</div>
-                      <button onClick={async()=>{ const c2=clients.find(x=>x.id===activeClientId); const orgId=c2&&c2.zohoOrgId; if(!orgId){ alert('Connect Zoho first.'); return;} try{ const accts=await window.zohoFetch('bankAccounts',orgId); writeCfg('bank_accounts',(accts||[]).map(a=>({account_name:a.account_name||a.name,account_id:a.account_id}))); alert('Fetched '+(accts||[]).length+' bank account(s).'); }catch(e){ alert('Could not fetch: '+(e.message||e)); } }} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #6958C2",background:"#6958C2",color:"#fff",fontSize:11,fontWeight:600,cursor:"pointer"}}>↻ Fetch bank accounts</button>
-                    </div>
-                    <div>
-                      <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>2 · Supply types</div>
-                      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                        {SUPPLY_OPTS.map(opt=>{ const on=supplyTypes.some(s=>String(s).toLowerCase()===opt.toLowerCase()); return <span key={opt} onClick={()=>toggleSupply(opt)} style={{cursor:"pointer",fontSize:11,fontWeight:600,padding:"4px 10px",borderRadius:14,border:"1px solid "+(on?"#4D3FA0":"#d8d8e2"),background:on?"rgba(105,88,194,0.12)":"#fff",color:on?"#4D3FA0":"#888"}}>{on?"✓ ":""}{opt}</span>; })}
-                      </div>
-                    </div>
-                    <div>
-                      <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:6}}>3 · VAT registration</div>
-                      <div style={{display:"flex",gap:6}}>
-                        {['yes','no'].map(v=><span key={v} onClick={()=>writeCfg('vat_registered',v)} style={{cursor:"pointer",fontSize:11,fontWeight:600,padding:"4px 14px",borderRadius:14,border:"1px solid "+(vatReg===v?"#4D3FA0":"#d8d8e2"),background:vatReg===v?"rgba(105,88,194,0.12)":"#fff",color:vatReg===v?"#4D3FA0":"#888"}}>{v==='yes'?'Registered':'Not registered'}</span>)}
-                      </div>
-                    </div>
+                {/* Starting Configuration — read-only summary; edit in Settings. */}
+                {<div style={{border:"1px solid rgba(105,88,194,0.22)",borderRadius:12,padding:"12px 16px",marginBottom:16,background:"rgba(105,88,194,0.04)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                  <div style={{display:"flex",gap:18,flexWrap:"wrap",fontSize:11,color:"#555",alignItems:"center"}}>
+                    <strong style={{color:"#4D3FA0",fontSize:12}}>⚙ Configuration</strong>
+                    <span><strong>{(bankCfg||[]).length}</strong> bank account(s)</span>
+                    <span>Supplies: <strong>{(supplyTypes&&supplyTypes.length)?supplyTypes.join(', '):'— none —'}</strong></span>
+                    <span>VAT: <strong>{vatReg==='yes'?'Registered':'Not registered'}</strong></span>
                   </div>
+                  <button onClick={()=>setClientDetailTab('settings')} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #6958C2",background:"#fff",color:"#4D3FA0",fontSize:11,fontWeight:600,cursor:"pointer"}}>Edit in Settings →</button>
                 </div>}
 
                 {/* Run / status bar */}
@@ -8169,6 +8177,13 @@ td,th{padding:8px 12px;vertical-align:middle}
                       {opt.label}
                     </label>;
                   })}
+                </div>
+              </div>
+              {/* VAT registration (moved here from the Self-Review Starting Configuration) */}
+              <div style={{padding:14,background:"rgba(8,145,178,0.05)",border:"1px solid rgba(8,145,178,0.2)",borderRadius:8}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#0891b2",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:8}}>VAT registration</div>
+                <div style={{display:"flex",gap:8}}>
+                  {[{v:'yes',l:'Registered'},{v:'no',l:'Not registered'}].map(o=>{ const on=getClientData(c.id,'vat_registered','no')===o.v; return <span key={o.v} onClick={()=>{ setClientData(c.id,'vat_registered',o.v); setValCfgTick(t=>t+1); }} style={{cursor:"pointer",fontSize:12,fontWeight:on?700:500,padding:"7px 16px",borderRadius:8,border:"1px solid "+(on?"#0891b2":"#e2e2ea"),background:on?"rgba(8,145,178,0.1)":"#fff",color:on?"#0891b2":"#555"}}>{o.l}</span>; })}
                 </div>
               </div>
               <div><div style={{fontSize:10,color:"#888888",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>Zoho organization</div><div style={{fontSize:13,color:"#1a1a2e"}}>{c.zohoOrgId||<span style={{color:"#999999"}}>Not linked</span>}</div></div>
