@@ -1052,6 +1052,33 @@ window.zohoCreateVendor = async (organizationId, data) => {
   return { id: d.id || null, name: d.name || data.contact_name, raw: d.raw || null };
 };
 
+// Case-insensitive matcher for a bill's vendor against the synced Zoho
+// vendor-name list. Returns the EXACT Zoho vendor name to book against, or
+// '' when the vendor has no counterpart in Zoho yet (→ must be created first).
+// Order: exact (case-insensitive) → one contains the other (partial) → strong
+// token overlap (ignoring entity-type stop words like "L L C" / "FZE").
+window.alMatchVendorName = (name, vendorList) => {
+  const raw = (name||'').trim();
+  if(!raw || !Array.isArray(vendorList) || !vendorList.length) return '';
+  const lc = raw.toLowerCase();
+  let hit = vendorList.find(v => (v||'').trim().toLowerCase() === lc);
+  if(hit) return hit;
+  hit = vendorList.find(v => { const b=(v||'').trim().toLowerCase(); return b && (b.includes(lc) || lc.includes(b)); });
+  if(hit) return hit;
+  const STOP = new Set(['llc','l.l.c','fze','fzc','fzco','sole','proprietorship','establishment','est','company','co','trading','general','the','and','for','of']);
+  const toks = s => (s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w=>w.length>2 && !STOP.has(w));
+  const a = new Set(toks(raw));
+  if(!a.size) return '';
+  let best='', bestScore=0;
+  for(const v of vendorList){
+    const b = toks(v); if(!b.length) continue;
+    const inter = b.filter(w=>a.has(w)).length;
+    const score = inter / Math.max(a.size, b.length);
+    if(inter>=1 && score>bestScore){ bestScore=score; best=v; }
+  }
+  return bestScore>=0.5 ? best : '';
+};
+
 // Create a bill in Zoho Books. Returns { id, bill_number, raw }.
 window.zohoCreateBill = async (organizationId, payload) => {
   window.__alIncrementApiCount && window.__alIncrementApiCount('createBill');
@@ -3401,6 +3428,7 @@ function App(){
   const[billOcrSub,setBillOcrSub]=useState("ocr"); // 'ocr' | 'bills' | 'payments'
   const[billOcrPushing,setBillOcrPushing]=useState(false);
   const[billVendorCreating,setBillVendorCreating]=useState(false);
+  const[billVendorEdits,setBillVendorEdits]=useState({}); // TRN/currency overrides for the "missing vendors" create panel, keyed by lowercase name
   const[bankAccount,setBankAccount]=useState("Bank Account");
   // Types of supplies the client makes for sales. Drives downstream VAT
   // assumptions (which zero-rated / exempt branches are even allowed).
@@ -4492,6 +4520,14 @@ function App(){
     else if(!d.vendorName) push('trn','Vendor TRN','warn','TRN present but vendor name missing.');
     else push('trn','Vendor TRN','pass','TRN '+trn+' on vendor '+d.vendorName+'. Cross-check against Zoho Vendor register happens at push time.');
 
+    // 1b — Vendor must exist in the Zoho vendor register. Matched at upload
+    // (case-insensitive, partial); unmatched vendors are flagged so the user
+    // can bulk-create them in the Vendor check panel before pushing.
+    if(d.vendorName){
+      if(d.vendorId || d.vendorMatched) push('vendor','Vendor register','pass','Matched to Zoho vendor "'+d.vendorName+'".');
+      else push('vendor','Vendor register','warn','"'+d.vendorName+'" is not in Zoho yet — create it in the Vendor check panel above (else it will be auto-created on push).');
+    }
+
     // 2 — Bill To matches client legal name
     if(!legalName) push('billto','Bill To','warn','Client legal name not synced from Zoho — cannot verify Bill To.');
     else if(!billTo) push('billto','Bill To','fail','Bill To address could not be read from the document.');
@@ -4684,6 +4720,10 @@ function App(){
       // (full or partial / token overlap), normalize it to the exact Zoho name
       // — that is what gets pushed and what the validator checks against.
       const canonicalClient = (getClientData(activeClientId,'legal_name','') || activeClientName || '').trim();
+      // Synced Zoho vendor list + name→id map, for case-insensitive matching so
+      // a bill whose vendor already exists in Zoho books against that vendor.
+      const vendorList = vendors||[];
+      const vendorIdsMap = getClientData(activeClientId,'vendorIds',{})||{};
       const STOP = new Set(['llc','l.l.c','fze','fzc','fzco','sole','proprietorship','establishment','est','company','co','trading','general','the','and','for','of']);
       const tok = (s)=> (s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\s+/).filter(w=>w.length>2 && !STOP.has(w));
       const clientTokens = new Set(tok(canonicalClient));
@@ -4741,9 +4781,14 @@ function App(){
         const printedTotal    = Number((ocr && (ocr.printed_total!=null?ocr.printed_total:ocr.total)) || 0);
         const printedVat      = Number((ocr && (ocr.printed_tax!=null?ocr.printed_tax:ocr.tax)) || 0);
         const computedSubtotal = round2(lineItems.reduce((s,li)=>s+(Number(li.amount)||0),0));
+        // VAT is applied ONLY when the bill actually shows it — from the OCR's
+        // detected rate, or a printed VAT amount. There is NO default 5%: a bill
+        // with no VAT line is booked at 0. We must fetch only what is on the
+        // document, never invent input VAT the supplier did not charge.
         let vatPct = Number((ocr && ocr.vat_percent) || 0);
-        if(!vatPct) vatPct = (printedSubtotal>0 && printedVat>0) ? Math.round((printedVat/printedSubtotal)*100) : 5;
-        if(Math.abs(vatPct-5)<=1) vatPct = 5; if(Math.abs(vatPct)<=0.5) vatPct = 0;
+        if(!vatPct && printedSubtotal>0 && printedVat>0) vatPct = Math.round((printedVat/printedSubtotal)*100);
+        if(Math.abs(vatPct-5)<=1) vatPct = 5;
+        if(Math.abs(vatPct)<=0.5) vatPct = 0;
         const calcSubtotal = computedSubtotal>0 ? computedSubtotal : printedSubtotal;
         const calcVat   = round2(calcSubtotal*(vatPct/100));
         const calcTotal = round2(calcSubtotal+calcVat);
@@ -4774,12 +4819,18 @@ function App(){
           ocrError: ocr && ocr.error ? String(ocr.error) : '',
           ocrRaw: ocr || null,  // full Textract payload — useful for debugging
         };
+        // Case-insensitive match against the synced Zoho vendors. On a hit,
+        // normalize the vendor name to the exact Zoho name and pin its id so
+        // the bill books against the existing vendor (no duplicate created).
+        const vMatch = window.alMatchVendorName(draft.vendorName, vendorList);
+        if(vMatch){ draft.vendorName = vMatch; draft.vendorId = vendorIdsMap[vMatch] || ''; draft.vendorMatched = true; }
+        else { draft.vendorMatched = false; }
         draft.validations = runBillValidators(draft);
         drafts.push(draft);
       }
       setBillOcrQueue(prev=>{ const next=[...drafts, ...prev]; persistBillOcr(next); return next; });
     } finally { setBillOcrUploading(false); }
-  },[runBillValidators,persistBillOcr,activeClientId,activeClientName]);
+  },[runBillValidators,persistBillOcr,activeClientId,activeClientName,vendors]);
 
   // Push one bill draft to Zoho. Resolves vendor (searchVendor →
   // createVendor if needed), then POSTs createBill. On success the draft
@@ -4883,6 +4934,72 @@ function App(){
     alert(msg);
     setBillOcrSelected(new Set());
   },[pushBillToZoho]);
+
+  // Re-match every non-pushed draft against the current synced vendor list.
+  const rematchDrafts = useCallback((vendorList, idMap)=>{
+    setBillOcrQueue(prev=>{
+      const next = prev.map(d=>{
+        if(d.status==='Pushed To Zoho') return d;
+        const m = window.alMatchVendorName(d.vendorName, vendorList);
+        const nd = m
+          ? {...d, vendorName:m, vendorId:(idMap&&idMap[m])||d.vendorId||'', vendorMatched:true}
+          : {...d, vendorMatched:false};
+        nd.validations = runBillValidators(nd);
+        return nd;
+      });
+      persistBillOcr(next);
+      return next;
+    });
+  },[runBillValidators,persistBillOcr]);
+
+  // Bulk-create the vendors that appear on bills but aren't yet in Zoho, then
+  // re-match the drafts so they book against the newly-created vendor ids.
+  // `list` = [{name, trn, currency}].
+  const createMissingVendors = useCallback(async (list)=>{
+    const c = clients.find(x=>x.id===activeClientId);
+    const orgId = c && c.zohoOrgId;
+    if(!orgId){ alert('Client is not linked to a Zoho organization.'); return; }
+    const items = (list||[]).filter(v=>v && (v.name||'').trim());
+    if(!items.length){ alert('No vendors to create.'); return; }
+    setBillVendorCreating(true);
+    const newIds = {}; const created = []; const failed = [];
+    for(const v of items){
+      try {
+        // Guard against races / near-duplicates: search first, reuse a hit.
+        const s = await window.zohoSearchVendor(orgId, v.name);
+        const hit = (s.matches||[]).find(m=>(m.contact_name||'').toLowerCase()===v.name.trim().toLowerCase()) || null;
+        let id, nm;
+        if(hit){ id = hit.contact_id; nm = hit.contact_name; }
+        else { const r = await window.zohoCreateVendor(orgId,{ contact_name:v.name.trim(), trn:(v.trn||'').replace(/\D/g,'').slice(0,15), country_code:'AE', currency_code:v.currency||'AED' }); id = r.id; nm = r.name || v.name.trim(); }
+        if(id){ newIds[nm] = id; created.push(nm); }
+      } catch(e){ failed.push(v.name+' — '+(e.message||String(e))); }
+    }
+    const idMap = {...(getClientData(activeClientId,'vendorIds',{})||{}), ...newIds};
+    setClientData(activeClientId,'vendorIds',idMap);
+    const nextVendors = Array.from(new Set([...(vendors||[]), ...Object.keys(newIds)])).sort();
+    setVendors(nextVendors); setClientData(activeClientId,'vendors',nextVendors);
+    rematchDrafts(nextVendors, idMap);
+    setBillVendorEdits({});
+    setBillVendorCreating(false);
+    alert('Vendors created in Zoho: '+created.length+' of '+items.length+'.'+(failed.length?('\n\nFailed:\n'+failed.map(f=>'• '+f).join('\n')):''));
+  },[clients,activeClientId,vendors,rematchDrafts]);
+
+  // Pull a fresh vendor list from Zoho and re-match the drafts against it.
+  const refreshVendorList = useCallback(async ()=>{
+    const c = clients.find(x=>x.id===activeClientId);
+    const orgId = c && c.zohoOrgId;
+    if(!orgId){ alert('Client is not linked to a Zoho organization.'); return; }
+    setBillVendorCreating(true);
+    try {
+      const vs = await window.zohoFetch('vendors', orgId);
+      const list = vs||[];
+      setVendors(list); setClientData(activeClientId,'vendors',list);
+      if(vs && vs._idByName) setClientData(activeClientId,'vendorIds',vs._idByName);
+      const idMap = getClientData(activeClientId,'vendorIds',{})||{};
+      rematchDrafts(list, idMap);
+    } catch(e){ alert('Vendor refresh failed: '+(e.message||String(e))); }
+    finally { setBillVendorCreating(false); }
+  },[clients,activeClientId,rematchDrafts]);
 
   const vendorAdvanceAccounts=useMemo(()=>{
     const coa=chartOfAccounts||[];
@@ -7623,6 +7740,43 @@ td,th{padding:8px 12px;vertical-align:middle}
                     </label>
                     <input id="bill-ocr-input" type="file" accept="application/pdf,image/*" multiple disabled={billOcrUploading} onChange={(e)=>{ const files=Array.from(e.target.files||[]); if(files.length) uploadBillFiles(files); e.target.value=''; }} style={{display:"none"}} />
                   </div>
+
+                  {/* ── Vendor check — match bill vendors to Zoho; bulk-create the missing ones ── */}
+                  {(()=>{
+                    const active = drafts.filter(d=>d.status!=='Pushed To Zoho' && (d.vendorName||'').trim());
+                    if(active.length===0) return null;
+                    const missMap = new Map();
+                    active.forEach(d=>{ if(!(d.vendorId||d.vendorMatched)){ const k=(d.vendorName||'').trim(); const lk=k.toLowerCase(); if(k && !missMap.has(lk)) missMap.set(lk,{name:k,trn:d.vendorTrn||'',currency:d.currency||'AED'}); } });
+                    const missing = Array.from(missMap.values());
+                    const matchedCount = active.length - active.filter(d=>!(d.vendorId||d.vendorMatched)).length;
+                    const editOf = (v)=>{ const e=billVendorEdits[v.name.toLowerCase()]||{}; return { trn: e.trn!=null?e.trn:v.trn, currency: e.currency!=null?e.currency:v.currency }; };
+                    const setEdit = (v,patch)=> setBillVendorEdits(prev=>({...prev,[v.name.toLowerCase()]:{...editOf(v),...patch}}));
+                    return <div style={{background:"#ffffff",border:"1px solid #e2e2ea",borderRadius:10,padding:18,marginBottom:14}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:missing.length?12:0}}>
+                        <div>
+                          <div style={{fontSize:13,fontWeight:700,color:"#1a1a2e"}}>Vendor check</div>
+                          <div style={{fontSize:11,color:"#777",marginTop:2}}>{matchedCount} of {active.length} bill vendor(s) matched to Zoho{missing.length?(" · "+missing.length+" not in Zoho yet"):" · all matched ✓"}.</div>
+                        </div>
+                        <button onClick={refreshVendorList} disabled={billVendorCreating} style={{background:"#fff",border:"1px solid #4D3FA0",borderRadius:6,padding:"6px 14px",color:"#4D3FA0",fontSize:12,fontWeight:600,cursor:billVendorCreating?"default":"pointer"}}>↻ Refresh vendor list from Zoho</button>
+                      </div>
+                      {missing.length>0 && <div>
+                        <div style={{fontSize:11,color:"#a16207",marginBottom:8}}>The following vendors are not created in Zoho. Review the details and create them in bulk — then the bills will book against them.</div>
+                        <div style={{border:"1px solid #f0e6cf",borderRadius:8,overflow:"hidden"}}>
+                          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                            <thead><tr style={{background:"#fffbf0"}}>
+                              {["Vendor name","TRN (optional)","Currency"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:"left",color:"#92400e",fontWeight:600,fontSize:11,borderBottom:"1px solid #f0e6cf"}}>{h}</th>)}
+                            </tr></thead>
+                            <tbody>{missing.map(v=>{ const e=editOf(v); return <tr key={v.name} style={{borderBottom:"1px solid #fdf6e3"}}>
+                              <td style={{padding:"6px 12px",color:"#1a1a2e",fontWeight:500}}>{v.name}</td>
+                              <td style={{padding:"6px 12px"}}><input type="text" value={e.trn} onChange={ev=>setEdit(v,{trn:ev.target.value.replace(/\D/g,'').slice(0,15)})} placeholder="15 digits" style={{width:150,padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}} /></td>
+                              <td style={{padding:"6px 12px"}}><select value={e.currency} onChange={ev=>setEdit(v,{currency:ev.target.value})} style={{padding:"5px 8px",border:"1px solid #e2e2ea",borderRadius:5,fontSize:11}}>{["AED","USD","EUR","GBP","SAR","QAR","OMR","KWD","BHD"].map(cc=><option key={cc}>{cc}</option>)}</select></td>
+                            </tr>; })}</tbody>
+                          </table>
+                        </div>
+                        <button onClick={()=>createMissingVendors(missing.map(v=>({name:v.name,...editOf(v)})))} disabled={billVendorCreating} style={{marginTop:12,background:billVendorCreating?"#cccccc":"linear-gradient(135deg,#0891b2,#0e7490)",border:"none",borderRadius:6,padding:"8px 18px",color:"#fff",fontSize:12,fontWeight:700,cursor:billVendorCreating?"default":"pointer"}}>{billVendorCreating?"Creating…":"＋ Create "+missing.length+" vendor(s) in Zoho"}</button>
+                      </div>}
+                    </div>;
+                  })()}
 
                   {/* Drafts list */}
                   {drafts.length===0 ? (
